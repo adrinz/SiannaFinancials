@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "square18_signals"
+version = "0.1.0"
+description = "Square18 Signals — options pricing, greeks, IV, and strategy recommender"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Square18" }]
+dependencies = [
+    # Pure stdlib for the options math. Numpy is optional / used by future
+    # factor modules only; the core pricing + strategy code has no external
+    # dependencies so it can run in constrained sandboxes.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/square18_signals"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

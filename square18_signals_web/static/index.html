@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0d12" />
+    <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo-mark" aria-hidden="true">SF</div>
+        <div>
+          <div class="brand-title">Sianna Financials</div>
+          <div class="brand-sub">Stocks &amp; options analyzer</div>
+        </div>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button
+          class="tab is-active"
+          data-view="dashboard"
+          role="tab"
+          aria-selected="true"
+        >
+          Dashboard
+        </button>
+        <button class="tab" data-view="detail" role="tab" aria-selected="false">
+          Ticker detail
+        </button>
+        <button class="tab" data-view="search" role="tab" aria-selected="false">
+          Search
+        </button>
+        <button class="tab" data-view="analyst" role="tab" aria-selected="false">
+          Analyst
+        </button>
+      </nav>
+
+      <div class="topbar-meta">
+        <button
+          class="refresh-btn"
+          id="refresh-btn"
+          title="Refresh market data now"
+          aria-label="Refresh data"
+        >
+          <span class="refresh-icon" aria-hidden="true">&#x21bb;</span>
+          <span class="refresh-label">Refresh</span>
+        </button>
+        <div class="clock-wrap">
+          <span class="dot dot-ok" aria-hidden="true"></span>
+          <div class="clock-stack">
+            <span id="est-clock" class="mono clock-time">—</span>
+            <span id="last-scan" class="mono muted clock-sub">—</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="app-root">
+      <!-- Dashboard view -->
+      <section class="view view-dashboard" data-view="dashboard">
+        <!-- Row 1: regime + stat strip -->
+        <div class="regime" id="regime-banner">
+          <div class="regime-left">
+            <div class="regime-label-wrap has-tooltip" tabindex="0">
+              <div class="regime-label" id="regime-label">Loading…</div>
+              <span class="tooltip tooltip-down" role="tooltip">
+                <span class="tt-title">Market regime</span>
+                <span class="tt-body">
+                  A single-label summary of today's tape, blending VIX level,
+                  breadth (% of stocks above their 50-day MA), put/call ratio,
+                  and a composite trend score. Possible labels:
+                  <b>Risk-On</b> &mdash; buyers in control, broad participation.
+                  <b>Risk-Off</b> &mdash; volatility expanding, breadth thin, hedges bid.
+                  <b>Mixed</b> &mdash; indicators disagree; trade smaller size.
+                  The qualifier (<span class="mono">narrow</span> /
+                  <span class="mono">broad</span>) flags how many stocks are
+                  participating in the move.
+                </span>
+                <span class="tt-foot">
+                  The screener uses this to dial position size up or down
+                  across the universe.
+                </span>
+              </span>
+            </div>
+            <div class="regime-pills mono" id="regime-pills">
+              <span class="rp has-tooltip" tabindex="0">
+                VIX <span id="rp-vix">—</span>
+                <span class="rp-chg" id="rp-vix-chg">&nbsp;</span>
+                <span class="tooltip tooltip-down" role="tooltip">
+                  <span class="tt-title">VIX &mdash; 30-day implied volatility</span>
+                  <span class="tt-body">
+                    Expected 1-sigma move in the S&amp;P 500 over the next
+                    month, derived from SPX option prices. Rule of thumb:
+                    <b>&lt; 15</b> calm, <b>15&ndash;20</b> normal,
+                    <b>20&ndash;30</b> elevated, <b>&gt; 30</b> panic. Higher
+                    VIX = wider expected moves and more expensive options.
+                  </span>
+                  <span class="tt-foot">
+                    The % in parentheses is today's change in the VIX itself.
+                  </span>
+                </span>
+              </span>
+
+              <span class="rp-sep">&middot;</span>
+
+              <span class="rp has-tooltip" tabindex="0">
+                breadth <span id="rp-breadth">—</span> above 50d
+                <span class="tooltip tooltip-down" role="tooltip">
+                  <span class="tt-title">Breadth &mdash; % above 50-day MA</span>
+                  <span class="tt-body">
+                    Share of tracked stocks trading above their own 50-day
+                    simple moving average. It's the single cleanest measure
+                    of participation:
+                    <b>&gt; 70%</b> overheated,
+                    <b>50&ndash;70%</b> healthy uptrend,
+                    <b>30&ndash;50%</b> weakening,
+                    <b>&lt; 30%</b> washout territory.
+                  </span>
+                  <span class="tt-foot">
+                    A rally with breadth &lt; 40% is usually carried by a
+                    handful of mega-caps and is fragile.
+                  </span>
+                </span>
+              </span>
+
+              <span class="rp-sep">&middot;</span>
+
+              <span class="rp has-tooltip" tabindex="0">
+                put/call <span id="rp-pc">—</span>
+                <span class="tooltip tooltip-down" role="tooltip">
+                  <span class="tt-title">Put/call ratio</span>
+                  <span class="tt-body">
+                    Total put option volume divided by total call option
+                    volume. A contrarian sentiment gauge:
+                    <b>&lt; 0.70</b> complacent / greedy,
+                    <b>0.70&ndash;1.00</b> balanced,
+                    <b>&gt; 1.00</b> defensive / fearful. Extreme readings in
+                    either direction often precede mean reversion.
+                  </span>
+                  <span class="tt-foot">Source: CBOE equity + index options.</span>
+                </span>
+              </span>
+
+              <span class="rp-sep">&middot;</span>
+
+              <span class="rp has-tooltip" tabindex="0">
+                trend score <span id="rp-trend">—</span>
+                <span class="tooltip tooltip-down" role="tooltip">
+                  <span class="tt-title">Composite trend score</span>
+                  <span class="tt-body">
+                    Our internal market-state score on a <b>&minus;1 to +1</b>
+                    scale, blending SPY's position vs. 20/50/200-day MAs,
+                    slope of the 50-day, sector dispersion, and new-high /
+                    new-low ratio.
+                    <b>&gt; +0.3</b> bullish trend,
+                    <b>&minus;0.3 to +0.3</b> chop,
+                    <b>&lt; &minus;0.3</b> bearish trend.
+                  </span>
+                  <span class="tt-foot">
+                    Drives position sizing: bullish trend &rArr; longs get
+                    full size, shorts get half; bearish &rArr; the reverse.
+                  </span>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-strip" id="stat-strip">
+          <div class="stat has-tooltip" tabindex="0">
+            <div class="stat-value mono" id="stat-universe">—</div>
+            <div class="stat-label">Universe <span class="stat-info" aria-hidden="true">i</span></div>
+            <span class="tooltip tooltip-down" role="tooltip">
+              <span class="tt-title">Universe</span>
+              <span class="tt-body">
+                The total number of tickers the screener scanned for this run.
+                Includes every stock and ETF we pull OHLCV for &mdash; dashboard
+                counts (Longs / Shorts / Hold) always sum to this.
+              </span>
+              <span class="tt-foot">Source: in-memory screener universe (sample set in prototype).</span>
+            </span>
+          </div>
+
+          <div class="stat stat-success has-tooltip" tabindex="0">
+            <div class="stat-value mono" id="stat-longs">—</div>
+            <div class="stat-label">Longs <span class="stat-info" aria-hidden="true">i</span></div>
+            <span class="tooltip tooltip-down" role="tooltip">
+              <span class="tt-title">Longs &mdash; Buy signals</span>
+              <span class="tt-body">
+                Tickers whose composite technical score crosses the bullish
+                threshold (trend + momentum + volume confirmation &ge; 0.25)
+                with positive conviction. These are the setups the screener
+                would long today.
+              </span>
+              <span class="tt-foot">Click the <b>Buy</b> pill below to see them.</span>
+            </span>
+          </div>
+
+          <div class="stat stat-danger has-tooltip" tabindex="0">
+            <div class="stat-value mono" id="stat-shorts">—</div>
+            <div class="stat-label">Shorts <span class="stat-info" aria-hidden="true">i</span></div>
+            <span class="tooltip tooltip-down" role="tooltip">
+              <span class="tt-title">Shorts &mdash; Sell signals</span>
+              <span class="tt-body">
+                Tickers whose composite score is bearish (&le; &minus;0.25)
+                with negative conviction &mdash; downtrend intact, momentum
+                rolling over, and volume confirming. Candidates for long
+                puts or outright shorts.
+              </span>
+              <span class="tt-foot">Click the <b>Sell</b> pill below to see them.</span>
+            </span>
+          </div>
+
+          <div class="stat has-tooltip" tabindex="0">
+            <div class="stat-value mono" id="stat-holds">—</div>
+            <div class="stat-label">Hold / skip <span class="stat-info" aria-hidden="true">i</span></div>
+            <span class="tooltip tooltip-down" role="tooltip">
+              <span class="tt-title">Hold / skip</span>
+              <span class="tt-body">
+                Tickers whose score sits in the neutral zone
+                (&minus;0.25 &lt; score &lt; 0.25) or whose conviction is too
+                low to justify risking capital. The screener explicitly
+                passes on these &mdash; no position today.
+              </span>
+              <span class="tt-foot">"Do nothing" is a valid trade.</span>
+            </span>
+          </div>
+
+          <div class="stat has-tooltip" tabindex="0">
+            <div class="stat-value mono" id="stat-vix">—</div>
+            <div class="stat-label">VIX <span class="stat-info" aria-hidden="true">i</span></div>
+            <span class="tooltip tooltip-down" role="tooltip">
+              <span class="tt-title">VIX &mdash; CBOE Volatility Index</span>
+              <span class="tt-body">
+                Market's 30-day forward expectation of S&amp;P 500 volatility,
+                derived from SPX option prices.
+                Rough rule of thumb:
+                <b>&lt; 15</b> calm,
+                <b>15&ndash;20</b> normal,
+                <b>20&ndash;30</b> elevated,
+                <b>&gt; 30</b> panic. High VIX expands option premiums and
+                widens expected moves.
+              </span>
+              <span class="tt-foot">Also called the "fear gauge."</span>
+            </span>
+          </div>
+
+          <div class="stat has-tooltip" tabindex="0">
+            <div class="stat-value mono" id="stat-breadth">—</div>
+            <div class="stat-label">Breadth up <span class="stat-info" aria-hidden="true">i</span></div>
+            <span class="tooltip tooltip-down" role="tooltip">
+              <span class="tt-title">Breadth up &mdash; % of tickers green today</span>
+              <span class="tt-body">
+                Percentage of the tracked universe trading <b>above</b> their
+                prior close right now. A healthy rally has broad
+                participation (&gt; 60%); a rally led by 2&ndash;3 mega-caps
+                while breadth is &lt; 40% is fragile.
+              </span>
+              <span class="tt-foot">Recomputed on every 5-minute refresh.</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- Row 2: Market pulse (movers + sector heatmap) + News snippet -->
+        <div class="dash-grid dash-grid-2">
+          <div class="card card-movers">
+            <div class="card-header">
+              <span class="card-title">Market pulse &middot; today</span>
+              <span class="card-trail mono" id="pulse-trail">—</span>
+            </div>
+            <div class="movers-row">
+              <div class="movers-col">
+                <div class="movers-col-title pos">Top gainers</div>
+                <ul class="movers-list" id="movers-gainers">
+                  <li class="loading">Loading…</li>
+                </ul>
+              </div>
+              <div class="movers-col">
+                <div class="movers-col-title neg">Top losers</div>
+                <ul class="movers-list" id="movers-losers">
+                  <li class="loading">Loading…</li>
+                </ul>
+              </div>
+            </div>
+            <div class="sector-heat-wrap">
+              <div class="sector-heat-title">Sector heatmap</div>
+              <div class="sector-heat" id="sector-heat">
+                <div class="loading">Loading sectors…</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card card-news">
+            <div class="card-header">
+              <span class="card-title">
+                Market news
+                <span class="pill-badge neutral mono" style="margin-left:8px;">live</span>
+              </span>
+              <span class="card-trail mono" id="news-source">—</span>
+            </div>
+            <ul class="news-list" id="news-list">
+              <li class="loading">Loading headlines…</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Row 3: Options highlights + Crypto snapshot -->
+        <div class="dash-grid dash-grid-2">
+          <div class="card card-options">
+            <div class="card-header">
+              <span class="card-title">
+                Options highlights
+                <span class="muted" style="font-weight:500;">&middot; directional long calls &amp; puts</span>
+              </span>
+              <a class="card-link" data-jump-analyst>See all &rarr;</a>
+            </div>
+            <div class="opts-row">
+              <div class="opts-col">
+                <div class="opts-col-title pos">Top call ideas</div>
+                <div class="opts-list" id="opts-calls">
+                  <div class="loading">Loading…</div>
+                </div>
+              </div>
+              <div class="opts-col">
+                <div class="opts-col-title neg">Top put ideas</div>
+                <div class="opts-list" id="opts-puts">
+                  <div class="loading">Loading…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card card-crypto">
+            <div class="card-header">
+              <span class="card-title">
+                Crypto snapshot
+                <span class="muted" style="font-weight:500;">&middot; last 24h</span>
+              </span>
+              <span class="card-trail mono" id="crypto-source">—</span>
+            </div>
+            <div class="crypto-grid" id="crypto-grid">
+              <div class="loading">Loading crypto…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 4: signals table (kept) -->
+        <div class="section-header">
+          <h2>Today&rsquo;s signals</h2>
+          <div class="filter-pills" role="tablist" aria-label="Signal filter">
+            <button class="pill is-active" data-filter="all">All</button>
+            <button class="pill pill-success" data-filter="buy">Buy</button>
+            <button class="pill pill-danger" data-filter="sell">Sell</button>
+            <button class="pill" data-filter="hold">Hold</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="data-table" id="screen-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Name</th>
+                <th class="num">Price</th>
+                <th class="num">&Delta; today</th>
+                <th>Signal</th>
+                <th class="num">Score</th>
+                <th class="num">Conf.</th>
+                <th class="num">IV rank</th>
+                <th class="num">RSI</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="screen-tbody">
+              <tr><td colspan="10" class="loading">Loading signals…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Ticker detail view -->
+      <section class="view view-detail hidden" data-view="detail">
+        <div class="detail-nav">
+          <button class="btn-ghost" id="back-to-dashboard">&larr; Dashboard</button>
+          <span class="detail-nav-label">Jump to:</span>
+          <div class="chip-row" id="symbol-chips"></div>
+        </div>
+
+        <div class="detail-hero" id="detail-hero">
+          <div class="hero-loading mono">Select a ticker from the dashboard.</div>
+        </div>
+
+        <div class="detail-grid">
+          <div class="card card-lg">
+            <div class="card-header">
+              <span class="card-title">Price · 30 sessions</span>
+              <span class="card-trail mono" id="price-change-trail"></span>
+            </div>
+            <div class="card-body" id="price-chart">
+              <div class="chart-placeholder">—</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Factor contributions</span>
+            </div>
+            <div class="card-body" id="factor-chart">
+              <div class="chart-placeholder">—</div>
+            </div>
+          </div>
+        </div>
+
+        <h2 class="mt">Why this signal</h2>
+        <div class="table-wrap">
+          <table class="data-table" id="factors-table">
+            <thead>
+              <tr>
+                <th>Factor</th>
+                <th class="num">Score</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody id="factors-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="section-header">
+          <h2>Options strategy recommender</h2>
+          <span class="section-sub" id="recommender-context"></span>
+        </div>
+        <div class="strategy-grid" id="strategy-grid"></div>
+
+        <div class="callout callout-warning">
+          <div class="callout-title">Not financial advice</div>
+          Signals shown are illustrative sample data — not live market analysis.
+          In production, strategy metrics flow from live option-chain quotes and
+          must include costs, slippage, and survivorship-bias handling before
+          trust. See <code>square18_signals/README.md</code> for the math.
+        </div>
+      </section>
+
+      <!-- Search view -->
+      <section class="view view-search hidden" data-view="search">
+        <div class="search-hero">
+          <h1 class="search-title">Search any stock</h1>
+          <p class="search-sub">
+            Type a ticker (e.g. <span class="mono">IBM</span>) or a company
+            name (e.g. <span class="mono">Oracle</span>). We fetch live
+            data, run the full technical analyst, and return a
+            Buy / Sell / Hold plan with entry, target, and stop prices.
+          </p>
+          <div class="search-row">
+            <div class="search-input-wrap" role="combobox"
+                 aria-expanded="false" aria-haspopup="listbox">
+              <span class="search-icon" aria-hidden="true">&#x1f50d;</span>
+              <input
+                id="search-input"
+                type="text"
+                class="search-input"
+                placeholder="Ticker or company name…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-autocomplete="list"
+                aria-controls="search-suggest"
+              />
+              <ul
+                id="search-suggest"
+                class="search-suggest hidden"
+                role="listbox"
+              ></ul>
+            </div>
+            <div class="search-tf" role="tablist" aria-label="Timeframe">
+              <button class="pill" data-sf-tf="1h">1H</button>
+              <button class="pill" data-sf-tf="4h">4H</button>
+              <button class="pill is-active" data-sf-tf="daily">Daily</button>
+              <button class="pill" data-sf-tf="weekly">Weekly</button>
+            </div>
+            <button class="btn-primary search-go" id="search-go">Analyze</button>
+          </div>
+          <div class="search-examples muted mono">
+            Try:
+            <button class="chip-ex" data-ex="AAPL">AAPL</button>
+            <button class="chip-ex" data-ex="IBM">IBM</button>
+            <button class="chip-ex" data-ex="Oracle">Oracle</button>
+            <button class="chip-ex" data-ex="F">F</button>
+            <button class="chip-ex" data-ex="Berkshire Hathaway">Berkshire Hathaway</button>
+            <button class="chip-ex" data-ex="UBER">UBER</button>
+          </div>
+        </div>
+
+        <div class="search-result" id="search-result">
+          <div class="callout">
+            <div class="callout-title">Nothing searched yet</div>
+            Enter a ticker or company name above to get a recommendation.
+          </div>
+        </div>
+      </section>
+
+      <!-- Analyst view -->
+      <section class="view view-analyst hidden" data-view="analyst">
+        <div class="analyst-header">
+          <div>
+            <h1 class="analyst-title">Technical Analyst</h1>
+            <div class="analyst-sub">
+              Rule-based technical analysis — price action, volume, 50/200 SMA,
+              RSI, MACD, ATR — composed into a written forecast with an options
+              play. Data source:
+              <span id="analyst-source" class="mono">—</span>.
+              <span id="llm-status-chip" class="llm-chip hidden">
+                <span class="llm-dot"></span>
+                <span class="llm-label">Claude <span id="llm-model" class="mono">—</span></span>
+              </span>
+            </div>
+          </div>
+          <div class="analyst-header-right">
+            <div class="analyst-timeframes" role="tablist" aria-label="Timeframe">
+              <button class="pill" data-tf="1h">1H</button>
+              <button class="pill" data-tf="4h">4H</button>
+              <button class="pill is-active" data-tf="daily">Daily</button>
+              <button class="pill" data-tf="weekly">Weekly</button>
+            </div>
+            <div class="report-download">
+              <button id="download-report" class="btn-report" type="button">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 12 6 6 6-6"/><path d="M5 21h14"/></svg>
+                <span>Signal report</span>
+                <span class="caret" aria-hidden="true">▾</span>
+              </button>
+              <div class="report-menu" role="menu">
+                <a href="#" data-report="md" role="menuitem">Download Markdown (.md)</a>
+                <a href="#" data-report="json" role="menuitem">Download JSON (.json)</a>
+                <a href="#" data-report="txt" role="menuitem">Download plain text (.txt)</a>
+                <a href="#" data-report="view" role="menuitem">View in browser</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="ticker-strip" id="analyst-ticker-strip">
+          <span class="ticker-strip-loading muted">Loading tickers…</span>
+        </div>
+
+        <!-- Claude-powered daily market brief (hidden unless LLM enabled) -->
+        <div class="brief-card hidden" id="brief-card">
+          <div class="brief-card-head">
+            <h3>
+              Daily desk brief
+              <span class="brief-tag">Claude Sonnet 4.5</span>
+            </h3>
+            <button class="btn-ghost" id="brief-refresh" title="Re-generate">
+              Refresh
+            </button>
+          </div>
+          <div class="brief-body" id="brief-body">
+            <span class="muted">Generating today&rsquo;s brief…</span>
+          </div>
+          <div class="brief-foot muted mono">
+            Facts pinned from the structured overview · numbers never invented
+          </div>
+        </div>
+
+        <div class="section-header">
+          <h2>Recommended option strategy — all tickers</h2>
+          <span class="section-sub">
+            Clean directional calls &amp; puts only · click any row for the full report
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="all-recs-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Verdict</th>
+                <th>Contract</th>
+                <th class="num">Strike</th>
+                <th class="num">Expiry</th>
+                <th class="num">Cost / contract</th>
+                <th class="num">Break-even</th>
+                <th class="num">Target</th>
+                <th class="num">Risk / reward</th>
+              </tr>
+            </thead>
+            <tbody id="all-recs-tbody">
+              <tr><td colspan="9" class="loading">Computing all recommendations…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="analyst-layout">
+          <aside class="overview-panel">
+            <div class="overview-panel-head">
+              <h3>Universe verdict</h3>
+              <span class="muted" id="overview-timeframe">daily</span>
+            </div>
+            <div class="overview-list" id="overview-list">
+              <div class="muted" style="padding:10px 12px;">Loading…</div>
+            </div>
+          </aside>
+
+          <div class="analyst-report" id="analyst-report">
+            <div class="callout">
+              <div class="callout-title">Select a ticker</div>
+              Pick any symbol above to generate a full technical report and
+              options play for that timeframe.
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>
+        Sianna Financials &middot; prototype
+        <span class="footer-sep">&middot;</span>
+        <span class="powered-by has-tooltip" tabindex="0" aria-describedby="powered-by-tip">
+          Powered by
+          <span class="powered-name" id="powered-by-name">Claude Sonnet 4.5</span>
+          <span class="tooltip tooltip-up" id="powered-by-tip" role="tooltip">
+            <span class="tt-title" id="pbt-title">Claude layer &mdash; status</span>
+            <span class="tt-body"  id="pbt-body">Checking&hellip;</span>
+            <span class="tt-foot"  id="pbt-foot">
+              The deterministic analysis always runs &mdash; Claude only
+              enriches the narrative, desk brief, and per-ticket Q&amp;A.
+            </span>
+          </span>
+        </span>
+      </span>
+      <span class="mono muted footer-right">
+        <span id="footer-clock">—</span> &middot; auto-refresh every 5 min
+      </span>
+    </footer>
+    <div class="footer-disclaimer-tiny">
+      Not a financial advice, this is for educational research only. Data may be delayed or inaccurate.
+    </div>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

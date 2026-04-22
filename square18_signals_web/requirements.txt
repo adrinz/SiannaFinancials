@@ -1,0 +1,14 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+# Optional: live market data. The app falls back to deterministic synthetic
+# data if yfinance isn't installed or the network is unavailable.
+yfinance>=0.2.40
+# Optional: Claude Sonnet 4.5 for narrative polish, daily market brief, and
+# ticket Q&A. The app still works without this — set ANTHROPIC_API_KEY to
+# enable. See README for prompt design and cost notes.
+anthropic>=0.40.0
+# Optional: browser-level E2E tests (real clicks/typing/navigation).
+# Install Chromium once after pip install:
+#   python -m playwright install chromium
+playwright>=1.46.0
