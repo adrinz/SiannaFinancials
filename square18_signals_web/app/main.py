@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -407,10 +407,54 @@ class ScreenerMoversListOut(BaseModel):
     rows: list[ScreenerMoverOut]
 
 
+class ScreenerMoversSideOut(BaseModel):
+    """Jumps or dips block inside the combined movers response."""
+
+    source: str
+    rows: list[ScreenerMoverOut]
+
+
+class ScreenerMoversPairOut(BaseModel):
+    """Jumps + dips in one round-trip. Use ``?quick=1`` for instant curated (first paint)."""
+
+    timeframe: str
+    jumps: ScreenerMoversSideOut
+    dips: ScreenerMoversSideOut
+
+
 class ScreenerEarningsListOut(BaseModel):
     window_days: int
     source: str  # "sp500" | "curated" | "unavailable"
     rows: list[ScreenerEarningsOut]
+
+
+@app.get(
+    "/api/screener/movers",
+    response_model=ScreenerMoversPairOut,
+    tags=["screener"],
+)
+def screener_movers(
+    timeframe: str = "daily",
+    limit: int = 10,
+    quick: int = Query(0, ge=0, le=1, description="1 = instant curated 19 (first paint)"),
+) -> ScreenerMoversPairOut:
+    """Combined jumps + dips. Set ``quick=1`` for curated only (no S&P 500 yfinance)."""
+    if timeframe not in _ALLOWED_TIMEFRAMES:
+        raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
+    n = max(1, min(limit, 25))
+    if quick == 1:
+        j, d, js, ds = _movers.movers_pair_curated_only(n)
+    else:
+        j, d, js, ds = _movers.movers_pair_with_fallback(n)
+    return ScreenerMoversPairOut(
+        timeframe=timeframe,
+        jumps=ScreenerMoversSideOut(
+            source=js, rows=[ScreenerMoverOut(**m.__dict__) for m in j]
+        ),
+        dips=ScreenerMoversSideOut(
+            source=ds, rows=[ScreenerMoverOut(**m.__dict__) for m in d]
+        ),
+    )
 
 
 @app.get(

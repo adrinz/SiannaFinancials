@@ -2293,13 +2293,16 @@ function prettyModelName(slug) {
 const screenerUI = {
   inFlight: false,
   lastLoadedAt: null,
+  loadSeq: 0,
 };
 
 async function loadScreener() {
   if (screenerUI.inFlight) return;
   screenerUI.inFlight = true;
+  const seq = ++screenerUI.loadSeq;
   const trail = $('#screener-trail');
   const scopePill = $('#screener-scope');
+  const hint = $('#screener-movers-hint');
   const jumpsEl = $('#screener-jumps');
   const dipsEl = $('#screener-dips');
   const earnEl = $('#screener-earnings');
@@ -2307,18 +2310,26 @@ async function loadScreener() {
   const dipsTrail = $('#screener-dips-trail');
   const earnTrail = $('#screener-earnings-trail');
 
+  const setHint = (on) => {
+    if (hint) {
+      if (on) hint.removeAttribute('hidden');
+      else hint.setAttribute('hidden', '');
+    }
+  };
+
   try {
-    const [jumps, dips, earn] = await Promise.all([
-      api('/api/screener/jumps?limit=10'),
-      api('/api/screener/dips?limit=10'),
+    // Phase 1: instant curated movers (tracked universe) + earnings in parallel.
+    const [fastMovers, earn] = await Promise.all([
+      api('/api/screener/movers?quick=1&limit=10'),
       api('/api/screener/earnings?window_days=14&limit=50'),
     ]);
-    renderScreenerMovers(jumpsEl, jumps.rows, 'pos');
-    renderScreenerMovers(dipsEl, dips.rows, 'neg');
+    if (seq !== screenerUI.loadSeq) return;
+    renderScreenerMovers(jumpsEl, fastMovers.jumps.rows, 'pos');
+    renderScreenerMovers(dipsEl, fastMovers.dips.rows, 'neg');
     renderScreenerEarnings(earnEl, earn.rows);
 
-    if (jumpsTrail) jumpsTrail.textContent = sourceLabel(jumps.source, 'top gainers today');
-    if (dipsTrail) dipsTrail.textContent = sourceLabel(dips.source, 'top losers today');
+    if (jumpsTrail) jumpsTrail.textContent = 'top gainers today · quick list';
+    if (dipsTrail) dipsTrail.textContent = 'top losers today · quick list';
     if (earnTrail) {
       earnTrail.textContent = sourceLabel(
         earn.source,
@@ -2326,24 +2337,73 @@ async function loadScreener() {
       );
     }
     if (scopePill) {
-      const overall = pickOverallSource([jumps.source, dips.source, earn.source]);
-      scopePill.textContent =
-        overall === 'sp500'
-          ? 'S&P 500'
-          : overall === 'curated'
-          ? 'Curated 19'
-          : 'Limited';
-      scopePill.classList.toggle('is-fallback', overall !== 'sp500');
+      scopePill.textContent = 'Curated 19';
+      scopePill.classList.add('is-fallback');
     }
+    if (trail) {
+      trail.textContent = 'partial · ' + fmtESTCompact(new Date());
+    }
+    setHint(true);
 
-    screenerUI.lastLoadedAt = new Date();
-    if (trail) trail.textContent = 'updated ' + fmtESTCompact(screenerUI.lastLoadedAt);
+    // Phase 2: full S&P 500 (or curated fallback) — single batched yfinance in backend.
+    try {
+      const fullMovers = await api('/api/screener/movers?limit=10');
+      if (seq !== screenerUI.loadSeq) return;
+      renderScreenerMovers(jumpsEl, fullMovers.jumps.rows, 'pos');
+      renderScreenerMovers(dipsEl, fullMovers.dips.rows, 'neg');
+      if (jumpsTrail) {
+        jumpsTrail.textContent = sourceLabel(
+          fullMovers.jumps.source,
+          'top gainers today'
+        );
+      }
+      if (dipsTrail) {
+        dipsTrail.textContent = sourceLabel(
+          fullMovers.dips.source,
+          'top losers today'
+        );
+      }
+      if (scopePill) {
+        const overall = pickOverallSource([
+          fullMovers.jumps.source,
+          fullMovers.dips.source,
+          earn.source,
+        ]);
+        scopePill.textContent =
+          overall === 'sp500'
+            ? 'S&P 500'
+            : overall === 'curated'
+            ? 'Curated 19'
+            : 'Limited';
+        scopePill.classList.toggle('is-fallback', overall !== 'sp500');
+      }
+      screenerUI.lastLoadedAt = new Date();
+      if (trail) {
+        trail.textContent = 'updated ' + fmtESTCompact(screenerUI.lastLoadedAt);
+      }
+    } catch (e2) {
+      if (seq === screenerUI.loadSeq) {
+        if (trail) {
+          trail.textContent =
+            'partial (S&P 500 list unavailable) · ' +
+            fmtESTCompact(new Date());
+        }
+      }
+    } finally {
+      if (seq === screenerUI.loadSeq) setHint(false);
+    }
   } catch (e) {
-    if (jumpsEl) jumpsEl.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`;
-    if (dipsEl) dipsEl.innerHTML = '';
-    if (earnEl) earnEl.innerHTML = '';
+    if (seq === screenerUI.loadSeq) {
+      if (jumpsEl) {
+        jumpsEl.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`;
+      }
+      if (dipsEl) dipsEl.innerHTML = '';
+      if (earnEl) earnEl.innerHTML = '';
+    }
   } finally {
-    screenerUI.inFlight = false;
+    if (seq === screenerUI.loadSeq) {
+      screenerUI.inFlight = false;
+    }
   }
 }
 

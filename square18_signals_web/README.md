@@ -53,10 +53,15 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
     full analyst pipeline is run for the wider universe).
 - A scope pill in the header reflects the current data source: `S&P 500`
   on the broad path, or `Curated 19` when the broad source is offline.
+- **Two-phase movers:** the UI first loads a **quick** curated list
+  for jumps/dips, then refetches the full S&P 500 view when ready (with
+  a small “Updating to full S&P 500 list…” line while the large batch
+  is in flight), so the tab is never empty for long.
 - Click any row to jump to the full Ticker Detail view.
-- Auto-refreshes alongside the rest of the dashboard. The first cold
-  load can take 30–90 seconds while the broad universe quote fetch
-  warms; subsequent loads are sub-second from cache.
+- Auto-refreshes alongside the rest of the dashboard. The S&P 500
+  yfinance batch can still take 30–90s on a cold server cache; the
+  quick list appears within one round-trip, then the full list when the
+  batch finishes.
 
 **Ticker detail**
 
@@ -122,9 +127,10 @@ python -m pytest tests/test_e2e_app.py tests/test_e2e_ui_playwright.py -q
 | GET    | `/api/regime`                        | market-regime banner + universe counters        |
 | GET    | `/api/screen?filter=…`               | screener rows; `filter` ∈ all/buy/sell/hold     |
 | GET    | `/api/ticker/{symbol}`               | full detail payload + strategy recommendations  |
-| GET    | `/api/screener/jumps?limit=…`        | today's top S&P 500 gainers (broad fetch + curated fallback) |
-| GET    | `/api/screener/dips?limit=…`         | today's top S&P 500 losers (broad fetch + curated fallback)  |
-| GET    | `/api/screener/earnings?window_days=…` | upcoming S&P 500 earnings (Nasdaq calendar + curated fallback) |
+| GET    | `/api/screener/movers?limit=…&quick=…` | jumps + dips in one body; `quick=1` = curated 19 only; `quick=0` = full S&P 500 |
+| GET    | `/api/screener/jumps?limit=…`        | top gainers only (broad + curated fallback)                    |
+| GET    | `/api/screener/dips?limit=…`         | top losers only (broad + curated fallback)                   |
+| GET    | `/api/screener/earnings?window_days=…` | upcoming S&P 500 earnings (Nasdaq + curated fallback)        |
 | GET    | `/api/analyst/tickers`               | analyst universe (symbol/name/sector)           |
 | GET    | `/api/analyst/overview?timeframe=…`  | verdict + recommendation row per ticker         |
 | GET    | `/api/analyst/report/{symbol}`       | full technical report for a ticker              |

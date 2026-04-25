@@ -111,6 +111,10 @@ Dashboard + detail:
 
 Screener tab (universe = S&P 500):
 
+- `GET /api/screener/movers?timeframe=daily&limit=10&quick=0|1` — **jumps +
+  dips in one response**; `quick=1` returns the curated 19 only (no
+  S&P 500 yfinance). The web UI calls this first for first paint, then
+  `quick=0` (or omit) for the full batch.
 - `GET /api/screener/jumps?timeframe=daily&limit=10` — top gainers
   (positive `change_pct`, sorted descending). Response includes
   `source` ∈ {`sp500`, `curated`}.

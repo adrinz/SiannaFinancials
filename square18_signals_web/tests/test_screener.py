@@ -124,6 +124,28 @@ def test_movers_with_fallback_uses_broad_when_available(monkeypatch):
     assert rows[0].symbol == "ZZZZ"
 
 
+def test_movers_pair_with_fallback_uses_one_broad_fetch(monkeypatch):
+    calls = {"n": 0}
+
+    def _track():
+        calls["n"] += 1
+        return [
+            movers_mod.MoverItem(
+                symbol="ABCD", name="A", sector="T", last=1.0, change_pct=2.0,
+            ),
+            movers_mod.MoverItem(
+                symbol="ZETA", name="Z", sector="T", last=1.0, change_pct=-3.0,
+            ),
+        ]
+
+    movers_mod.reset_cache()
+    monkeypatch.setattr(movers_mod, "_fetch_universe_quotes", _track)
+    j, d, js, ds = movers_mod.movers_pair_with_fallback(5)
+    assert calls["n"] == 1
+    assert js == "sp500" and ds == "sp500"
+    assert j[0].symbol == "ABCD" and d[0].symbol == "ZETA"
+
+
 # ---------------------------------------------------------------------------
 # Endpoints — happy path + validation
 # ---------------------------------------------------------------------------
@@ -165,6 +187,42 @@ def test_screener_jumps_validates_timeframe(client: TestClient):
 
 def test_screener_dips_validates_timeframe(client: TestClient):
     r = client.get("/api/screener/dips?timeframe=bogus")
+    assert r.status_code == 400
+
+
+def test_screener_movers_pair_quick_returns_curated_shape(client: TestClient):
+    r = client.get("/api/screener/movers?quick=1&limit=5")
+    assert r.status_code == 200
+    b = r.json()
+    assert b["timeframe"] == "daily"
+    assert b["jumps"]["source"] == "curated" and b["dips"]["source"] == "curated"
+    for row in b["jumps"]["rows"]:
+        assert row["change_pct"] > 0
+    for row in b["dips"]["rows"]:
+        assert row["change_pct"] < 0
+
+
+def test_screener_movers_pair_combined_envelope(client: TestClient, monkeypatch):
+    movers_mod.reset_cache()
+    fake_broad = [
+        movers_mod.MoverItem(
+            symbol="UP", name="Up Co", sector="T", last=10.0, change_pct=5.0
+        ),
+        movers_mod.MoverItem(
+            symbol="DN", name="Down Co", sector="T", last=10.0, change_pct=-4.0
+        ),
+    ]
+    monkeypatch.setattr(movers_mod, "_fetch_universe_quotes", lambda: fake_broad)
+    r = client.get("/api/screener/movers?limit=3")
+    assert r.status_code == 200
+    b = r.json()
+    assert b["jumps"]["source"] == "sp500" and b["dips"]["source"] == "sp500"
+    assert b["jumps"]["rows"][0]["symbol"] == "UP"
+    assert b["dips"]["rows"][0]["symbol"] == "DN"
+
+
+def test_screener_movers_validates_timeframe(client: TestClient):
+    r = client.get("/api/screener/movers?timeframe=nope")
     assert r.status_code == 400
 
 
@@ -334,3 +392,4 @@ def test_index_html_exposes_screener_tab(client: TestClient):
     assert 'id="screener-dips"' in html
     assert 'id="screener-earnings"' in html
     assert 'id="screener-scope"' in html
+    assert 'id="screener-movers-hint"' in html

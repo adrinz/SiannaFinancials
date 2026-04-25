@@ -157,18 +157,26 @@ def _broad_universe_rows() -> list[MoverItem]:
         return rows
 
 
+def _split_broad_to_jumps_dips(
+    all_rows: list[MoverItem], limit: int
+) -> tuple[list[MoverItem], list[MoverItem]]:
+    """One sorted/enriched top-N list per side from a single broad download."""
+    if not all_rows:
+        return [], []
+    jumps = [r for r in all_rows if r.change_pct > 0]
+    jumps.sort(key=lambda r: r.change_pct, reverse=True)
+    dips = [r for r in all_rows if r.change_pct < 0]
+    dips.sort(key=lambda r: r.change_pct)
+    return (
+        _enrich_with_curated_signals(jumps[:limit]),
+        _enrich_with_curated_signals(dips[:limit]),
+    )
+
+
 def broad_movers(side: Literal["jumps", "dips"], limit: int = 10) -> list[MoverItem]:
     """Top broad-universe movers; returns [] when the broad fetch fails."""
-    rows = _broad_universe_rows()
-    if not rows:
-        return []
-    if side == "jumps":
-        candidates = [r for r in rows if r.change_pct > 0]
-        candidates.sort(key=lambda r: r.change_pct, reverse=True)
-    else:
-        candidates = [r for r in rows if r.change_pct < 0]
-        candidates.sort(key=lambda r: r.change_pct)
-    return _enrich_with_curated_signals(candidates[:limit])
+    j, d = _split_broad_to_jumps_dips(_broad_universe_rows(), limit)
+    return j if side == "jumps" else d
 
 
 def _curated_movers(side: Literal["jumps", "dips"], limit: int) -> list[MoverItem]:
@@ -207,6 +215,28 @@ def movers_with_fallback(
     if rows:
         return rows, "sp500"
     return _curated_movers(side, limit), "curated"
+
+
+def movers_pair_curated_only(
+    limit: int = 10,
+) -> tuple[list[MoverItem], list[MoverItem], str, str]:
+    """Curated lists only (fast) — for instant first paint / ``quick=1`` API."""
+    j = _curated_movers("jumps", limit)
+    d = _curated_movers("dips", limit)
+    return j, d, "curated", "curated"
+
+
+def movers_pair_with_fallback(
+    limit: int = 10,
+) -> tuple[list[MoverItem], list[MoverItem], str, str]:
+    """Jumps and dips from **one** broad download when possible, else curated."""
+    all_rows = _broad_universe_rows()
+    if all_rows:
+        j, d = _split_broad_to_jumps_dips(all_rows, limit)
+        return j, d, "sp500", "sp500"
+    j2 = _curated_movers("jumps", limit)
+    d2 = _curated_movers("dips", limit)
+    return j2, d2, "curated", "curated"
 
 
 def reset_cache() -> None:
