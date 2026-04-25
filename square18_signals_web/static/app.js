@@ -4,6 +4,9 @@
 
 'use strict';
 
+// Must match `SCREENER_EARNINGS_WINDOW_DAYS` in `app/analyst/constants.py` (Screener card).
+const SCREENER_EARNINGS_WINDOW_DAYS = 7;
+
 // ---------- Time helpers (all user-facing times are US Eastern) -----------
 
 const EST_TZ = 'America/New_York';
@@ -2321,7 +2324,9 @@ async function loadScreener() {
     // Phase 1: instant curated movers (tracked universe) + earnings in parallel.
     const [fastMovers, earn] = await Promise.all([
       api('/api/screener/movers?quick=1&limit=10'),
-      api('/api/screener/earnings?window_days=7&limit=50'),
+      api(
+        `/api/screener/earnings?window_days=${SCREENER_EARNINGS_WINDOW_DAYS}&limit=50`
+      ),
     ]);
     if (seq !== screenerUI.loadSeq) return;
     renderScreenerMovers(jumpsEl, fastMovers.jumps.rows, 'pos');
@@ -2333,7 +2338,7 @@ async function loadScreener() {
     if (earnTrail) {
       earnTrail.textContent = sourceLabel(
         earn.source,
-        `next ${earn.window_days} days`
+        `next ${SCREENER_EARNINGS_WINDOW_DAYS} days`
       );
     }
     if (scopePill) {
