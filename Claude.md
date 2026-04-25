@@ -16,7 +16,9 @@ Primary product behavior:
 - Ticker detail with factors and options strategy recommendations.
 - Free-form Search view (Buy / Sell / Hold plan for any ticker).
 - Stock Screener tab — daily price jumps, daily price dips, and an
-  upcoming earnings calendar (next 14 days).
+  upcoming earnings calendar (next 14 days). Scope is the **S&P 500**
+  (snapshot at `app/analyst/data/sp500.json`); the curated 19-ticker
+  list is used as a graceful fallback.
 - Analyst views with report generation and optional Claude-powered prose.
 
 ## 2) Project Structure
@@ -31,7 +33,9 @@ Top-level layout:
   - `app/main.py`: FastAPI app + routes
   - `app/services.py`: dashboard/detail service composition
   - `app/analyst/`: analyst pipeline (data, indicators, market, search,
-    report, earnings, llm)
+    report, earnings, movers, universe, llm)
+  - `app/analyst/data/sp500.json`: bundled S&P 500 snapshot used by the
+    Screener tab
   - `static/`: `index.html`, `app.js`, `styles.css`
   - `tests/`: API E2E, Playwright UI E2E, indicators, market news,
     screener tests
@@ -98,14 +102,20 @@ Dashboard + detail:
 - `GET /api/crypto/snapshot`
 - `GET /api/news?limit=...`
 
-Screener tab:
+Screener tab (universe = S&P 500):
 
 - `GET /api/screener/jumps?timeframe=daily&limit=10` — top gainers
-  (positive `change_pct`, sorted descending)
+  (positive `change_pct`, sorted descending). Response includes
+  `source` ∈ {`sp500`, `curated`}.
 - `GET /api/screener/dips?timeframe=daily&limit=10` — top losers
-  (negative `change_pct`, sorted ascending)
-- `GET /api/screener/earnings?window_days=14&limit=25` — companies in
-  the curated universe reporting earnings within the window
+  (negative `change_pct`, sorted ascending). Same `source` field.
+- `GET /api/screener/earnings?window_days=14&limit=50` — S&P 500
+  companies reporting earnings within the window. Response includes
+  `source` ∈ {`sp500`, `curated`, `unavailable`}.
+
+`verdict`, `composite_score`, and `rsi` are populated only for symbols
+that overlap with the curated TICKERS list (i.e., that have a fresh
+analyst pipeline run); otherwise they are `null`.
 
 Search + analyst:
 
@@ -145,16 +155,24 @@ This logic lives in:
 
 Screener / earnings behavior:
 
-- Jumps & dips reuse `overview_rows()` so verdicts stay consistent
-  with the dashboard.
-- Upcoming earnings come from `app/analyst/earnings.py`, which calls
-  `yfinance.Ticker.calendar` (with a `get_earnings_dates` fallback for
-  newer SDKs). Per-symbol failures are swallowed; if `yfinance` itself
-  is unimportable or globally failing, the endpoint returns an empty
-  list rather than 5xx-ing the UI.
-- Results are cached in-process for 30 minutes so the three screener
-  cards don't fan-out a fresh yfinance call per refresh.
+- **Universe**: S&P 500 from `app/analyst/data/sp500.json`. Loaded by
+  `app/analyst/universe.py` with `lru_cache`.
+- **Jumps & dips** (`app/analyst/movers.py`): one batched
+  `yfinance.download(...)` for the full universe → daily % change from
+  the last two closes → sort + slice. Cached in-process for 10
+  minutes. If the broad fetch fails, falls back to `overview_rows()`
+  on the curated 19 tickers and emits `source: "curated"`.
+- **Earnings** (`app/analyst/earnings.py`): walks the next
+  `window_days` and pulls Nasdaq's public calendar
+  (`https://api.nasdaq.com/api/calendar/earnings?date=...`) day-by-day,
+  filtering rows to symbols in the configured universe. Decorates each
+  row with the latest quote from the movers cache. Cached in-process
+  for 30 minutes. If Nasdaq is unreachable, falls back to per-ticker
+  `yfinance.Ticker.calendar` over the curated TICKERS list (`source:
+  "curated"`); when both paths fail, `source: "unavailable"`.
 - The VIX entry is always excluded (it's an index, not a company).
+- The first cold-start broad fetch can take 30–90 seconds for ~503
+  tickers; subsequent calls served from cache are sub-second.
 
 ## 8) Optional LLM Layer
 
@@ -195,6 +213,9 @@ If unset/unavailable:
 - Core app entry: `square18_signals_web/app/main.py`
 - Market/news aggregations: `square18_signals_web/app/analyst/market.py`
 - Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
+- Broad market movers: `square18_signals_web/app/analyst/movers.py`
+- Universe loader: `square18_signals_web/app/analyst/universe.py`
+- S&P 500 snapshot: `square18_signals_web/app/analyst/data/sp500.json`
 - Frontend logic: `square18_signals_web/static/app.js`
 - Frontend layout: `square18_signals_web/static/index.html`
 - Frontend styling: `square18_signals_web/static/styles.css`

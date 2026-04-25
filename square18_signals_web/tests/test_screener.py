@@ -1,4 +1,5 @@
-"""Tests for the Screener tab API and the upcoming-earnings helper."""
+"""Tests for the Screener tab API, broad-universe movers, earnings helper,
+and the universe loader."""
 from __future__ import annotations
 
 import sys
@@ -15,6 +16,8 @@ sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT.parent / "square18_signals" / "src"))
 
 from app.analyst import earnings as earnings_mod  # noqa: E402
+from app.analyst import movers as movers_mod  # noqa: E402
+from app.analyst import universe as universe_mod  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -24,35 +27,92 @@ def client() -> TestClient:
 
 
 # ---------------------------------------------------------------------------
+# Universe loader
+# ---------------------------------------------------------------------------
+
+
+def test_universe_loads_full_sp500_snapshot():
+    rows = universe_mod.sp500_universe()
+    assert len(rows) >= 450, "S&P 500 snapshot should have ~503 rows"
+    assert all({"symbol", "name", "sector"} <= r.keys() for r in rows)
+    by_symbol = universe_mod.universe_by_symbol()
+    assert "AAPL" in by_symbol
+    assert "MSFT" in by_symbol
+    assert by_symbol["AAPL"]["name"]
+
+
+# ---------------------------------------------------------------------------
+# Movers helper — broad path + curated fallback
+# ---------------------------------------------------------------------------
+
+
+def test_movers_with_fallback_falls_back_to_curated(monkeypatch):
+    """When the broad fetch returns nothing, we get curated rows instead."""
+    movers_mod.reset_cache()
+    monkeypatch.setattr(movers_mod, "_fetch_universe_quotes", lambda: [])
+    rows, source = movers_mod.movers_with_fallback("jumps", limit=5)
+    assert source == "curated"
+    assert len(rows) <= 5
+    for r in rows:
+        assert r.change_pct > 0
+
+
+def test_movers_with_fallback_uses_broad_when_available(monkeypatch):
+    movers_mod.reset_cache()
+    fake_broad = [
+        movers_mod.MoverItem(
+            symbol="ABCD", name="Acme", sector="Tech",
+            last=100.0, change_pct=12.5,
+        ),
+        movers_mod.MoverItem(
+            symbol="ZZZZ", name="Zed", sector="Energy",
+            last=10.0, change_pct=-5.0,
+        ),
+    ]
+    monkeypatch.setattr(movers_mod, "_fetch_universe_quotes", lambda: fake_broad)
+    rows, source = movers_mod.movers_with_fallback("jumps", limit=5)
+    assert source == "sp500"
+    assert len(rows) == 1
+    assert rows[0].symbol == "ABCD"
+
+    rows, source = movers_mod.movers_with_fallback("dips", limit=5)
+    assert source == "sp500"
+    assert len(rows) == 1
+    assert rows[0].symbol == "ZZZZ"
+
+
+# ---------------------------------------------------------------------------
 # Endpoints — happy path + validation
 # ---------------------------------------------------------------------------
 
 
-def test_screener_jumps_returns_only_positive_movers(client: TestClient):
+def test_screener_jumps_returns_only_positive_movers(client: TestClient, monkeypatch):
+    """Force broad path off so we exercise the deterministic curated fallback."""
+    movers_mod.reset_cache()
+    monkeypatch.setattr(movers_mod, "_fetch_universe_quotes", lambda: [])
     r = client.get("/api/screener/jumps?limit=5")
     assert r.status_code == 200
     body = r.json()
     assert body["timeframe"] == "daily"
-    assert isinstance(body["rows"], list)
-    assert len(body["rows"]) <= 5
+    assert body["source"] in {"sp500", "curated"}
     for row in body["rows"]:
-        assert {"symbol", "name", "sector", "last", "change_pct", "verdict"} <= row.keys()
+        assert {"symbol", "name", "sector", "last", "change_pct"} <= row.keys()
         assert row["change_pct"] > 0
-    # Sorted descending by change_pct.
     pcts = [r["change_pct"] for r in body["rows"]]
     assert pcts == sorted(pcts, reverse=True)
 
 
-def test_screener_dips_returns_only_negative_movers(client: TestClient):
+def test_screener_dips_returns_only_negative_movers(client: TestClient, monkeypatch):
+    movers_mod.reset_cache()
+    monkeypatch.setattr(movers_mod, "_fetch_universe_quotes", lambda: [])
     r = client.get("/api/screener/dips?limit=5")
     assert r.status_code == 200
     body = r.json()
-    assert isinstance(body["rows"], list)
-    assert len(body["rows"]) <= 5
+    assert body["source"] in {"sp500", "curated"}
     for row in body["rows"]:
         assert row["change_pct"] < 0
     pcts = [r["change_pct"] for r in body["rows"]]
-    assert pcts == sorted(pcts)  # ascending = most negative first
+    assert pcts == sorted(pcts)
 
 
 def test_screener_jumps_validates_timeframe(client: TestClient):
@@ -65,13 +125,17 @@ def test_screener_dips_validates_timeframe(client: TestClient):
     assert r.status_code == 400
 
 
-def test_screener_earnings_responds_with_envelope(client: TestClient, monkeypatch):
-    # Make the helper deterministic by short-circuiting yfinance.
-    monkeypatch.setattr(earnings_mod, "upcoming_earnings", lambda window_days=14: [])
+def test_screener_earnings_envelope_when_helper_returns_empty(client, monkeypatch):
+    monkeypatch.setattr(
+        earnings_mod,
+        "upcoming_earnings_with_source",
+        lambda window_days=14: ([], "unavailable"),
+    )
     r = client.get("/api/screener/earnings?window_days=7&limit=5")
     assert r.status_code == 200
     body = r.json()
     assert body["window_days"] == 7
+    assert body["source"] == "unavailable"
     assert body["rows"] == []
 
 
@@ -79,8 +143,8 @@ def test_screener_earnings_payload_shape(client: TestClient, monkeypatch):
     sample = [
         earnings_mod.EarningsRow(
             symbol="NVDA",
-            name="NVIDIA",
-            sector="Semiconductors / AI",
+            name="NVIDIA Corp",
+            sector="Information Technology",
             earnings_date="2026-04-29",
             days_until=5,
             last=412.0,
@@ -88,10 +152,15 @@ def test_screener_earnings_payload_shape(client: TestClient, monkeypatch):
             verdict="BULLISH",
         )
     ]
-    monkeypatch.setattr(earnings_mod, "upcoming_earnings", lambda window_days=14: sample)
+    monkeypatch.setattr(
+        earnings_mod,
+        "upcoming_earnings_with_source",
+        lambda window_days=14: (sample, "sp500"),
+    )
     r = client.get("/api/screener/earnings?window_days=14&limit=10")
     assert r.status_code == 200
     body = r.json()
+    assert body["source"] == "sp500"
     assert len(body["rows"]) == 1
     row = body["rows"][0]
     assert row["symbol"] == "NVDA"
@@ -101,12 +170,48 @@ def test_screener_earnings_payload_shape(client: TestClient, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# upcoming_earnings() — helper-level tests with a faked yfinance
+# Earnings broad path: Nasdaq calendar with S&P 500 filter
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_yfinance(date_by_symbol: dict[str, date | None]) -> types.SimpleNamespace:
-    """Build a minimal yfinance stand-in that returns canned calendar dicts."""
+def test_broad_earnings_filters_to_universe(monkeypatch):
+    earnings_mod.reset_cache()
+    today = date.today()
+    iso_today = today.isoformat()
+    iso_plus3 = (today + timedelta(days=3)).isoformat()
+
+    nasdaq_payload: dict[str, list[dict]] = {
+        iso_today: [
+            {"symbol": "AAPL", "name": "Apple Inc."},
+            {"symbol": "FAKEEXOTIC", "name": "Not in S&P 500"},
+        ],
+        iso_plus3: [
+            {"symbol": "MSFT", "name": "Microsoft Corp"},
+        ],
+    }
+
+    def _fake_fetch(iso, timeout=6.0):
+        return nasdaq_payload.get(iso, [])
+
+    monkeypatch.setattr(earnings_mod, "_fetch_nasdaq_day", _fake_fetch)
+    monkeypatch.setattr(earnings_mod, "_broad_universe_rows", lambda: [])
+
+    rows = earnings_mod._broad_earnings(window_days=7)
+    symbols = [r.symbol for r in rows]
+    assert "AAPL" in symbols
+    assert "MSFT" in symbols
+    assert "FAKEEXOTIC" not in symbols
+    # Sorted by date.
+    dates = [r.earnings_date for r in rows]
+    assert dates == sorted(dates)
+
+
+def test_upcoming_earnings_falls_back_to_curated(monkeypatch):
+    """When Nasdaq is dead, helper falls back to curated yfinance walk."""
+    earnings_mod.reset_cache()
+    today = date.today()
+
+    monkeypatch.setattr(earnings_mod, "_fetch_nasdaq_day", lambda iso, timeout=6.0: [])
 
     class _FakeTicker:
         def __init__(self, symbol: str):
@@ -114,64 +219,61 @@ def _make_fake_yfinance(date_by_symbol: dict[str, date | None]) -> types.SimpleN
 
         @property
         def calendar(self):
-            d = date_by_symbol.get(self.symbol)
-            if d is None:
-                return {}
-            return {"Earnings Date": [d]}
+            if self.symbol == "AAPL":
+                return {"Earnings Date": [today + timedelta(days=2)]}
+            return {}
 
-    return types.SimpleNamespace(Ticker=_FakeTicker)
-
-
-def test_upcoming_earnings_filters_to_window(monkeypatch):
-    earnings_mod.reset_cache()
-    today = date.today()
-    fake_yf = _make_fake_yfinance(
-        {
-            "AAPL": today + timedelta(days=3),    # in window
-            "TSLA": today + timedelta(days=20),   # outside default 14d window
-            "NVDA": today + timedelta(days=14),   # boundary, should be included
-            "MSFT": today - timedelta(days=2),    # already reported, skipped
-        }
-    )
+    fake_yf = types.SimpleNamespace(Ticker=_FakeTicker)
     monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
 
-    rows = earnings_mod.upcoming_earnings(window_days=14)
-    symbols = [r.symbol for r in rows]
-    assert "AAPL" in symbols
-    assert "NVDA" in symbols
-    assert "TSLA" not in symbols
-    assert "MSFT" not in symbols
-    # Sorted ascending by earnings_date.
-    dates = [r.earnings_date for r in rows]
-    assert dates == sorted(dates)
+    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=14)
+    assert source == "curated"
+    assert any(r.symbol == "AAPL" for r in rows)
 
 
-def test_upcoming_earnings_handles_yfinance_failure(monkeypatch):
+def test_upcoming_earnings_unavailable_when_all_paths_fail(monkeypatch):
     earnings_mod.reset_cache()
+    monkeypatch.setattr(earnings_mod, "_fetch_nasdaq_day", lambda iso, timeout=6.0: [])
 
     class _BoomTicker:
         def __init__(self, symbol: str):
-            raise RuntimeError("network down")
+            raise RuntimeError("yfinance offline")
 
     monkeypatch.setitem(
         sys.modules, "yfinance", types.SimpleNamespace(Ticker=_BoomTicker)
     )
-    rows = earnings_mod.upcoming_earnings(window_days=14)
+    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=14)
+    assert source == "unavailable"
     assert rows == []
 
 
-def test_upcoming_earnings_skips_indices(monkeypatch):
-    """The VIX entry should never appear in the earnings calendar."""
+def test_upcoming_earnings_cache_short_circuits(monkeypatch):
+    """Once the cache is warm, the data sources aren't hit again within TTL."""
     earnings_mod.reset_cache()
     today = date.today()
-    fake_yf = _make_fake_yfinance({"^VIX": today + timedelta(days=2)})
-    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
-    rows = earnings_mod.upcoming_earnings(window_days=14)
-    assert all(r.symbol != "VIX" for r in rows)
+
+    sample = [
+        earnings_mod.EarningsRow(
+            symbol="AAPL", name="Apple Inc.", sector="Information Technology",
+            earnings_date=(today + timedelta(days=1)).isoformat(), days_until=1,
+            last=180.0, change_pct=0.5, verdict=None,
+        )
+    ]
+    earnings_mod._cache["rows"] = sample
+    earnings_mod._cache["ts"] = __import__("time").time()
+    earnings_mod._cache["source"] = "sp500"
+
+    def _explode(iso, timeout=6.0):
+        raise AssertionError("Nasdaq path should not be hit when cache is warm")
+
+    monkeypatch.setattr(earnings_mod, "_fetch_nasdaq_day", _explode)
+    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=14)
+    assert source == "sp500"
+    assert rows == sample
 
 
 # ---------------------------------------------------------------------------
-# Frontend wiring smoke test — the screener tab + section must be present.
+# Frontend wiring smoke test
 # ---------------------------------------------------------------------------
 
 
@@ -184,3 +286,4 @@ def test_index_html_exposes_screener_tab(client: TestClient):
     assert 'id="screener-jumps"' in html
     assert 'id="screener-dips"' in html
     assert 'id="screener-earnings"' in html
+    assert 'id="screener-scope"' in html

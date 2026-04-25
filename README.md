@@ -10,7 +10,7 @@ Sianna Financials is a stocks and options analyzer workspace with:
 - `square18_signals/`  
   Core pricing, IV, strategy payoff, and strategy recommendation library.
 - `square18_signals_web/`  
-  Web application (API + UI) that serves dashboard, ticker detail, search, screener, and analyst views.
+  Web application (API + UI) that serves dashboard, ticker detail, search, screener (S&P 500 jumps / dips / earnings), and analyst views.
 - `Claude.md`  
   Full assistant-oriented project context and runbook.
 
@@ -53,5 +53,6 @@ python3 -m pytest square18_signals_web/tests/test_screener.py -q
 - Python 3.10+ recommended.
 - `square18_signals_web` imports the sibling `square18_signals/src` path at runtime.
 - News feed has multi-level fallback logic (yfinance -> RSS -> internal snapshot).
+- Stock screener scans the S&P 500 (snapshot at `square18_signals_web/app/analyst/data/sp500.json`) with batched `yfinance` for movers and the Nasdaq calendar API for earnings; falls back to the curated 19-ticker list when external sources are offline.
 - See `Claude.md` for deeper architecture, endpoint, and operational details.
 

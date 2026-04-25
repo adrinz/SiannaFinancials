@@ -47,6 +47,9 @@ python3 -m pytest square18_signals_web/tests/test_e2e_ui_playwright.py -q
 - API entry: `square18_signals_web/app/main.py`
 - Market/news aggregation: `square18_signals_web/app/analyst/market.py`
 - Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
+- Broad market movers: `square18_signals_web/app/analyst/movers.py`
+- Universe loader (S&P 500 snapshot): `square18_signals_web/app/analyst/universe.py`
+- S&P 500 snapshot data: `square18_signals_web/app/analyst/data/sp500.json`
 - Frontend behavior: `square18_signals_web/static/app.js`
 - Core strategy logic: `square18_signals/src/square18_signals/recommender.py`
 - Strategy pricing/payoff: `square18_signals/src/square18_signals/strategies.py`

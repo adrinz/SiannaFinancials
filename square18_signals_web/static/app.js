@@ -2299,19 +2299,43 @@ async function loadScreener() {
   if (screenerUI.inFlight) return;
   screenerUI.inFlight = true;
   const trail = $('#screener-trail');
+  const scopePill = $('#screener-scope');
   const jumpsEl = $('#screener-jumps');
   const dipsEl = $('#screener-dips');
   const earnEl = $('#screener-earnings');
+  const jumpsTrail = $('#screener-jumps-trail');
+  const dipsTrail = $('#screener-dips-trail');
+  const earnTrail = $('#screener-earnings-trail');
 
   try {
     const [jumps, dips, earn] = await Promise.all([
       api('/api/screener/jumps?limit=10'),
       api('/api/screener/dips?limit=10'),
-      api('/api/screener/earnings?window_days=14&limit=25'),
+      api('/api/screener/earnings?window_days=14&limit=50'),
     ]);
     renderScreenerMovers(jumpsEl, jumps.rows, 'pos');
     renderScreenerMovers(dipsEl, dips.rows, 'neg');
     renderScreenerEarnings(earnEl, earn.rows);
+
+    if (jumpsTrail) jumpsTrail.textContent = sourceLabel(jumps.source, 'top gainers today');
+    if (dipsTrail) dipsTrail.textContent = sourceLabel(dips.source, 'top losers today');
+    if (earnTrail) {
+      earnTrail.textContent = sourceLabel(
+        earn.source,
+        `next ${earn.window_days} days`
+      );
+    }
+    if (scopePill) {
+      const overall = pickOverallSource([jumps.source, dips.source, earn.source]);
+      scopePill.textContent =
+        overall === 'sp500'
+          ? 'S&P 500'
+          : overall === 'curated'
+          ? 'Curated 19'
+          : 'Limited';
+      scopePill.classList.toggle('is-fallback', overall !== 'sp500');
+    }
+
     screenerUI.lastLoadedAt = new Date();
     if (trail) trail.textContent = 'updated ' + fmtESTCompact(screenerUI.lastLoadedAt);
   } catch (e) {
@@ -2321,6 +2345,19 @@ async function loadScreener() {
   } finally {
     screenerUI.inFlight = false;
   }
+}
+
+function sourceLabel(source, defaultText) {
+  if (!source || source === 'sp500') return defaultText;
+  if (source === 'curated') return defaultText + ' · curated fallback';
+  if (source === 'unavailable') return 'data source unavailable';
+  return defaultText;
+}
+
+function pickOverallSource(sources) {
+  if (sources.every((s) => s === 'sp500')) return 'sp500';
+  if (sources.includes('unavailable')) return 'unavailable';
+  return 'curated';
 }
 
 function renderScreenerMovers(ul, rows, side) {

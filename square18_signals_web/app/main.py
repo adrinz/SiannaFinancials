@@ -22,6 +22,7 @@ from .analyst import build_report, overview_rows  # noqa: E402
 from .analyst import earnings as _earnings  # noqa: E402
 from .analyst import llm as _llm  # noqa: E402
 from .analyst import market as _market  # noqa: E402
+from .analyst import movers as _movers  # noqa: E402
 from .analyst import search as _search  # noqa: E402
 from .analyst.models import OverviewRow, ReportOut, TickerMeta  # noqa: E402
 from .models import RegimeEnvelope, TickerDetailOut, TickerRowOut  # noqa: E402
@@ -384,9 +385,9 @@ class ScreenerMoverOut(BaseModel):
     sector: str
     last: float
     change_pct: float
-    verdict: str
-    composite_score: float
-    rsi: float | None
+    verdict: str | None = None
+    composite_score: float | None = None
+    rsi: float | None = None
 
 
 class ScreenerEarningsOut(BaseModel):
@@ -402,37 +403,14 @@ class ScreenerEarningsOut(BaseModel):
 
 class ScreenerMoversListOut(BaseModel):
     timeframe: str
+    source: str  # "sp500" when broad universe served the data, "curated" on fallback
     rows: list[ScreenerMoverOut]
 
 
 class ScreenerEarningsListOut(BaseModel):
     window_days: int
+    source: str  # "sp500" | "curated" | "unavailable"
     rows: list[ScreenerEarningsOut]
-
-
-def _movers_from_overview(timeframe: str, *, side: str, limit: int) -> list[ScreenerMoverOut]:
-    rows = overview_rows(timeframe)  # type: ignore[arg-type]
-    if side == "jumps":
-        candidates = [r for r in rows if r.change_pct > 0]
-        candidates.sort(key=lambda r: r.change_pct, reverse=True)
-    else:  # dips
-        candidates = [r for r in rows if r.change_pct < 0]
-        candidates.sort(key=lambda r: r.change_pct)
-    out: list[ScreenerMoverOut] = []
-    for r in candidates[:limit]:
-        out.append(
-            ScreenerMoverOut(
-                symbol=r.symbol,
-                name=r.name,
-                sector=r.sector,
-                last=r.last,
-                change_pct=r.change_pct,
-                verdict=r.verdict,
-                composite_score=r.composite_score,
-                rsi=r.rsi,
-            )
-        )
-    return out
 
 
 @app.get(
@@ -444,9 +422,11 @@ def screener_jumps(timeframe: str = "daily", limit: int = 10) -> ScreenerMoversL
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     n = max(1, min(limit, 25))
+    items, source = _movers.movers_with_fallback("jumps", n)
     return ScreenerMoversListOut(
         timeframe=timeframe,
-        rows=_movers_from_overview(timeframe, side="jumps", limit=n),
+        source=source,
+        rows=[ScreenerMoverOut(**m.__dict__) for m in items],
     )
 
 
@@ -459,9 +439,11 @@ def screener_dips(timeframe: str = "daily", limit: int = 10) -> ScreenerMoversLi
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     n = max(1, min(limit, 25))
+    items, source = _movers.movers_with_fallback("dips", n)
     return ScreenerMoversListOut(
         timeframe=timeframe,
-        rows=_movers_from_overview(timeframe, side="dips", limit=n),
+        source=source,
+        rows=[ScreenerMoverOut(**m.__dict__) for m in items],
     )
 
 
@@ -470,12 +452,14 @@ def screener_dips(timeframe: str = "daily", limit: int = 10) -> ScreenerMoversLi
     response_model=ScreenerEarningsListOut,
     tags=["screener"],
 )
-def screener_earnings(window_days: int = 14, limit: int = 25) -> ScreenerEarningsListOut:
+def screener_earnings(window_days: int = 14, limit: int = 50) -> ScreenerEarningsListOut:
     days = max(1, min(window_days, 60))
-    n = max(1, min(limit, 50))
-    rows = _earnings.upcoming_earnings(window_days=days)[:n]
+    n = max(1, min(limit, 200))
+    rows, source = _earnings.upcoming_earnings_with_source(window_days=days)
+    rows = rows[:n]
     return ScreenerEarningsListOut(
         window_days=days,
+        source=source,
         rows=[
             ScreenerEarningsOut(
                 symbol=r.symbol,
