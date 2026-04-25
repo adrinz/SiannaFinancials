@@ -32,6 +32,7 @@ def client() -> TestClient:
 
 
 def test_universe_loads_full_sp500_snapshot():
+    universe_mod.reset_cache()
     rows = universe_mod.sp500_universe()
     assert len(rows) >= 450, "S&P 500 snapshot should have ~503 rows"
     assert all({"symbol", "name", "sector"} <= r.keys() for r in rows)
@@ -39,6 +40,48 @@ def test_universe_loads_full_sp500_snapshot():
     assert "AAPL" in by_symbol
     assert "MSFT" in by_symbol
     assert by_symbol["AAPL"]["name"]
+
+
+def test_universe_uses_remote_csv_when_network_returns_rows(monkeypatch):
+    universe_mod.reset_cache()
+    fake = universe_mod._normalize_rows(  # noqa: SLF001
+        [
+            {"symbol": f"Z{i:04d}", "name": f"Co {i}", "sector": "Tech"}
+            for i in range(450)
+        ]
+    )
+    monkeypatch.setattr(universe_mod, "_fetch_remote_csv", lambda: fake)
+    out = universe_mod.sp500_universe()
+    assert len(out) == 450
+    assert universe_mod.universe_source() == "remote"
+
+
+def test_universe_cold_starts_on_bundled_when_remote_fails(monkeypatch):
+    universe_mod.reset_cache()
+    monkeypatch.setattr(universe_mod, "_fetch_remote_csv", lambda: None)
+    rows = universe_mod.sp500_universe()
+    assert len(rows) >= 450
+    assert universe_mod.universe_source() == "bundle"
+    assert "AAPL" in {r["symbol"] for r in rows}
+
+
+def test_universe_serves_stale_after_remote_succeeds_then_fails(monkeypatch):
+    universe_mod.reset_cache()
+    fake = universe_mod._normalize_rows(  # noqa: SLF001
+        [
+            {"symbol": f"Y{i:04d}", "name": f"Q {i}", "sector": "S"}
+            for i in range(450)
+        ]
+    )
+    monkeypatch.setattr(universe_mod, "_fetch_remote_csv", lambda: fake)
+    assert universe_mod.universe_source() == "remote"
+    first = list(universe_mod.sp500_universe())
+    # Expire so the next read attempts another fetch.
+    universe_mod._state["valid_until"] = 0.0  # noqa: SLF001
+    monkeypatch.setattr(universe_mod, "_fetch_remote_csv", lambda: None)
+    second = universe_mod.sp500_universe()
+    assert second == first
+    assert universe_mod.universe_source() == "stale"
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +218,10 @@ def test_screener_earnings_payload_shape(client: TestClient, monkeypatch):
 
 
 def test_broad_earnings_filters_to_universe(monkeypatch):
+    # Ensure S&P 500 is the real bundled set (a prior test may have
+    # swapped in a synthetic universe for remote/stale cases).
+    universe_mod.reset_cache()
+    monkeypatch.setattr(universe_mod, "_fetch_remote_csv", lambda: None)
     earnings_mod.reset_cache()
     today = date.today()
     iso_today = today.isoformat()

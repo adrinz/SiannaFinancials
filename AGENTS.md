@@ -48,8 +48,8 @@ python3 -m pytest square18_signals_web/tests/test_e2e_ui_playwright.py -q
 - Market/news aggregation: `square18_signals_web/app/analyst/market.py`
 - Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
 - Broad market movers: `square18_signals_web/app/analyst/movers.py`
-- Universe loader (S&P 500 snapshot): `square18_signals_web/app/analyst/universe.py`
-- S&P 500 snapshot data: `square18_signals_web/app/analyst/data/sp500.json`
+- Universe loader (S&P 500, dynamic CSV + bundle fallback): `square18_signals_web/app/analyst/universe.py`
+- S&P 500 offline fallback data: `square18_signals_web/app/analyst/data/sp500.json` (`SQUARE18_SP500_REFRESH_HOURS`, `SQUARE18_SP500_CSV_URL`)
 - Frontend behavior: `square18_signals_web/static/app.js`
 - Core strategy logic: `square18_signals/src/square18_signals/recommender.py`
 - Strategy pricing/payoff: `square18_signals/src/square18_signals/strategies.py`
@@ -60,4 +60,5 @@ python3 -m pytest square18_signals_web/tests/test_e2e_ui_playwright.py -q
 - `ANTHROPIC_MODEL` optional LLM model override
 - `SQUARE18_LLM_CACHE_TTL` optional LLM cache TTL
 - `PORT`, `HOST`, `PYTHON` supported by `square18_signals_web/run.sh`
+- `SQUARE18_SP500_REFRESH_HOURS`, `SQUARE18_SP500_CSV_URL` — S&P 500 list refresh (see `app/analyst/universe.py`)
 

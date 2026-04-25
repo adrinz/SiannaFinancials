@@ -16,9 +16,15 @@ Primary product behavior:
 - Ticker detail with factors and options strategy recommendations.
 - Free-form Search view (Buy / Sell / Hold plan for any ticker).
 - Stock Screener tab — daily price jumps, daily price dips, and an
-  upcoming earnings calendar (next 14 days). Scope is the **S&P 500**
-  (snapshot at `app/analyst/data/sp500.json`); the curated 19-ticker
-  list is used as a graceful fallback.
+  upcoming earnings calendar (next 14 days). Scope is the **S&P 500**,
+  whose **constituent list** is re-fetched from a public CSV (GitHub
+  `datasets/s-and-p-500-companies`, overridable via `SQUARE18_SP500_CSV_URL`)
+  on a TTL (default 24h, `SQUARE18_SP500_REFRESH_HOURS`, `0` = every
+  call, for tests). `app/analyst/data/sp500.json` is the offline /
+  cold-start fallback; on fetch failure, the last good in-process list
+  is used as **stale** until the next successful pull. The curated
+  19-ticker list is used as a screener fallback when broad market data
+  is unavailable.
 - Analyst views with report generation and optional Claude-powered prose.
 
 ## 2) Project Structure
@@ -34,8 +40,9 @@ Top-level layout:
   - `app/services.py`: dashboard/detail service composition
   - `app/analyst/`: analyst pipeline (data, indicators, market, search,
     report, earnings, movers, universe, llm)
-  - `app/analyst/data/sp500.json`: bundled S&P 500 snapshot used by the
-    Screener tab
+  - `app/analyst/data/sp500.json`: offline / cold-start S&P 500 list for
+    the Screener tab; live fetches from the public CSV (see
+    `app/analyst/universe.py`) supersede it when available
   - `static/`: `index.html`, `app.js`, `styles.css`
   - `tests/`: API E2E, Playwright UI E2E, indicators, market news,
     screener tests
@@ -155,8 +162,11 @@ This logic lives in:
 
 Screener / earnings behavior:
 
-- **Universe**: S&P 500 from `app/analyst/data/sp500.json`. Loaded by
-  `app/analyst/universe.py` with `lru_cache`.
+- **Universe**: S&P 500 from `app/analyst/universe.py`. The loader
+  pulls the public constituents CSV on a TTL, falls back to bundled
+  `app/analyst/data/sp500.json` when the network is cold, and keeps the
+  last successful remote list (``stale``) when a scheduled refresh
+  fails.
 - **Jumps & dips** (`app/analyst/movers.py`): one batched
   `yfinance.download(...)` for the full universe → daily % change from
   the last two closes → sort + slice. Cached in-process for 10
@@ -181,6 +191,8 @@ Environment variables:
 - `ANTHROPIC_API_KEY` (enables LLM endpoints/features)
 - `ANTHROPIC_MODEL` (optional override)
 - `SQUARE18_LLM_CACHE_TTL` (optional cache TTL)
+- `SQUARE18_SP500_REFRESH_HOURS` (hours between S&P 500 CSV fetches, default 24; `0` = always refetch)
+- `SQUARE18_SP500_CSV_URL` (optional override for the S&P 500 CSV URL)
 
 If unset/unavailable:
 
@@ -215,7 +227,7 @@ If unset/unavailable:
 - Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
 - Broad market movers: `square18_signals_web/app/analyst/movers.py`
 - Universe loader: `square18_signals_web/app/analyst/universe.py`
-- S&P 500 snapshot: `square18_signals_web/app/analyst/data/sp500.json`
+- S&P 500 offline snapshot: `square18_signals_web/app/analyst/data/sp500.json`
 - Frontend logic: `square18_signals_web/static/app.js`
 - Frontend layout: `square18_signals_web/static/index.html`
 - Frontend styling: `square18_signals_web/static/styles.css`

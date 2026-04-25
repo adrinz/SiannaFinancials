@@ -11,14 +11,16 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 
 - **Stock Screener tab** — three quick views across the **S&P 500**:
   today's biggest price jumps, today's biggest price dips, and a
-  calendar of upcoming earnings (next 14 days). Movers come from a
-  single batched `yfinance.download` over the bundled S&P 500 snapshot;
-  earnings come from Nasdaq's public calendar API (filtered to the
-  same universe). Both fall back to the curated 19-ticker analyst
-  pipeline when external sources are offline so the page is never
-  blank, and the response includes a `source` field
-  (`sp500` / `curated` / `unavailable`) so the UI can show a fallback
-  badge.
+  calendar of upcoming earnings (next 14 days). The S&P 500 list itself
+  is **refreshed** from a public CSV on a schedule (24h by default;
+  set `SQUARE18_SP500_REFRESH_HOURS` / optional `SQUARE18_SP500_CSV_URL` in
+  `app/analyst/universe.py`); a bundled `data/sp500.json` is used
+  offline, and a failed refresh keeps the last good list (`stale`)
+  with at-most-hourly retry. Movers use a single batched
+  `yfinance.download` over the current universe. Earnings use Nasdaq's
+  public calendar API. Both also fall back to the curated 19-ticker
+  analyst pipeline when required. The API `source` field is
+  `sp500` / `curated` / `unavailable` for the UI.
 - **Sianna Financials** brand (formerly "Square18 Signals").
 - All timestamps render in **US Eastern (America/New_York)** — live
   clock in the top bar and a full date/time in the footer.
