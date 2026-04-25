@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal, Optional
+import threading
 import time
 
 from .report import overview_rows
@@ -31,6 +32,9 @@ from .universe import sp500_universe, universe_by_symbol
 
 _CACHE_TTL_SECONDS = 10 * 60
 _cache: dict[str, object] = {"ts": 0.0, "rows": []}
+# Jumps and dips are requested in parallel; without this, two cold calls
+# each run a full ~500-ticker yfinance download roughly doubling wait time.
+_broad_fetch_lock = threading.Lock()
 
 
 @dataclass
@@ -141,11 +145,16 @@ def _broad_universe_rows() -> list[MoverItem]:
     cached = _cache.get("rows") or []
     if cached and now - float(_cache.get("ts") or 0) < _CACHE_TTL_SECONDS:
         return list(cached)  # type: ignore[arg-type]
-    rows = _fetch_universe_quotes()
-    if rows:
-        _cache["rows"] = rows
-        _cache["ts"] = now
-    return rows
+    with _broad_fetch_lock:
+        now = time.time()
+        cached2 = _cache.get("rows") or []
+        if cached2 and now - float(_cache.get("ts") or 0) < _CACHE_TTL_SECONDS:
+            return list(cached2)  # type: ignore[arg-type]
+        rows = _fetch_universe_quotes()
+        if rows:
+            _cache["rows"] = rows
+            _cache["ts"] = now
+        return rows
 
 
 def broad_movers(side: Literal["jumps", "dips"], limit: int = 10) -> list[MoverItem]:
@@ -202,5 +211,6 @@ def movers_with_fallback(
 
 def reset_cache() -> None:
     """Test helper — flush the in-process broad-universe cache."""
-    _cache["rows"] = []
-    _cache["ts"] = 0.0
+    with _broad_fetch_lock:
+        _cache["rows"] = []
+        _cache["ts"] = 0.0
