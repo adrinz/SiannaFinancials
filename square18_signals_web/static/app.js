@@ -139,6 +139,9 @@ function initTabs() {
       } else if (target === 'search') {
         switchView('search');
         initSearchOnce();
+      } else if (target === 'screener') {
+        switchView('screener');
+        loadScreener();
       } else {
         switchView(target);
       }
@@ -2165,6 +2168,9 @@ async function refreshAll({ reason = 'manual' } = {}) {
     if (state.view === 'search' && searchUI.lastQuery) {
       runSearch(searchUI.lastQuery);
     }
+    if (state.view === 'screener') {
+      loadScreener();
+    }
     // Re-check LLM health on every refresh so the badge recovers from
     // transient errors (e.g. right after the user adds credits).
     initPoweredBy();
@@ -2280,6 +2286,143 @@ function prettyModelName(slug) {
   const minor = parts[3] || '';
   const ver = minor ? `${major}.${minor}` : major;
   return `Claude ${family.charAt(0).toUpperCase() + family.slice(1)} ${ver}`.trim();
+}
+
+// ---------- Screener view (jumps / dips / upcoming earnings) -------------
+
+const screenerUI = {
+  inFlight: false,
+  lastLoadedAt: null,
+};
+
+async function loadScreener() {
+  if (screenerUI.inFlight) return;
+  screenerUI.inFlight = true;
+  const trail = $('#screener-trail');
+  const jumpsEl = $('#screener-jumps');
+  const dipsEl = $('#screener-dips');
+  const earnEl = $('#screener-earnings');
+
+  try {
+    const [jumps, dips, earn] = await Promise.all([
+      api('/api/screener/jumps?limit=10'),
+      api('/api/screener/dips?limit=10'),
+      api('/api/screener/earnings?window_days=14&limit=25'),
+    ]);
+    renderScreenerMovers(jumpsEl, jumps.rows, 'pos');
+    renderScreenerMovers(dipsEl, dips.rows, 'neg');
+    renderScreenerEarnings(earnEl, earn.rows);
+    screenerUI.lastLoadedAt = new Date();
+    if (trail) trail.textContent = 'updated ' + fmtESTCompact(screenerUI.lastLoadedAt);
+  } catch (e) {
+    if (jumpsEl) jumpsEl.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`;
+    if (dipsEl) dipsEl.innerHTML = '';
+    if (earnEl) earnEl.innerHTML = '';
+  } finally {
+    screenerUI.inFlight = false;
+  }
+}
+
+function renderScreenerMovers(ul, rows, side) {
+  if (!ul) return;
+  ul.innerHTML = '';
+  if (!rows || !rows.length) {
+    ul.append(h('li', { class: 'loading' }, 'No movers in this direction today.'));
+    return;
+  }
+  for (const r of rows) {
+    const pct = (r.change_pct >= 0 ? '+' : '') + r.change_pct.toFixed(2) + '%';
+    const li = h(
+      'li',
+      {
+        class: 'screener-row',
+        onClick: () => switchView('detail', { symbol: r.symbol }),
+        title: `${r.symbol} · ${r.name} · ${r.verdict}`,
+      },
+      h('span', { class: 'screener-sym mono' }, r.symbol),
+      h('span', { class: 'screener-name muted' }, r.name),
+      h('span', { class: `screener-pct mono ${side}` }, pct),
+      h('span', { class: 'screener-last mono muted' }, fmtUSD(r.last)),
+      h(
+        'span',
+        { class: `screener-verdict mono ${verdictTone(r.verdict)}` },
+        r.verdict || '—'
+      )
+    );
+    ul.append(li);
+  }
+}
+
+function renderScreenerEarnings(ul, rows) {
+  if (!ul) return;
+  ul.innerHTML = '';
+  if (!rows || !rows.length) {
+    ul.append(
+      h(
+        'li',
+        { class: 'loading' },
+        'No earnings dates available right now (yfinance offline or none in window).'
+      )
+    );
+    return;
+  }
+  for (const r of rows) {
+    const when = formatEarningsDate(r.earnings_date, r.days_until);
+    const pctTone =
+      r.change_pct == null ? 'muted' : r.change_pct >= 0 ? 'pos' : 'neg';
+    const pctTxt =
+      r.change_pct == null
+        ? '—'
+        : (r.change_pct >= 0 ? '+' : '') + r.change_pct.toFixed(2) + '%';
+    const li = h(
+      'li',
+      {
+        class: 'screener-row screener-row-earn',
+        onClick: () => switchView('detail', { symbol: r.symbol }),
+        title: `${r.symbol} · ${r.name} · reports ${r.earnings_date}`,
+      },
+      h('span', { class: 'screener-sym mono' }, r.symbol),
+      h('span', { class: 'screener-name muted' }, r.name),
+      h('span', { class: 'screener-when mono' }, when),
+      h('span', { class: `screener-pct mono ${pctTone}` }, pctTxt),
+      h(
+        'span',
+        { class: `screener-verdict mono ${verdictTone(r.verdict)}` },
+        r.verdict || '—'
+      )
+    );
+    ul.append(li);
+  }
+}
+
+function verdictTone(verdict) {
+  if (!verdict) return 'muted';
+  const v = String(verdict).toUpperCase();
+  if (v === 'BULLISH') return 'pos';
+  if (v === 'BEARISH') return 'neg';
+  return 'muted';
+}
+
+function formatEarningsDate(iso, daysUntil) {
+  if (!iso) return '—';
+  let dateLabel = iso;
+  try {
+    const d = new Date(iso + 'T00:00:00Z');
+    if (!Number.isNaN(d.getTime())) {
+      dateLabel = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'UTC',
+        month: 'short',
+        day: '2-digit',
+        weekday: 'short',
+      }).format(d);
+    }
+  } catch (_) {
+    /* fall through to ISO */
+  }
+  if (daysUntil == null) return dateLabel;
+  if (daysUntil <= 0) return `${dateLabel} · today`;
+  if (daysUntil === 1) return `${dateLabel} · tomorrow`;
+  return `${dateLabel} · in ${daysUntil}d`;
 }
 
 // ---------- Search view (free-form stock lookup) --------------------------

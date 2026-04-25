@@ -11,8 +11,12 @@ The workspace contains two related Python projects:
 
 Primary product behavior:
 
-- Dashboard with market regime, screener, crypto, and news cards.
+- Dashboard with market regime, today's signals table, market pulse,
+  options highlights, crypto, and news cards.
 - Ticker detail with factors and options strategy recommendations.
+- Free-form Search view (Buy / Sell / Hold plan for any ticker).
+- Stock Screener tab — daily price jumps, daily price dips, and an
+  upcoming earnings calendar (next 14 days).
 - Analyst views with report generation and optional Claude-powered prose.
 
 ## 2) Project Structure
@@ -26,9 +30,11 @@ Top-level layout:
 - `square18_signals_web/`
   - `app/main.py`: FastAPI app + routes
   - `app/services.py`: dashboard/detail service composition
-  - `app/analyst/`: analyst pipeline (data, indicators, market, search, report, llm)
+  - `app/analyst/`: analyst pipeline (data, indicators, market, search,
+    report, earnings, llm)
   - `static/`: `index.html`, `app.js`, `styles.css`
-  - `tests/`: API E2E, Playwright UI E2E, indicators, market news tests
+  - `tests/`: API E2E, Playwright UI E2E, indicators, market news,
+    screener tests
   - `run.sh`: app launcher script
 
 ## 3) Tech Stack
@@ -92,6 +98,15 @@ Dashboard + detail:
 - `GET /api/crypto/snapshot`
 - `GET /api/news?limit=...`
 
+Screener tab:
+
+- `GET /api/screener/jumps?timeframe=daily&limit=10` — top gainers
+  (positive `change_pct`, sorted descending)
+- `GET /api/screener/dips?timeframe=daily&limit=10` — top losers
+  (negative `change_pct`, sorted ascending)
+- `GET /api/screener/earnings?window_days=14&limit=25` — companies in
+  the curated universe reporting earnings within the window
+
 Search + analyst:
 
 - `GET /api/search?q=...&timeframe=...`
@@ -127,6 +142,19 @@ News behavior (important):
 This logic lives in:
 
 - `square18_signals_web/app/analyst/market.py`
+
+Screener / earnings behavior:
+
+- Jumps & dips reuse `overview_rows()` so verdicts stay consistent
+  with the dashboard.
+- Upcoming earnings come from `app/analyst/earnings.py`, which calls
+  `yfinance.Ticker.calendar` (with a `get_earnings_dates` fallback for
+  newer SDKs). Per-symbol failures are swallowed; if `yfinance` itself
+  is unimportable or globally failing, the endpoint returns an empty
+  list rather than 5xx-ing the UI.
+- Results are cached in-process for 30 minutes so the three screener
+  cards don't fan-out a fresh yfinance call per refresh.
+- The VIX entry is always excluded (it's an index, not a company).
 
 ## 8) Optional LLM Layer
 
@@ -166,9 +194,11 @@ If unset/unavailable:
 
 - Core app entry: `square18_signals_web/app/main.py`
 - Market/news aggregations: `square18_signals_web/app/analyst/market.py`
+- Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
 - Frontend logic: `square18_signals_web/static/app.js`
 - Frontend layout: `square18_signals_web/static/index.html`
 - Frontend styling: `square18_signals_web/static/styles.css`
 - Math/recommender package: `square18_signals/src/square18_signals/`
-- New market-news tests: `square18_signals_web/tests/test_market_news.py`
+- Market-news tests: `square18_signals_web/tests/test_market_news.py`
+- Screener tests: `square18_signals_web/tests/test_screener.py`
 

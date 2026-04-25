@@ -19,6 +19,7 @@ if str(_SIGNALS_SRC) not in sys.path:
 
 from .analyst import TICKERS as ANALYST_TICKERS  # noqa: E402
 from .analyst import build_report, overview_rows  # noqa: E402
+from .analyst import earnings as _earnings  # noqa: E402
 from .analyst import llm as _llm  # noqa: E402
 from .analyst import market as _market  # noqa: E402
 from .analyst import search as _search  # noqa: E402
@@ -366,6 +367,128 @@ def get_news(limit: int = 12) -> NewsFeedOut:
     return NewsFeedOut(
         items=[NewsItemOut(**n.__dict__) for n in feed.items],
         source=feed.source,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Screener tab — daily price jumps / dips and upcoming earnings.
+# All three views derive from the shared analyst pipeline so they stay
+# consistent with the dashboard verdicts. The earnings helper is
+# best-effort and degrades to an empty list when yfinance is offline.
+# ---------------------------------------------------------------------------
+
+
+class ScreenerMoverOut(BaseModel):
+    symbol: str
+    name: str
+    sector: str
+    last: float
+    change_pct: float
+    verdict: str
+    composite_score: float
+    rsi: float | None
+
+
+class ScreenerEarningsOut(BaseModel):
+    symbol: str
+    name: str
+    sector: str
+    earnings_date: str
+    days_until: int
+    last: float | None
+    change_pct: float | None
+    verdict: str | None
+
+
+class ScreenerMoversListOut(BaseModel):
+    timeframe: str
+    rows: list[ScreenerMoverOut]
+
+
+class ScreenerEarningsListOut(BaseModel):
+    window_days: int
+    rows: list[ScreenerEarningsOut]
+
+
+def _movers_from_overview(timeframe: str, *, side: str, limit: int) -> list[ScreenerMoverOut]:
+    rows = overview_rows(timeframe)  # type: ignore[arg-type]
+    if side == "jumps":
+        candidates = [r for r in rows if r.change_pct > 0]
+        candidates.sort(key=lambda r: r.change_pct, reverse=True)
+    else:  # dips
+        candidates = [r for r in rows if r.change_pct < 0]
+        candidates.sort(key=lambda r: r.change_pct)
+    out: list[ScreenerMoverOut] = []
+    for r in candidates[:limit]:
+        out.append(
+            ScreenerMoverOut(
+                symbol=r.symbol,
+                name=r.name,
+                sector=r.sector,
+                last=r.last,
+                change_pct=r.change_pct,
+                verdict=r.verdict,
+                composite_score=r.composite_score,
+                rsi=r.rsi,
+            )
+        )
+    return out
+
+
+@app.get(
+    "/api/screener/jumps",
+    response_model=ScreenerMoversListOut,
+    tags=["screener"],
+)
+def screener_jumps(timeframe: str = "daily", limit: int = 10) -> ScreenerMoversListOut:
+    if timeframe not in _ALLOWED_TIMEFRAMES:
+        raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
+    n = max(1, min(limit, 25))
+    return ScreenerMoversListOut(
+        timeframe=timeframe,
+        rows=_movers_from_overview(timeframe, side="jumps", limit=n),
+    )
+
+
+@app.get(
+    "/api/screener/dips",
+    response_model=ScreenerMoversListOut,
+    tags=["screener"],
+)
+def screener_dips(timeframe: str = "daily", limit: int = 10) -> ScreenerMoversListOut:
+    if timeframe not in _ALLOWED_TIMEFRAMES:
+        raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
+    n = max(1, min(limit, 25))
+    return ScreenerMoversListOut(
+        timeframe=timeframe,
+        rows=_movers_from_overview(timeframe, side="dips", limit=n),
+    )
+
+
+@app.get(
+    "/api/screener/earnings",
+    response_model=ScreenerEarningsListOut,
+    tags=["screener"],
+)
+def screener_earnings(window_days: int = 14, limit: int = 25) -> ScreenerEarningsListOut:
+    days = max(1, min(window_days, 60))
+    n = max(1, min(limit, 50))
+    rows = _earnings.upcoming_earnings(window_days=days)[:n]
+    return ScreenerEarningsListOut(
+        window_days=days,
+        rows=[
+            ScreenerEarningsOut(
+                symbol=r.symbol,
+                name=r.name,
+                sector=r.sector,
+                earnings_date=r.earnings_date,
+                days_until=r.days_until,
+                last=r.last,
+                change_pct=r.change_pct,
+                verdict=r.verdict,
+            )
+            for r in rows
+        ],
     )
 
 

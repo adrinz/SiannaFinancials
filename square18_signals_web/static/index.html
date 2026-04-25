@@ -32,6 +32,9 @@
         <button class="tab" data-view="search" role="tab" aria-selected="false">
           Search
         </button>
+        <button class="tab" data-view="screener" role="tab" aria-selected="false">
+          Screener
+        </button>
         <button class="tab" data-view="analyst" role="tab" aria-selected="false">
           Analyst
         </button>
@@ -495,6 +498,53 @@
           <div class="callout">
             <div class="callout-title">Nothing searched yet</div>
             Enter a ticker or company name above to get a recommendation.
+          </div>
+        </div>
+      </section>
+
+      <!-- Screener view -->
+      <section class="view view-screener hidden" data-view="screener">
+        <div class="screener-header">
+          <div>
+            <h1 class="screener-title">Stock screener</h1>
+            <p class="screener-sub">
+              Today&rsquo;s biggest moves across the tracked universe and a
+              calendar of upcoming earnings reports. Click any row to open
+              the full ticker detail.
+            </p>
+          </div>
+          <span class="screener-trail mono muted" id="screener-trail">—</span>
+        </div>
+
+        <div class="screener-grid">
+          <div class="card card-screener">
+            <div class="card-header">
+              <span class="card-title pos">Daily price jumps</span>
+              <span class="card-trail mono muted">top gainers today</span>
+            </div>
+            <ul class="screener-list" id="screener-jumps">
+              <li class="loading">Loading gainers&hellip;</li>
+            </ul>
+          </div>
+
+          <div class="card card-screener">
+            <div class="card-header">
+              <span class="card-title neg">Daily price dips</span>
+              <span class="card-trail mono muted">top losers today</span>
+            </div>
+            <ul class="screener-list" id="screener-dips">
+              <li class="loading">Loading losers&hellip;</li>
+            </ul>
+          </div>
+
+          <div class="card card-screener card-screener-earn">
+            <div class="card-header">
+              <span class="card-title">Upcoming earnings</span>
+              <span class="card-trail mono muted">next 14 days</span>
+            </div>
+            <ul class="screener-list screener-list-earn" id="screener-earnings">
+              <li class="loading">Loading earnings calendar&hellip;</li>
+            </ul>
           </div>
         </div>
       </section>

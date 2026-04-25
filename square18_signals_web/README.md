@@ -9,6 +9,11 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 
 ## What's new
 
+- **Stock Screener tab** — three quick views: today's biggest price
+  jumps, today's biggest price dips, and a calendar of upcoming
+  earnings (next 14 days). Reuses the dashboard's analyst pipeline so
+  verdicts stay consistent. Earnings come from `yfinance` with a
+  graceful empty-list fallback when the provider is offline.
 - **Sianna Financials** brand (formerly "Square18 Signals").
 - All timestamps render in **US Eastern (America/New_York)** — live
   clock in the top bar and a full date/time in the footer.
@@ -29,6 +34,17 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 - Five-up KPI strip (universe size, longs, shorts, holds, VIX).
 - Today's signals table — click any row to open its detail view.
 - Filter pills (All / Buy / Sell / Hold).
+
+**Screener**
+
+- Three cards on a dedicated tab:
+  - **Daily price jumps** — top gainers in the curated universe today.
+  - **Daily price dips** — top losers today.
+  - **Upcoming earnings** — companies in the universe reporting
+    within the next 14 days, decorated with current price, day's
+    change, and dashboard verdict.
+- Click any row to jump to the full Ticker Detail view.
+- Auto-refreshes alongside the rest of the dashboard.
 
 **Ticker detail**
 
@@ -94,6 +110,9 @@ python -m pytest tests/test_e2e_app.py tests/test_e2e_ui_playwright.py -q
 | GET    | `/api/regime`                        | market-regime banner + universe counters        |
 | GET    | `/api/screen?filter=…`               | screener rows; `filter` ∈ all/buy/sell/hold     |
 | GET    | `/api/ticker/{symbol}`               | full detail payload + strategy recommendations  |
+| GET    | `/api/screener/jumps?limit=…`        | today's top gainers from the curated universe   |
+| GET    | `/api/screener/dips?limit=…`         | today's top losers from the curated universe    |
+| GET    | `/api/screener/earnings?window_days=…` | upcoming earnings dates (yfinance-backed)     |
 | GET    | `/api/analyst/tickers`               | analyst universe (symbol/name/sector)           |
 | GET    | `/api/analyst/overview?timeframe=…`  | verdict + recommendation row per ticker         |
 | GET    | `/api/analyst/report/{symbol}`       | full technical report for a ticker              |
