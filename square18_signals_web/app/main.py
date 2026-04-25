@@ -18,6 +18,7 @@ if str(_SIGNALS_SRC) not in sys.path:
     sys.path.insert(0, str(_SIGNALS_SRC))
 
 from .analyst import TICKERS as ANALYST_TICKERS  # noqa: E402
+from .analyst.constants import SCREENER_EARNINGS_WINDOW_DAYS  # noqa: E402
 from .analyst import build_report, overview_rows  # noqa: E402
 from .analyst import earnings as _earnings  # noqa: E402
 from .analyst import llm as _llm  # noqa: E402
@@ -436,7 +437,7 @@ class ScreenerEarningsListOut(BaseModel):
 def screener_movers(
     timeframe: str = "daily",
     limit: int = 10,
-    quick: int = Query(0, ge=0, le=1, description="1 = instant curated 19 (first paint)"),
+    quick: int = Query(0, ge=0, le=1, description="1 = instant tracked-list movers (first paint)"),
 ) -> ScreenerMoversPairOut:
     """Combined jumps + dips. Set ``quick=1`` for curated only (no S&P 500 yfinance)."""
     if timeframe not in _ALLOWED_TIMEFRAMES:
@@ -496,7 +497,9 @@ def screener_dips(timeframe: str = "daily", limit: int = 10) -> ScreenerMoversLi
     response_model=ScreenerEarningsListOut,
     tags=["screener"],
 )
-def screener_earnings(window_days: int = 14, limit: int = 50) -> ScreenerEarningsListOut:
+def screener_earnings(
+    window_days: int = SCREENER_EARNINGS_WINDOW_DAYS, limit: int = 50
+) -> ScreenerEarningsListOut:
     days = max(1, min(window_days, 60))
     n = max(1, min(limit, 200))
     rows, source = _earnings.upcoming_earnings_with_source(window_days=days)

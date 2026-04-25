@@ -2321,7 +2321,7 @@ async function loadScreener() {
     // Phase 1: instant curated movers (tracked universe) + earnings in parallel.
     const [fastMovers, earn] = await Promise.all([
       api('/api/screener/movers?quick=1&limit=10'),
-      api('/api/screener/earnings?window_days=14&limit=50'),
+      api('/api/screener/earnings?window_days=7&limit=50'),
     ]);
     if (seq !== screenerUI.loadSeq) return;
     renderScreenerMovers(jumpsEl, fastMovers.jumps.rows, 'pos');
@@ -2337,7 +2337,7 @@ async function loadScreener() {
       );
     }
     if (scopePill) {
-      scopePill.textContent = 'Curated 19';
+      scopePill.textContent = 'Tracked';
       scopePill.classList.add('is-fallback');
     }
     if (trail) {
@@ -2373,7 +2373,7 @@ async function loadScreener() {
           overall === 'sp500'
             ? 'S&P 500'
             : overall === 'curated'
-            ? 'Curated 19'
+            ? 'Tracked'
             : 'Limited';
         scopePill.classList.toggle('is-fallback', overall !== 'sp500');
       }

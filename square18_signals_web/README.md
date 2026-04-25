@@ -11,14 +11,14 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 
 - **Stock Screener tab** — three quick views across the **S&P 500**:
   today's biggest price jumps, today's biggest price dips, and a
-  calendar of upcoming earnings (next 14 days). The S&P 500 list itself
+  calendar of upcoming earnings (next 7 days by default). The S&P 500 list itself
   is **refreshed** from a public CSV on a schedule (24h by default;
   set `SQUARE18_SP500_REFRESH_HOURS` / optional `SQUARE18_SP500_CSV_URL` in
   `app/analyst/universe.py`); a bundled `data/sp500.json` is used
   offline, and a failed refresh keeps the last good list (`stale`)
   with at-most-hourly retry. Movers use a single batched
   `yfinance.download` over the current universe. Earnings use Nasdaq's
-  public calendar API. Both also fall back to the curated 19-ticker
+  public calendar API. Both also fall back to the tracked-ticker
   analyst pipeline when required. The API `source` field is
   `sp500` / `curated` / `unavailable` for the UI.
 - **Sianna Financials** brand (formerly "Square18 Signals").
@@ -48,12 +48,12 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
   - **Daily price jumps** — top S&P 500 gainers today.
   - **Daily price dips** — top S&P 500 losers today.
   - **Upcoming earnings** — S&P 500 companies reporting in the next
-    14 days, decorated with current price and day's change. Verdicts
-    show only for symbols that overlap the curated TICKERS list (no
+    7 days, decorated with current price and day's change. Verdicts
+    show only for symbols that overlap the tracked TICKERS list (no
     full analyst pipeline is run for the wider universe).
 - A scope pill in the header reflects the current data source: `S&P 500`
-  on the broad path, or `Curated 19` when the broad source is offline.
-- **Two-phase movers:** the UI first loads a **quick** curated list
+  on the broad path, or `Tracked` when the broad source is offline.
+- **Two-phase movers:** the UI first loads a **quick** tracked-list
   for jumps/dips, then refetches the full S&P 500 view when ready (with
   a small “Updating to full S&P 500 list…” line while the large batch
   is in flight), so the tab is never empty for long.
@@ -127,7 +127,7 @@ python -m pytest tests/test_e2e_app.py tests/test_e2e_ui_playwright.py -q
 | GET    | `/api/regime`                        | market-regime banner + universe counters        |
 | GET    | `/api/screen?filter=…`               | screener rows; `filter` ∈ all/buy/sell/hold     |
 | GET    | `/api/ticker/{symbol}`               | full detail payload + strategy recommendations  |
-| GET    | `/api/screener/movers?limit=…&quick=…` | jumps + dips in one body; `quick=1` = curated 19 only; `quick=0` = full S&P 500 |
+| GET    | `/api/screener/movers?limit=…&quick=…` | jumps + dips in one body; `quick=1` = tracked list only; `quick=0` = full S&P 500 |
 | GET    | `/api/screener/jumps?limit=…`        | top gainers only (broad + curated fallback)                    |
 | GET    | `/api/screener/dips?limit=…`         | top losers only (broad + curated fallback)                   |
 | GET    | `/api/screener/earnings?window_days=…` | upcoming S&P 500 earnings (Nasdaq + curated fallback)        |

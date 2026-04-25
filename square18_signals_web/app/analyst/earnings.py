@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .constants import TICKERS
+from .constants import SCREENER_EARNINGS_WINDOW_DAYS, TICKERS
 from .movers import _broad_universe_rows
 from .report import overview_rows
 from .universe import universe_by_symbol
@@ -252,7 +252,9 @@ def _curated_earnings(window_days: int) -> list[EarningsRow]:
 # ---------------------------------------------------------------------------
 
 
-def upcoming_earnings(window_days: int = 14) -> list[EarningsRow]:
+def upcoming_earnings(
+    window_days: int = SCREENER_EARNINGS_WINDOW_DAYS,
+) -> list[EarningsRow]:
     """Return upcoming earnings within ``window_days`` for the screener.
 
     Tries the broad Nasdaq path first; falls back to the curated yfinance
@@ -263,7 +265,9 @@ def upcoming_earnings(window_days: int = 14) -> list[EarningsRow]:
     return rows
 
 
-def upcoming_earnings_with_source(window_days: int = 14) -> tuple[list[EarningsRow], str]:
+def upcoming_earnings_with_source(
+    window_days: int = SCREENER_EARNINGS_WINDOW_DAYS,
+) -> tuple[list[EarningsRow], str]:
     """Same as :func:`upcoming_earnings` but also returns the source label."""
     now = time.time()
     cached_rows = _cache.get("rows") or []

@@ -16,14 +16,14 @@ Primary product behavior:
 - Ticker detail with factors and options strategy recommendations.
 - Free-form Search view (Buy / Sell / Hold plan for any ticker).
 - Stock Screener tab — daily price jumps, daily price dips, and an
-  upcoming earnings calendar (next 14 days). Scope is the **S&P 500**,
+  upcoming earnings calendar (default **7 days**). Scope is the **S&P 500**,
   whose **constituent list** is re-fetched from a public CSV (GitHub
   `datasets/s-and-p-500-companies`, overridable via `SQUARE18_SP500_CSV_URL`)
   on a TTL (default 24h, `SQUARE18_SP500_REFRESH_HOURS`, `0` = every
   call, for tests). `app/analyst/data/sp500.json` is the offline /
   cold-start fallback; on fetch failure, the last good in-process list
   is used as **stale** until the next successful pull. The curated
-  19-ticker list is used as a screener fallback when broad market data
+  tracked-ticker list is used as a screener fallback when broad market data
   is unavailable.
 - Analyst views with report generation and optional Claude-powered prose.
 
@@ -112,7 +112,7 @@ Dashboard + detail:
 Screener tab (universe = S&P 500):
 
 - `GET /api/screener/movers?timeframe=daily&limit=10&quick=0|1` — **jumps +
-  dips in one response**; `quick=1` returns the curated 19 only (no
+  dips in one response**; `quick=1` returns the tracked list only (no
   S&P 500 yfinance). The web UI calls this first for first paint, then
   `quick=0` (or omit) for the full batch.
 - `GET /api/screener/jumps?timeframe=daily&limit=10` — top gainers
@@ -120,7 +120,7 @@ Screener tab (universe = S&P 500):
   `source` ∈ {`sp500`, `curated`}.
 - `GET /api/screener/dips?timeframe=daily&limit=10` — top losers
   (negative `change_pct`, sorted ascending). Same `source` field.
-- `GET /api/screener/earnings?window_days=14&limit=50` — S&P 500
+- `GET /api/screener/earnings?window_days=7&limit=50` — S&P 500
   companies reporting earnings within the window. Response includes
   `source` ∈ {`sp500`, `curated`, `unavailable`}.
 
@@ -175,7 +175,7 @@ Screener / earnings behavior:
   `yfinance.download(...)` for the full universe → daily % change from
   the last two closes → sort + slice. Cached in-process for 10
   minutes. If the broad fetch fails, falls back to `overview_rows()`
-  on the curated 19 tickers and emits `source: "curated"`.
+  on the tracked list and emits `source: "curated"`.
 - **Earnings** (`app/analyst/earnings.py`): walks the next
   `window_days` and pulls Nasdaq's public calendar
   (`https://api.nasdaq.com/api/calendar/earnings?date=...`) day-by-day,

@@ -18,12 +18,24 @@ sys.path.insert(0, str(_ROOT.parent / "square18_signals" / "src"))
 from app.analyst import earnings as earnings_mod  # noqa: E402
 from app.analyst import movers as movers_mod  # noqa: E402
 from app.analyst import universe as universe_mod  # noqa: E402
+from app.analyst.constants import TICKER_MAP, TICKERS  # noqa: E402
 from app.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def client() -> TestClient:
     return TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Tracked list (TICKERS)
+# ---------------------------------------------------------------------------
+
+
+def test_tracked_list_includes_requested_symbols():
+    for sym in ("AVGO", "TSM", "AMD", "QCOM", "BYDDY", "JPM", "ORCL"):
+        assert sym in TICKER_MAP
+    assert len(TICKERS) >= 28
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +242,7 @@ def test_screener_earnings_envelope_when_helper_returns_empty(client, monkeypatc
     monkeypatch.setattr(
         earnings_mod,
         "upcoming_earnings_with_source",
-        lambda window_days=14: ([], "unavailable"),
+        lambda window_days=7: ([], "unavailable"),
     )
     r = client.get("/api/screener/earnings?window_days=7&limit=5")
     assert r.status_code == 200
@@ -256,11 +268,12 @@ def test_screener_earnings_payload_shape(client: TestClient, monkeypatch):
     monkeypatch.setattr(
         earnings_mod,
         "upcoming_earnings_with_source",
-        lambda window_days=14: (sample, "sp500"),
+        lambda window_days=7: (sample, "sp500"),
     )
-    r = client.get("/api/screener/earnings?window_days=14&limit=10")
+    r = client.get("/api/screener/earnings?window_days=7&limit=10")
     assert r.status_code == 200
     body = r.json()
+    assert body["window_days"] == 7
     assert body["source"] == "sp500"
     assert len(body["rows"]) == 1
     row = body["rows"][0]
@@ -331,7 +344,7 @@ def test_upcoming_earnings_falls_back_to_curated(monkeypatch):
     fake_yf = types.SimpleNamespace(Ticker=_FakeTicker)
     monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
 
-    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=14)
+    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=7)
     assert source == "curated"
     assert any(r.symbol == "AAPL" for r in rows)
 
@@ -347,7 +360,7 @@ def test_upcoming_earnings_unavailable_when_all_paths_fail(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "yfinance", types.SimpleNamespace(Ticker=_BoomTicker)
     )
-    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=14)
+    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=7)
     assert source == "unavailable"
     assert rows == []
 
@@ -372,7 +385,7 @@ def test_upcoming_earnings_cache_short_circuits(monkeypatch):
         raise AssertionError("Nasdaq path should not be hit when cache is warm")
 
     monkeypatch.setattr(earnings_mod, "_fetch_nasdaq_day", _explode)
-    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=14)
+    rows, source = earnings_mod.upcoming_earnings_with_source(window_days=7)
     assert source == "sp500"
     assert rows == sample
 
