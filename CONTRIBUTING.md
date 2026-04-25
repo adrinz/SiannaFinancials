@@ -43,7 +43,7 @@ python3 -m pytest square18_signals/tests -q
 # web API E2E
 python3 -m pytest square18_signals_web/tests/test_e2e_app.py -q
 
-# market news fallback behavior
+# market news (CNBC → MarketWatch → internal snapshot)
 python3 -m pytest square18_signals_web/tests/test_market_news.py -q
 ```
 

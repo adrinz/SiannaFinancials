@@ -17,7 +17,7 @@ from typing import Optional
 
 from square18_signals.pricing import black_scholes_price
 
-from .constants import DEFAULT_IV, TICKER_MAP, TICKERS, Timeframe
+from .constants import DEFAULT_IV, ETF_SIGNAL_TICKERS, TICKER_MAP, TICKERS, Timeframe
 from .data import OHLCV, get_ohlcv
 from .indicators import (
     atr as _atr,
@@ -148,10 +148,15 @@ def build_report(
     )
 
 
-def overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:
-    """Compact verdict + recommendation for every supported ticker."""
+def overview_rows(
+    timeframe: Timeframe = "daily",
+    *,
+    metas: list[dict] | None = None,
+) -> list[OverviewRow]:
+    """Compact verdict + recommendation for every entry in *metas* (default: ``TICKERS``)."""
+    universe = metas if metas is not None else TICKERS
     rows: list[OverviewRow] = []
-    for meta in TICKERS:
+    for meta in universe:
         try:
             rpt = build_report(meta["symbol"], timeframe)
         except Exception:
@@ -183,6 +188,11 @@ def overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:
             )
         )
     return rows
+
+
+def etf_overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:
+    """Verdicts for the dedicated ETF watchlist (``ETF_SIGNAL_TICKERS``)."""
+    return overview_rows(timeframe, metas=ETF_SIGNAL_TICKERS)
 
 
 # ---------------------------------------------------------------------------

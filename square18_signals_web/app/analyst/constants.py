@@ -48,7 +48,34 @@ TICKERS: list[dict] = [
         "yfinance_symbol": "^VIX"},
 ]
 
-TICKER_MAP: dict[str, dict] = {t["symbol"]: t for t in TICKERS}
+# liquid ETFs for the "ETF signals" tab (order = UI). Overlap with
+# ``TICKERS`` (e.g. SPY, QQQ) does not override existing ``TICKER_MAP``;
+# only new symbols are merged in.
+ETF_SIGNAL_TICKERS: list[dict] = [
+    {"symbol": "SPY",  "name": "S&P 500 ETF",             "sector": "ETF / US broad",   "bias": 0.02},
+    {"symbol": "QQQ",  "name": "Invesco QQQ Trust",        "sector": "ETF / US growth",  "bias": 0.04},
+    {"symbol": "IWM",  "name": "iShares Russell 2000",     "sector": "ETF / US small-cap", "bias": 0.03},
+    {"symbol": "DIA",  "name": "SPDR Dow Jones",           "sector": "ETF / US blue-chip", "bias": 0.02},
+    {"symbol": "VTI",  "name": "Vanguard Total Stock Mkt", "sector": "ETF / US total",   "bias": 0.02},
+    {"symbol": "VOO",  "name": "Vanguard S&P 500",         "sector": "ETF / US large-cap", "bias": 0.02},
+    {"symbol": "EFA",  "name": "iShares MSCI EAFE",         "sector": "ETF / intl dev",  "bias": 0.02},
+    {"symbol": "EEM",  "name": "iShares MSCI Emerging Mkts", "sector": "ETF / em",       "bias": 0.04},
+    {"symbol": "IEFA", "name": "iShares Core MSCI EAFE",     "sector": "ETF / intl dev",  "bias": 0.02},
+    {"symbol": "VUG",  "name": "Vanguard Growth",           "sector": "ETF / US growth",  "bias": 0.04},
+    {"symbol": "GLD",  "name": "SPDR Gold",                 "sector": "ETF / commodity",  "bias": 0.01},
+    {"symbol": "TLT",  "name": "iShares 20+ Year Treasury", "sector": "ETF / rates",      "bias": 0.01},
+    {"symbol": "HYG",  "name": "iShares iBoxx High Yield",  "sector": "ETF / credit",     "bias": 0.02},
+    {"symbol": "XLF",  "name": "Financial Select Sector",   "sector": "ETF / sector (fin)", "bias": 0.02},
+    {"symbol": "XLE",  "name": "Energy Select Sector",      "sector": "ETF / sector (ene)", "bias": 0.02},
+    {"symbol": "XLK",  "name": "Technology Select Sector",  "sector": "ETF / sector (tec)", "bias": 0.04},
+    {"symbol": "SMH",  "name": "VanEck Semiconductor",      "sector": "ETF / semis",    "bias": 0.06},
+    {"symbol": "ARKK", "name": "ARK Innovation",            "sector": "ETF / thematic", "bias": 0.08},
+]
+
+_ticker_map: dict[str, dict] = {t["symbol"]: t for t in TICKERS}
+for _m in ETF_SIGNAL_TICKERS:
+    _ticker_map.setdefault(_m["symbol"], _m)
+TICKER_MAP: dict[str, dict] = _ticker_map
 
 
 # Per-ticker approximate baseline annualized vol for synthetic generation.
@@ -64,6 +91,11 @@ DEFAULT_IV: dict[str, float] = {
     "QUBT": 1.20,  "QBTS": 1.05, "SMR":  0.95, "OKLO": 1.10,
     # VIX is itself a vol measure; its vol-of-vol is very high.
     "VIX":  1.10,
+    # ETF tab-only symbols (broad/sector/ bond proxies).
+    "IWM": 0.24,  "DIA": 0.16,  "VTI": 0.16,  "VOO": 0.16,
+    "EFA": 0.18,  "EEM": 0.24,  "IEFA": 0.16, "VUG": 0.22,
+    "GLD": 0.16,  "TLT": 0.12,  "HYG": 0.08,  "XLF": 0.20,
+    "XLE": 0.24,  "XLK": 0.20,  "SMH": 0.30,  "ARKK": 0.45,
 }
 
 # Approximate anchor prices used by the synthetic generator so charts land
@@ -78,6 +110,10 @@ ANCHOR_PRICES: dict[str, float] = {
     "COIN": 220.0, "XOM":  112.0, "BYDDY": 12.0,
     "QUBT":  12.0, "QBTS":   6.0, "SMR":   18.0, "OKLO":  22.0,
     "VIX":   17.0,
+    "IWM": 220.0, "DIA":  420.0, "VTI":  280.0, "VOO":  520.0,
+    "EFA":  78.0, "EEM":   45.0, "IEFA":  72.0, "VUG":  420.0,
+    "GLD": 240.0, "TLT":   90.0, "HYG":   80.0, "XLF":   50.0,
+    "XLE":  90.0, "XLK":  250.0, "SMH":  280.0, "ARKK":  55.0,
 }
 
 

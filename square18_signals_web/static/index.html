@@ -35,6 +35,9 @@
         <button class="tab" data-view="screener" role="tab" aria-selected="false">
           Screener
         </button>
+        <button class="tab" data-view="etf" role="tab" aria-selected="false">
+          ETFs
+        </button>
         <button class="tab" data-view="analyst" role="tab" aria-selected="false">
           Analyst
         </button>
@@ -557,6 +560,51 @@
               <li class="loading">Loading earnings calendar&hellip;</li>
             </ul>
           </div>
+        </div>
+      </section>
+
+      <!-- ETF signals view -->
+      <section class="view view-etf hidden" data-view="etf">
+        <div class="analyst-header etf-header">
+          <div>
+            <h1 class="analyst-title">ETF signals</h1>
+            <div class="analyst-sub">
+              Same verdict and options-style recommendation fields as the analyst
+              overview, for a fixed basket of liquid ETFs. Click a row for full
+              ticker detail and technical report. Timeframe:
+              <span class="mono" id="etf-timeframe-label">daily</span>.
+            </div>
+          </div>
+          <div class="analyst-header-right">
+            <div class="analyst-timeframes etf-timeframes" role="tablist" aria-label="ETF timeframe">
+              <button class="pill" data-tf="1h" type="button">1H</button>
+              <button class="pill" data-tf="4h" type="button">4H</button>
+              <button class="pill is-active" data-tf="daily" type="button">Daily</button>
+              <button class="pill" data-tf="weekly" type="button">Weekly</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-wrap etf-table-wrap">
+          <table class="data-table" id="etf-signals-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Name</th>
+                <th class="num">Last</th>
+                <th class="num">Chg</th>
+                <th>Verdict</th>
+                <th class="num">Composite</th>
+                <th class="num">Conv</th>
+                <th class="num">RSI</th>
+                <th>Trend</th>
+                <th>Rec</th>
+              </tr>
+            </thead>
+            <tbody id="etf-signals-tbody">
+              <tr><td colspan="10" class="loading">Loading ETF signals&hellip;</td></tr>
+            </tbody>
+          </table>
         </div>
       </section>
 

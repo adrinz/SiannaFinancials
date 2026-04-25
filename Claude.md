@@ -134,6 +134,7 @@ Search + analyst:
 - `GET /api/search/suggest?q=...&limit=...`
 - `GET /api/analyst/tickers`
 - `GET /api/analyst/overview?timeframe=...`
+- `GET /api/etf/signals?timeframe=...` (ETF watchlist; same overview row model)
 - `GET /api/analyst/report/{symbol}?timeframe=...`
 - `GET /api/analyst/llm-config`
 - `GET /api/analyst/polish/{symbol}?timeframe=...` (LLM optional)
@@ -155,8 +156,8 @@ General behavior:
 
 News behavior (important):
 
-- Primary source: `yfinance` ticker news.
-- Fallback source: MarketWatch RSS (`topstories`, `marketpulse`).
+- Primary source: **CNBC** official section RSS (merged feeds, deduped).
+- Second source: **MarketWatch** RSS (`topstories`, `marketpulse`).
 - Final fallback: internal snapshot headlines generated from current analyst overview.
 - If all fail, source reports `unavailable`.
 

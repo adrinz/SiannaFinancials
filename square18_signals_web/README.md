@@ -41,6 +41,8 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 - Five-up KPI strip (universe size, longs, shorts, holds, VIX).
 - Today's signals table — click any row to open its detail view.
 - Filter pills (All / Buy / Sell / Hold).
+- **Market news** — CNBC RSS (primary), then MarketWatch RSS, then a
+  deterministic internal snapshot if both feeds are empty.
 
 **Screener** (universe: S&P 500)
 
@@ -62,6 +64,14 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
   yfinance batch can still take 30–90s on a cold server cache; the
   quick list appears within one round-trip, then the full list when the
   batch finishes.
+
+**ETF signals**
+
+- Dedicated tab: verdict, composite, and headline options-style recommendation
+  fields (same `OverviewRow` contract as the analyst overview) for a fixed
+  basket of liquid ETFs in `app/analyst/constants.py` (`ETF_SIGNAL_TICKERS`).
+- Timeframe pills match the rest of the app (1H / 4H / Daily / Weekly).
+- Click a row to open the full ticker detail and technical report.
 
 **Ticker detail**
 
@@ -133,6 +143,7 @@ python -m pytest tests/test_e2e_app.py tests/test_e2e_ui_playwright.py -q
 | GET    | `/api/screener/earnings?window_days=…` | upcoming S&P 500 earnings (Nasdaq + curated fallback)        |
 | GET    | `/api/analyst/tickers`               | analyst universe (symbol/name/sector)           |
 | GET    | `/api/analyst/overview?timeframe=…`  | verdict + recommendation row per ticker         |
+| GET    | `/api/etf/signals?timeframe=…`       | same row shape, ETF watchlist only               |
 | GET    | `/api/analyst/report/{symbol}`       | full technical report for a ticker              |
 | GET    | `/api/analyst/llm-config`            | `{enabled, model}` for the Claude layer         |
 | GET    | `/api/analyst/polish/{symbol}`       | Claude-polished narrative (requires API key)    |

@@ -52,7 +52,7 @@ python3 -m pytest square18_signals_web/tests/test_screener.py -q
 
 - Python 3.10+ recommended.
 - `square18_signals_web` imports the sibling `square18_signals/src` path at runtime.
-- News feed has multi-level fallback logic (yfinance -> RSS -> internal snapshot).
+- News feed has multi-level fallback logic (CNBC RSS -> MarketWatch RSS -> internal snapshot).
 - Stock screener scans the S&P 500: constituents are **fetched** from a public S&P 500 CSV on a TTL (default 24h, see `SQUARE18_SP500_REFRESH_HOURS` in `app/analyst/universe.py`, optional `SQUARE18_SP500_CSV_URL`); a bundled `sp500.json` is used for cold start / offline, with **stale** last-good data if the network feed fails. Movers use batched `yfinance`; the earnings card defaults to **7 days** ahead (`SCREENER_EARNINGS_WINDOW_DAYS` in `app/analyst/constants.py`). The **tracked** ticker list in `TICKERS` (dashboard + screener quick path) is used when the broad sources are down.
 - See `Claude.md` for deeper architecture, endpoint, and operational details.
 

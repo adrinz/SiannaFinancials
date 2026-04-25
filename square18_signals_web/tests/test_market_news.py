@@ -48,9 +48,37 @@ def test_fetch_marketwatch_rss_parses_items(monkeypatch):
     assert "<p>" not in items[0].summary
 
 
-def test_news_feed_uses_rss_fallback_when_yfinance_empty(monkeypatch):
-    fake_yf = types.SimpleNamespace(Ticker=lambda _sym: types.SimpleNamespace(news=[]))
-    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+def test_news_feed_prefers_cnbc_rss(monkeypatch):
+    monkeypatch.setattr(
+        market,
+        "_fetch_cnbc_rss",
+        lambda limit: [
+            market.NewsItem(
+                title="Headline from CNBC",
+                publisher="CNBC",
+                url="https://www.cnbc.com/example",
+                related="MKT",
+                published_at="2026-04-22T12:00:00+00:00",
+                summary="",
+            )
+        ][:limit],
+    )
+    called_mw: dict[str, int] = {"n": 0}
+
+    def _track_mw(limit: int) -> list:
+        called_mw["n"] += 1
+        return []
+
+    monkeypatch.setattr(market, "_fetch_marketwatch_rss", _track_mw)
+    feed = market.news_feed(limit=3)
+    assert feed.source == "cnbc-rss"
+    assert len(feed.items) == 1
+    assert feed.items[0].title == "Headline from CNBC"
+    assert called_mw["n"] == 0
+
+
+def test_news_feed_uses_marketwatch_when_cnbc_empty(monkeypatch):
+    monkeypatch.setattr(market, "_fetch_cnbc_rss", lambda _limit: [])
     monkeypatch.setattr(
         market,
         "_fetch_marketwatch_rss",
@@ -60,7 +88,7 @@ def test_news_feed_uses_rss_fallback_when_yfinance_empty(monkeypatch):
                 publisher="MarketWatch",
                 url="https://example.com/fallback",
                 related="MKT",
-                published_at="Wed, 22 Apr 2026 12:15:00 GMT",
+                published_at="2026-04-22T12:15:00+00:00",
                 summary="Fallback summary",
             )
         ][:limit],
@@ -72,8 +100,7 @@ def test_news_feed_uses_rss_fallback_when_yfinance_empty(monkeypatch):
 
 
 def test_news_feed_uses_internal_snapshot_when_external_sources_empty(monkeypatch):
-    fake_yf = types.SimpleNamespace(Ticker=lambda _sym: types.SimpleNamespace(news=[]))
-    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+    monkeypatch.setattr(market, "_fetch_cnbc_rss", lambda _limit: [])
     monkeypatch.setattr(market, "_fetch_marketwatch_rss", lambda _limit: [])
     monkeypatch.setattr(
         market,

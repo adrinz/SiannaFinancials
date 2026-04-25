@@ -2,7 +2,7 @@
 
 These functions compose data from the existing analyst pipeline
 (``overview_rows``) plus a handful of additional live calls (crypto via
-yfinance, news via yfinance.Ticker.news) and return shapes the Dashboard
+yfinance, news via CNBC and MarketWatch RSS) and return shapes the Dashboard
 UI can render without additional backend calls.
 
 Design
@@ -10,7 +10,7 @@ Design
 * Everything here is a thin aggregator — no new math; just slicing,
   sorting, grouping, and formatting on top of what ``build_report``
   already produces.
-* Crypto and news are best-effort. If the network/yfinance path fails
+* Crypto and news are best-effort. If the network path fails
   we return empty lists rather than raising, so a dashboard card can
   degrade gracefully.
 """
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import re
 from statistics import mean
 from typing import Optional
@@ -270,12 +271,19 @@ def crypto_snapshot() -> CryptoSnapshot:
 # ---------------------------------------------------------------------------
 
 
-# Always include a few broad-market tickers so the feed isn't dominated
-# by a single-name story.
-NEWS_TICKERS: list[str] = [
-    "SPY", "QQQ", "AAPL", "NVDA", "MSFT", "AMZN", "TSLA", "META",
-    "GOOGL", "BTC-USD", "ETH-USD",
+# Official CNBC section RSS (two feeds merged + deduped, then newest-first).
+CNBC_RSS_URLS: list[str] = [
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # US Top News and Analysis
+    "https://www.cnbc.com/id/10001147/device/rss/rss.html",  # Business News
 ]
+
+_RSS_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
 
 
 @dataclass
@@ -294,63 +302,6 @@ class NewsFeed:
     source: str
 
 
-def _parse_yf_news_entry(entry: dict) -> Optional[dict]:
-    """Normalise yfinance news entries across versions.
-
-    Recent yfinance returns ``{'content': {...}}``; older versions emit a
-    flat dict. This accepts both.
-    """
-    if not isinstance(entry, dict):
-        return None
-    content = entry.get("content") if isinstance(entry.get("content"), dict) else entry
-    if not isinstance(content, dict):
-        return None
-    title = content.get("title") or ""
-    pub = (
-        (content.get("provider") or {}).get("displayName")
-        if isinstance(content.get("provider"), dict)
-        else content.get("publisher")
-    ) or ""
-    url = ""
-    cu = content.get("canonicalUrl")
-    if isinstance(cu, dict):
-        url = cu.get("url") or ""
-    if not url:
-        cl = content.get("clickThroughUrl")
-        if isinstance(cl, dict):
-            url = cl.get("url") or ""
-    if not url:
-        url = content.get("link") or entry.get("link") or ""
-    pub_date = (
-        content.get("pubDate")
-        or content.get("displayTime")
-        or content.get("providerPublishTime")
-        or entry.get("providerPublishTime")
-        or ""
-    )
-    summary = content.get("summary") or content.get("description") or ""
-    return {
-        "title": title,
-        "publisher": pub,
-        "url": url,
-        "published_at": pub_date,
-        "summary": summary,
-    }
-
-
-def _coerce_ts(val) -> str:
-    """Return ISO-8601 UTC. Accept int epoch, str, or blank."""
-    from datetime import datetime, timezone
-    if isinstance(val, (int, float)) and val > 0:
-        try:
-            return datetime.fromtimestamp(int(val), tz=timezone.utc).isoformat()
-        except Exception:
-            return ""
-    if isinstance(val, str):
-        return val
-    return ""
-
-
 def _strip_html(text: str) -> str:
     """Very small HTML-to-text cleaner for RSS summaries."""
     if not text:
@@ -359,54 +310,94 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", no_tags).strip()
 
 
+def _rss_pubdate_to_iso(pub: str) -> str:
+    """Normalise RSS ``pubDate`` to ISO-8601 UTC; fall back to the raw string."""
+    if not pub or not str(pub).strip():
+        return ""
+    try:
+        dt = parsedate_to_datetime(str(pub).strip())
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return str(pub).strip()
+
+
+def _fetch_rss_from_url(
+    feed_url: str,
+    *,
+    publisher: str,
+    related: str,
+    max_items: int,
+) -> list[NewsItem]:
+    """Read up to ``max_items`` unique titles from a single RSS document."""
+    try:
+        req = urllib.request.Request(feed_url, headers=_RSS_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+            payload = resp.read()
+        root = ET.fromstring(payload)
+    except Exception:
+        return []
+
+    out: list[NewsItem] = []
+    for node in root.findall(".//item"):
+        if len(out) >= max_items:
+            break
+        title = (node.findtext("title") or "").strip()
+        if not title:
+            continue
+        link = (node.findtext("link") or "").strip()
+        pub_raw = (node.findtext("pubDate") or "").strip()
+        summary = _strip_html(node.findtext("description") or "")
+        out.append(
+            NewsItem(
+                title=title,
+                publisher=publisher,
+                url=link,
+                related=related,
+                published_at=_rss_pubdate_to_iso(pub_raw) or pub_raw,
+                summary=summary,
+            )
+        )
+    return out
+
+
+def _fetch_cnbc_rss(limit: int) -> list[NewsItem]:
+    """Primary dashboard news: two CNBC section feeds, deduped, newest first."""
+    seen: set[str] = set()
+    acc: list[NewsItem] = []
+    per = max(8, min(30, limit * 2))
+    for url in CNBC_RSS_URLS:
+        for it in _fetch_rss_from_url(url, publisher="CNBC", related="MKT", max_items=per):
+            if it.title in seen:
+                continue
+            seen.add(it.title)
+            acc.append(it)
+    acc.sort(key=lambda n: n.published_at or "", reverse=True)
+    return acc[:limit]
+
+
 def _fetch_marketwatch_rss(limit: int) -> list[NewsItem]:
-    """Fallback live news source when yfinance news is unavailable."""
-    feeds = [
-        "https://www.marketwatch.com/rss/topstories",
-        "https://www.marketwatch.com/rss/marketpulse",
-    ]
+    """Fallback when CNBC RSS is unavailable or empty."""
     seen_titles: set[str] = set()
     items: list[NewsItem] = []
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
-
-    for feed_url in feeds:
+    for feed_url in (
+        "https://www.marketwatch.com/rss/topstories",
+        "https://www.marketwatch.com/rss/marketpulse",
+    ):
         if len(items) >= limit:
             break
-        try:
-            req = urllib.request.Request(feed_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=6) as resp:  # noqa: S310 (public RSS URL)
-                payload = resp.read()
-            root = ET.fromstring(payload)
-        except Exception:
-            continue
-
-        for node in root.findall(".//item"):
+        for it in _fetch_rss_from_url(
+            feed_url, publisher="MarketWatch", related="MKT", max_items=limit
+        ):
+            if it.title in seen_titles:
+                continue
+            seen_titles.add(it.title)
+            items.append(it)
             if len(items) >= limit:
                 break
-            title = (node.findtext("title") or "").strip()
-            if not title or title in seen_titles:
-                continue
-            seen_titles.add(title)
-            link = (node.findtext("link") or "").strip()
-            pub_date = (node.findtext("pubDate") or "").strip()
-            summary = _strip_html(node.findtext("description") or "")
-            items.append(
-                NewsItem(
-                    title=title,
-                    publisher="MarketWatch",
-                    url=link,
-                    related="MKT",
-                    published_at=pub_date,
-                    summary=summary,
-                )
-            )
-    return items
+    items.sort(key=lambda n: n.published_at or "", reverse=True)
+    return items[:limit]
 
 
 def _build_internal_snapshot_news(limit: int) -> list[NewsItem]:
@@ -485,51 +476,15 @@ def _build_internal_snapshot_news(limit: int) -> list[NewsItem]:
 
 
 def news_feed(limit: int = 12) -> NewsFeed:
-    try:
-        import yfinance as yf  # type: ignore
-    except Exception:
-        return NewsFeed(items=[], source="unavailable")
-
-    seen_titles: set[str] = set()
-    items: list[NewsItem] = []
-    for sym in NEWS_TICKERS:
-        if len(items) >= limit * 2:
-            break
-        try:
-            t = yf.Ticker(sym)
-            raw = getattr(t, "news", None) or []
-        except Exception:
-            raw = []
-        for entry in raw:
-            parsed = _parse_yf_news_entry(entry)
-            if not parsed or not parsed["title"]:
-                continue
-            title = parsed["title"].strip()
-            if title in seen_titles:
-                continue
-            seen_titles.add(title)
-            items.append(
-                NewsItem(
-                    title=title,
-                    publisher=parsed["publisher"] or "—",
-                    url=parsed["url"] or "",
-                    related=sym,
-                    published_at=_coerce_ts(parsed["published_at"]),
-                    summary=parsed["summary"],
-                )
-            )
-
-    # Sort newest first when timestamps are comparable, otherwise keep order.
-    def _key(n: NewsItem):
-        return n.published_at or ""
-    items.sort(key=_key, reverse=True)
-
-    if items:
-        return NewsFeed(items=items[:limit], source="yfinance")
+    # CNBC RSS first: one or two quick HTTP fetches, continuously updated, no
+    # per-ticker yfinance news fan-out (which is slower and often Yahoo-sourced).
+    primary = _fetch_cnbc_rss(limit)
+    if primary:
+        return NewsFeed(items=primary, source="cnbc-rss")
 
     fallback_items = _fetch_marketwatch_rss(limit)
     if fallback_items:
-        return NewsFeed(items=fallback_items[:limit], source="marketwatch-rss")
+        return NewsFeed(items=fallback_items, source="marketwatch-rss")
 
     internal_items = _build_internal_snapshot_news(limit)
     if internal_items:

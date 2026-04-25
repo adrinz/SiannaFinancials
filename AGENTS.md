@@ -45,6 +45,7 @@ python3 -m pytest square18_signals_web/tests/test_e2e_ui_playwright.py -q
 ## High-Impact Files
 
 - API entry: `square18_signals_web/app/main.py`
+- Ticker + ETF watchlists, `TICKER_MAP`, defaults: `square18_signals_web/app/analyst/constants.py`
 - Market/news aggregation: `square18_signals_web/app/analyst/market.py`
 - Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
 - Broad market movers: `square18_signals_web/app/analyst/movers.py`

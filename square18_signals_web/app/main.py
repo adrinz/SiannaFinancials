@@ -20,6 +20,7 @@ if str(_SIGNALS_SRC) not in sys.path:
 from .analyst import TICKERS as ANALYST_TICKERS  # noqa: E402
 from .analyst.constants import SCREENER_EARNINGS_WINDOW_DAYS  # noqa: E402
 from .analyst import build_report, overview_rows  # noqa: E402
+from .analyst.report import etf_overview_rows  # noqa: E402
 from .analyst import earnings as _earnings  # noqa: E402
 from .analyst import llm as _llm  # noqa: E402
 from .analyst import market as _market  # noqa: E402
@@ -89,6 +90,14 @@ def analyst_overview(timeframe: str = "daily") -> list[OverviewRow]:
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     return overview_rows(timeframe)  # type: ignore[arg-type]
+
+
+@app.get("/api/etf/signals", response_model=list[OverviewRow], tags=["etf"])
+def etf_signals(timeframe: str = "daily") -> list[OverviewRow]:
+    """Verdict + trade-plan summary for the ETF watchlist (``ETF_SIGNAL_TICKERS``)."""
+    if timeframe not in _ALLOWED_TIMEFRAMES:
+        raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
+    return etf_overview_rows(timeframe)  # type: ignore[arg-type]
 
 
 @app.get(

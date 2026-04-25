@@ -1,4 +1,4 @@
-"""End-to-end app tests for Dashboard, Detail, Search, and Analyst flows.
+"""End-to-end app tests for Dashboard, Detail, Search, ETF signals, and Analyst flows.
 
 These tests exercise the app through FastAPI's TestClient as a browser/API
 consumer would:
@@ -54,11 +54,13 @@ def test_root_serves_all_page_containers(client: TestClient):
     assert 'data-view="detail"' in html
     assert 'data-view="search"' in html
     assert 'data-view="analyst"' in html
+    assert 'data-view="etf"' in html
 
     # Core view containers.
     assert 'class="view view-dashboard' in html
     assert 'class="view view-detail' in html
     assert 'class="view view-search' in html
+    assert 'class="view view-etf' in html
     assert 'class="view view-analyst' in html
 
     # Key per-page anchors used by app.js.
@@ -70,6 +72,7 @@ def test_root_serves_all_page_containers(client: TestClient):
     assert 'id="overview-list"' in html
     assert 'id="analyst-report"' in html
     assert 'id="all-recs-tbody"' in html
+    assert 'id="etf-signals-tbody"' in html
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +237,41 @@ def test_search_validation_and_not_found(client: TestClient):
 # ---------------------------------------------------------------------------
 # Analyst flow
 # ---------------------------------------------------------------------------
+
+
+def test_etf_signals_overview_happy_path(client: TestClient):
+    """ETF watchlist returns the same OverviewRow shape as /api/analyst/overview."""
+    rows = _json(client, "/api/etf/signals?timeframe=daily")
+    assert isinstance(rows, list) and len(rows) > 0
+    row = rows[0]
+    for k in (
+        "symbol",
+        "name",
+        "sector",
+        "last",
+        "change_pct",
+        "verdict",
+        "conviction",
+        "composite_score",
+        "trend",
+        "source",
+        "rec_contract_type",
+        "rec_strike",
+        "rec_expiry_date",
+        "rec_expiry_dte",
+    ):
+        assert k in row
+
+
+def test_etf_signals_timeframe_validation(client: TestClient):
+    r = client.get("/api/etf/signals?timeframe=monthly")
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("tf", ["1h", "4h", "daily", "weekly"])
+def test_etf_signals_supports_all_timeframes(client: TestClient, tf: str):
+    rows = _json(client, f"/api/etf/signals?timeframe={tf}")
+    assert isinstance(rows, list)
 
 
 def test_analyst_tickers_overview_report_flow(client: TestClient):

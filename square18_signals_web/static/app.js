@@ -145,6 +145,9 @@ function initTabs() {
       } else if (target === 'screener') {
         switchView('screener');
         loadScreener();
+      } else if (target === 'etf') {
+        switchView('etf');
+        initEtfOnce();
       } else {
         switchView(target);
       }
@@ -430,13 +433,22 @@ function cryptoSpark(points, side) {
 
 // ---------- Dashboard: news feed -------------------------------------------
 
+function fmtNewsSource(src) {
+  const m = {
+    'cnbc-rss': 'CNBC',
+    'marketwatch-rss': 'MarketWatch',
+    'internal-snapshot': 'Sianna (snapshot)',
+  };
+  return m[src] != null ? m[src] : src;
+}
+
 async function loadNews() {
   const ul = $('#news-list');
   const srcEl = $('#news-source');
   if (!ul) return;
   try {
     const d = await api('/api/news?limit=14');
-    if (srcEl) srcEl.textContent = d.source;
+    if (srcEl) srcEl.textContent = fmtNewsSource(d.source);
     ul.innerHTML = '';
     if (!d.items.length) {
       ul.append(h('li', { class: 'loading' }, 'No headlines available.'));
@@ -1215,6 +1227,12 @@ const analyst = {
   briefCache: {},  // key = tf -> brief text
 };
 
+const etf = {
+  initialized: false,
+  timeframe: 'daily',
+  overview: [],
+};
+
 async function initAnalystOnce() {
   if (analyst.initialized) return;
   analyst.initialized = true;
@@ -1411,6 +1429,87 @@ function fmtStrike(k) {
   return k >= 100 || Math.abs(k - Math.round(k)) < 1e-6
     ? k.toFixed(0)
     : k.toFixed(2);
+}
+
+async function initEtfOnce() {
+  if (etf.initialized) return;
+  etf.initialized = true;
+
+  $$('.etf-timeframes .pill').forEach((p) => {
+    p.addEventListener('click', () => {
+      if (etf.timeframe === p.dataset.tf) return;
+      etf.timeframe = p.dataset.tf;
+      $$('.etf-timeframes .pill').forEach((x) =>
+        x.classList.toggle('is-active', x === p)
+      );
+      const lbl = $('#etf-timeframe-label');
+      if (lbl) lbl.textContent = p.dataset.tf;
+      etf.overview = [];
+      loadEtfOverview();
+    });
+  });
+  loadEtfOverview();
+}
+
+async function loadEtfOverview() {
+  const tbody = $('#etf-signals-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="10" class="loading">Loading ETF signals…</td></tr>';
+  try {
+    const rows = await api(
+      `/api/etf/signals?timeframe=${encodeURIComponent(etf.timeframe)}`
+    );
+    etf.overview = rows;
+    renderEtfTable();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="10" class="loading">Failed: ${e}</td></tr>`;
+  }
+}
+
+function renderEtfTable() {
+  const tbody = $('#etf-signals-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!etf.overview.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="loading">No data.</td></tr>';
+    return;
+  }
+  const sorted = etf.overview.slice().sort((a, b) => {
+    const vOrd = { BULLISH: 0, BEARISH: 1, NEUTRAL: 2 };
+    if (vOrd[a.verdict] !== vOrd[b.verdict]) return vOrd[a.verdict] - vOrd[b.verdict];
+    return b.conviction - a.conviction;
+  });
+  for (const r of sorted) {
+    const vcls =
+      r.verdict === 'BULLISH' ? 'success' :
+      r.verdict === 'BEARISH' ? 'danger' : 'neutral';
+    const recCls = r.rec_contract_type === 'call' ? 'rec-call' : 'rec-put';
+    const recLabel = r.rec_contract_type === 'call' ? 'CALL' : 'PUT';
+    tbody.append(
+      h(
+        'tr',
+        {
+          class: 'clickable',
+          onClick: () => switchView('detail', { symbol: r.symbol }),
+        },
+        h('td', { class: 'sym mono' }, r.symbol),
+        h('td', { class: 'name' }, r.name),
+        h('td', { class: 'num mono' }, fmtUSD(r.last)),
+        h('td', { class: `num ${r.change_pct >= 0 ? 'pos' : 'neg'}` }, fmtPct(r.change_pct)),
+        h('td', {}, h('span', { class: `pill-badge ${vcls}` }, r.verdict)),
+        h('td', { class: 'num mono' }, fmtScore(r.composite_score)),
+        h('td', { class: 'num mono' }, `${Math.round(r.conviction * 100)}%`),
+        h('td', { class: 'num mono' }, r.rsi != null ? r.rsi.toFixed(0) : '—'),
+        h('td', { class: 'mono muted' }, r.trend),
+        h(
+          'td',
+          { class: 'mono' },
+          h('span', { class: `rec-pill ${recCls}` },
+            `${recLabel} $${fmtStrike(r.rec_strike)}`)
+        )
+      )
+    );
+  }
 }
 
 async function loadAnalystReport(symbol) {
@@ -2157,6 +2256,7 @@ async function refreshAll({ reason = 'manual' } = {}) {
   analyst.reports = {};
   analyst.polishCache = {};
   analyst.briefCache = {};
+  etf.overview = [];
 
   try {
     await loadDashboard();
@@ -2173,6 +2273,9 @@ async function refreshAll({ reason = 'manual' } = {}) {
     }
     if (state.view === 'screener') {
       loadScreener();
+    }
+    if (state.view === 'etf') {
+      loadEtfOverview();
     }
     // Re-check LLM health on every refresh so the badge recovers from
     // transient errors (e.g. right after the user adds credits).
