@@ -60,10 +60,11 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
   a small “Updating to full S&P 500 list…” line while the large batch
   is in flight), so the tab is never empty for long.
 - Click any row to jump to the full Ticker Detail view.
-- Auto-refreshes alongside the rest of the dashboard. The S&P 500
-  yfinance batch can still take 30–90s on a cold server cache; the
-  quick list appears within one round-trip, then the full list when the
-  batch finishes.
+- Auto-refreshes alongside the rest of the dashboard. The full S&P 500
+  yfinance batch can still be slow on a cold run; the UI loads a
+  **quick** tracked list first, then upgrades to the broad list. The
+  backend reuses a single daily overview pass and a short in-memory
+  cache so those requests do not each repeat full per-ticker analysis.
 
 **ETF signals**
 
@@ -72,6 +73,18 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
   basket of liquid ETFs in `app/analyst/constants.py` (`ETF_SIGNAL_TICKERS`).
 - Timeframe pills match the rest of the app (1H / 4H / Daily / Weekly).
 - Click a row to open the full ticker detail and technical report.
+
+**Copy trade (research)**
+
+- Select a **13F filer** (e.g. Berkshire Hathaway) or a **static themed basket**
+  (curated symbols from the tracked universe). Holdings and weights are for
+  research only: **no brokerage connection** and **no auto-execution**.
+- 13F data is **quarterly** and **lagged**; “signals” compare the latest saved
+  snapshot in this app to the previous one (not live social copy-trading).
+- Optional card explains that **unusual options** / tick-level flows need vendor
+  data in a future version.
+- Local state (snapshots/signals log) may be written to
+  `app/analyst/data/copy_trade_state.json` (gitignored).
 
 **Ticker detail**
 
@@ -144,6 +157,9 @@ python -m pytest tests/test_e2e_app.py tests/test_e2e_ui_playwright.py -q
 | GET    | `/api/analyst/tickers`               | analyst universe (symbol/name/sector)           |
 | GET    | `/api/analyst/overview?timeframe=…`  | verdict + recommendation row per ticker         |
 | GET    | `/api/etf/signals?timeframe=…`       | same row shape, ETF watchlist only               |
+| GET    | `/api/copy-trade/creators`           | 13F + static theme list (id, name, type)         |
+| GET    | `/api/copy-trade/holdings/{id}`      | `?refresh=0` cached snapshot; `1` refetches SEC   |
+| GET    | `/api/copy-trade/signals?creator_id=…` | change signals vs prior snapshot                |
 | GET    | `/api/analyst/report/{symbol}`       | full technical report for a ticker              |
 | GET    | `/api/analyst/llm-config`            | `{enabled, model}` for the Claude layer         |
 | GET    | `/api/analyst/polish/{symbol}`       | Claude-polished narrative (requires API key)    |

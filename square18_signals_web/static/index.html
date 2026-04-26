@@ -5,9 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=sianna-2026-1" />
   </head>
   <body>
+    <div
+      id="app-client-error"
+      class="app-client-error"
+      role="status"
+      aria-live="assertive"
+      hidden
+    ></div>
     <header class="topbar">
       <div class="brand">
         <div class="logo-mark" aria-hidden="true">SF</div>
@@ -37,6 +44,9 @@
         </button>
         <button class="tab" data-view="etf" role="tab" aria-selected="false">
           ETFs
+        </button>
+        <button class="tab" data-view="copy-trade" role="tab" aria-selected="false">
+          Copy trade
         </button>
         <button class="tab" data-view="analyst" role="tab" aria-selected="false">
           Analyst
@@ -608,6 +618,62 @@
         </div>
       </section>
 
+      <!-- Copy trade (research; no order execution) -->
+      <section class="view view-copy-trade hidden" data-view="copy-trade">
+        <div class="analyst-header copytrade-header">
+          <div>
+            <h1 class="analyst-title">Copy trade (research)</h1>
+            <p class="analyst-sub copytrade-disclaimer">
+              13F data is <strong>quarterly</strong> and filed with significant lag. This tab does
+              <strong>not</strong> place trades, mirror accounts in real time, or connect to a brokerage.
+              Use signals to inform your own research, then open a symbol for the full plan.
+            </p>
+            <p class="muted mono" id="copytrade-trail">—</p>
+          </div>
+          <div class="analyst-header-right copytrade-tools">
+            <label class="muted" for="copytrade-select">Portfolio / filer</label>
+            <select id="copytrade-select" class="copytrade-select" aria-label="Select portfolio"></select>
+            <button type="button" class="btn-ghost" id="copytrade-refresh">Refresh from source</button>
+          </div>
+        </div>
+
+        <div class="copytrade-options-placeholder card">
+          <div class="card-header">
+            <span class="card-title">Unusual options &amp; live institutional flows</span>
+          </div>
+          <p class="muted" style="margin:0;padding:0 0 4px 0;">
+            Tick-level options and unusual-activity feeds typically require OPRA / vendor APIs and
+            are not part of this build. A future version could add approximate volume proxies for a
+            small symbol set, clearly labelled.
+          </p>
+        </div>
+
+        <div class="table-wrap" style="margin-top: 14px;">
+          <h2 class="section-inline-title">Holdings / weights</h2>
+          <table class="data-table" id="copytrade-holdings-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Issuer / name</th>
+                <th class="num">Value ($)</th>
+                <th class="num">Weight %</th>
+                <th class="num">13F value ($000s)</th>
+                <th>CUSIP</th>
+              </tr>
+            </thead>
+            <tbody id="copytrade-holdings-tbody">
+              <tr><td colspan="6" class="loading">Open this tab to load&hellip;</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="copytrade-signals-wrap">
+          <h2 class="section-inline-title">Activity &amp; change signals</h2>
+          <p class="section-sub mono muted" id="copytrade-signals-hint">Compared to the last saved snapshot in this app.</p>
+          <ul class="copytrade-signals" id="copytrade-signals"></ul>
+        </div>
+      </section>
+
       <!-- Analyst view -->
       <section class="view view-analyst hidden" data-view="analyst">
         <div class="analyst-header">
@@ -744,6 +810,6 @@
       Not a financial advice, this is for educational research only. Data may be delayed or inaccurate.
     </div>
 
-    <script src="/static/app.js?v=screener-earnings-7" defer></script>
+    <script src="/static/app.js?v=sianna-boot-2026-1" defer></script>
   </body>
 </html>

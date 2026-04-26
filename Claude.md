@@ -135,6 +135,9 @@ Search + analyst:
 - `GET /api/analyst/tickers`
 - `GET /api/analyst/overview?timeframe=...`
 - `GET /api/etf/signals?timeframe=...` (ETF watchlist; same overview row model)
+- `GET /api/copy-trade/creators`
+- `GET /api/copy-trade/holdings/{creator_id}?refresh=0|1` (13F or static; not custodial)
+- `GET /api/copy-trade/signals?creator_id=...&limit=...`
 - `GET /api/analyst/report/{symbol}?timeframe=...`
 - `GET /api/analyst/llm-config`
 - `GET /api/analyst/polish/{symbol}?timeframe=...` (LLM optional)

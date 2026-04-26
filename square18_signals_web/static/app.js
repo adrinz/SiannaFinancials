@@ -99,10 +99,27 @@ const fmtScore = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
 
 // ---------- API -------------------------------------------------------------
 
+// Browser fetch() has no default timeout. Dashboard calls can be slow on a cold
+// cache; cap waits so the UI can show a failure instead of hanging forever.
+const API_FETCH_TIMEOUT_MS = 6 * 60 * 1000; // 6 minutes
+
 async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`${path}: ${r.status}`);
-  return r.json();
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), API_FETCH_TIMEOUT_MS);
+  try {
+    const r = await fetch(path, { signal: controller.signal });
+    if (!r.ok) throw new Error(`${path}: ${r.status}`);
+    return r.json();
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error(
+        `Request timed out after ${API_FETCH_TIMEOUT_MS / 60000}m — ${path} (try refresh)`,
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // ---------- Application state ----------------------------------------------
@@ -148,38 +165,58 @@ function initTabs() {
       } else if (target === 'etf') {
         switchView('etf');
         initEtfOnce();
+      } else if (target === 'copy-trade') {
+        switchView('copy-trade');
+        initCopyTradeOnce();
       } else {
         switchView(target);
       }
     });
   });
-  $('#back-to-dashboard').addEventListener('click', () => switchView('dashboard'));
+  const back = $('#back-to-dashboard');
+  if (back) {
+    back.addEventListener('click', () => switchView('dashboard'));
+  }
 }
 
 // ---------- Dashboard: regime + stats --------------------------------------
 
 async function loadDashboard() {
-  try {
-    const env = await api('/api/regime');
-    renderRegime(env);
-  } catch (e) {
-    $('#regime-label').textContent = 'Failed to load market regime';
-    $('#regime-detail').textContent = String(e);
-  }
-  // Fire the new dashboard cards in parallel. Each card guards its own
-  // errors so a single failure doesn't block the rest of the page.
-  loadMarketPulse();
-  loadOptionsHighlights();
-  loadCrypto();
-  loadNews();
-  await loadScreen(state.filter);
+  // Do NOT await /api/regime before the other fetches. Regime is heavy (full
+  // overview + breadth); if it runs first, every card stayed on "Loading…"
+  // until it finished. Parallelize so pulse, news, crypto, and the screener
+  // can render as soon as their endpoints respond.
+  const regimeP = api('/api/regime')
+    .then((env) => {
+      renderRegime(env);
+    })
+    .catch((e) => {
+      const label = $('#regime-label');
+      const detail = $('#regime-detail');
+      if (label) label.textContent = 'Failed to load market regime';
+      if (detail) detail.textContent = String(e);
+    });
+
+  const tasks = [
+    regimeP,
+    loadMarketPulse(),
+    loadOptionsHighlights(),
+    loadCrypto(),
+    loadNews(),
+    loadScreen(state.filter),
+  ];
+  await Promise.allSettled(tasks);
 }
 
 function renderRegime(env) {
   const r = env.regime;
   const c = env.counts;
-  $('#last-scan').textContent = 'scan ' + fmtESTCompact(env.last_scan_iso);
-  $('#regime-label').textContent = `Market regime: ${r.label}`;
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+  set('last-scan', 'scan ' + fmtESTCompact(env.last_scan_iso));
+  set('regime-label', `Market regime: ${r.label}`);
 
   // Regime banner "pills" — populated into structured spans so each term
   // can carry its own hover tooltip.
@@ -198,11 +235,11 @@ function renderRegime(env) {
   if (pc) pc.textContent = r.put_call_ratio.toFixed(2);
   if (ts) ts.textContent = r.trend_score.toFixed(2);
 
-  $('#stat-universe').textContent = c.universe_size;
-  $('#stat-longs').textContent = c.longs;
-  $('#stat-shorts').textContent = c.shorts;
-  $('#stat-holds').textContent = c.holds;
-  $('#stat-vix').textContent = r.vix.toFixed(1);
+  set('stat-universe', String(c.universe_size));
+  set('stat-longs', String(c.longs));
+  set('stat-shorts', String(c.shorts));
+  set('stat-holds', String(c.holds));
+  set('stat-vix', r.vix.toFixed(1));
 }
 
 // ---------- Dashboard: market pulse ---------------------------------------
@@ -510,6 +547,7 @@ function initFilters() {
 
 async function loadScreen(filter) {
   const tbody = $('#screen-tbody');
+  if (!tbody) return;
   tbody.innerHTML = '<tr><td colspan="10" class="loading">Loading signals…</td></tr>';
   try {
     const rows = await api(`/api/screen?filter=${encodeURIComponent(filter)}`);
@@ -1233,6 +1271,12 @@ const etf = {
   overview: [],
 };
 
+const copyTrade = {
+  initialized: false,
+  creators: [],
+  activeId: null,
+};
+
 async function initAnalystOnce() {
   if (analyst.initialized) return;
   analyst.initialized = true;
@@ -1509,6 +1553,141 @@ function renderEtfTable() {
         )
       )
     );
+  }
+}
+
+async function initCopyTradeOnce() {
+  if (copyTrade.initialized) return;
+  copyTrade.initialized = true;
+  const sel = $('#copytrade-select');
+  const trail = $('#copytrade-trail');
+  if (!sel) return;
+  try {
+    const list = await api('/api/copy-trade/creators');
+    copyTrade.creators = list;
+    sel.innerHTML = '';
+    for (const c of list) {
+      sel.append(h('option', { value: c.id }, c.name));
+    }
+    if (list.length) {
+      copyTrade.activeId = list[0].id;
+      sel.value = copyTrade.activeId;
+    }
+  } catch (e) {
+    if (trail) trail.textContent = 'Failed to load creators: ' + e;
+    return;
+  }
+  const btn = $('#copytrade-refresh');
+  if (btn) {
+    btn.addEventListener('click', () => loadCopyTradeData(true));
+  }
+  sel.addEventListener('change', () => {
+    copyTrade.activeId = sel.value;
+    loadCopyTradeData(true);
+  });
+  loadCopyTradeData(true);
+}
+
+async function loadCopyTradeData(refresh) {
+  const id = copyTrade.activeId
+    || (copyTrade.creators[0] && copyTrade.creators[0].id);
+  if (!id) return;
+  const tbody = $('#copytrade-holdings-tbody');
+  const trail = $('#copytrade-trail');
+  const ul = $('#copytrade-signals');
+  if (tbody) {
+    tbody.innerHTML =
+      '<tr><td colspan="6" class="loading">Loading holdings…</td></tr>';
+  }
+  if (ul) ul.innerHTML = '<li class="loading">Loading activity…</li>';
+  const q = refresh ? '?refresh=1' : '?refresh=0';
+  try {
+    const hold = await api(
+      `/api/copy-trade/holdings/${encodeURIComponent(id)}${q}`
+    );
+    if (trail) {
+      const parts = [
+        `source: ${hold.source}`,
+        hold.as_of ? `as of ${hold.as_of}` : null,
+        hold.message ? hold.message : null,
+      ].filter(Boolean);
+      trail.textContent = parts.join(' · ');
+    }
+    if (tbody) {
+      tbody.innerHTML = '';
+      if (!hold.rows || !hold.rows.length) {
+        tbody.append(
+          h('tr', {},
+            h('td', { colspan: 6, class: 'loading' },
+              hold.as_of
+                ? 'No rows (check SEC parse or use another portfolio).'
+                : 'No data.'))
+        );
+      } else {
+        for (const r of hold.rows) {
+          const sym = r.symbol || '—';
+          const open = (ev) => {
+            if (r.symbol) {
+              ev.stopPropagation();
+              switchView('detail', { symbol: r.symbol });
+            }
+          };
+          tbody.append(
+            h('tr', {
+              class: r.symbol ? 'clickable' : '',
+              onClick: open,
+            },
+            h('td', { class: 'sym mono' }, sym),
+            h('td', { class: 'name' }, r.name),
+            h('td', { class: 'num mono' }, fmtUSD(r.value_usd)),
+            h('td', { class: 'num mono' }, (r.weight_pct != null
+              ? r.weight_pct.toFixed(2) : '—') + '%'),
+            h('td', { class: 'num mono' }, (r.value_000s != null
+              ? r.value_000s.toLocaleString() : '—')),
+            h('td', { class: 'mono muted' }, r.cusip)
+            )
+          );
+        }
+      }
+    }
+    const sigs = await api(
+      `/api/copy-trade/signals?creator_id=${encodeURIComponent(id)}&limit=25`
+    );
+    if (ul) {
+      ul.innerHTML = '';
+      const rows = (sigs && sigs.rows) || [];
+      if (!rows.length) {
+        ul.append(
+          h('li', { class: 'muted' }, 'No change signals yet — refresh after a new filing is saved.')
+        );
+      } else {
+        for (const s of rows) {
+          const kind = s.kind || '';
+          const kcls = kind === 'INCREASED' ? 'pos'
+            : kind === 'DECREASED' || kind === 'EXIT' ? 'neg' : 'muted';
+          ul.append(
+            h('li', { class: 'copytrade-sig-item' },
+              h('span', { class: `copytrade-sig-kind mono ${kcls}` }, kind),
+              s.symbol
+                ? h('span', { class: 'mono' }, s.symbol)
+                : '',
+              h('span', { class: 'copytrade-sig-msg' },
+                escapeHtml(s.message || '')),
+              s.as_of
+                ? h('span', { class: 'muted mono' }, s.as_of)
+                : ''
+            )
+          );
+        }
+      }
+    }
+  } catch (e) {
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="6" class="loading">Failed: ${escapeHtml(
+        String(e)
+      )}</td></tr>`;
+    }
+    if (trail) trail.textContent = 'Error: ' + e;
   }
 }
 
@@ -2277,6 +2456,9 @@ async function refreshAll({ reason = 'manual' } = {}) {
     if (state.view === 'etf') {
       loadEtfOverview();
     }
+    if (state.view === 'copy-trade' && copyTrade.initialized) {
+      loadCopyTradeData(true);
+    }
     // Re-check LLM health on every refresh so the badge recovers from
     // transient errors (e.g. right after the user adds credits).
     initPoweredBy();
@@ -3041,10 +3223,45 @@ async function downloadBlob(url, filename, mime) {
 
 // ---------- Boot ------------------------------------------------------------
 
-initTabs();
-initFilters();
-startESTClock();
-initPoweredBy();
-loadDashboard();
-initRefresh();
-initSignalReportMenu();
+function showClientError(context, err) {
+  const msg = err && err.message != null ? String(err.message) : String(err);
+  const bar = document.getElementById('app-client-error');
+  if (bar) {
+    bar.textContent = `${context}: ${msg}`;
+    bar.classList.add('is-visible');
+    bar.removeAttribute('hidden');
+    return;
+  }
+  // Fallback if the banner was removed from the template.
+  console.error(context, err);
+}
+
+function boot() {
+  try {
+    initTabs();
+    initFilters();
+    startESTClock();
+    void initPoweredBy();
+    void loadDashboard();
+    initRefresh();
+    initSignalReportMenu();
+  } catch (e) {
+    showClientError('App failed to start', e);
+  }
+}
+
+window.addEventListener('error', (e) => {
+  if (e.error) {
+    showClientError('Script error', e.error);
+  } else {
+    showClientError('Script error', new Error(e.message));
+  }
+});
+
+// Log (do not show a second banner) — parallel API failures already
+// report inside each card, and a global banner per rejection is noisy.
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('unhandledrejection', e.reason);
+});
+
+boot();

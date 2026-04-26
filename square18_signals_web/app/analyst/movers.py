@@ -26,7 +26,8 @@ from typing import Literal, Optional
 import threading
 import time
 
-from .report import overview_rows
+from .models import OverviewRow
+from .report import overview_rows, reset_overview_rows_cache
 from .universe import sp500_universe, universe_by_symbol
 
 
@@ -49,18 +50,26 @@ class MoverItem:
     rsi: Optional[float] = None
 
 
-def _enrich_with_curated_signals(rows: list[MoverItem]) -> list[MoverItem]:
+def _enrich_with_curated_signals(
+    rows: list[MoverItem],
+    ov: dict[str, OverviewRow] | None = None,
+) -> list[MoverItem]:
     """Decorate broad-universe rows with verdicts from the curated pipeline.
 
     The deterministic analyst pipeline only runs on the curated TICKERS
     list (it's expensive). For symbols that overlap both lists we pull
     the verdict / composite_score / RSI through; for the rest those
     fields stay ``None``.
+
+    Pass a prebuilt ``ov`` from a single :func:`overview_rows` call so
+    jumps + dips (and the screener earnings card) do not each fan out
+    a full per-ticker ``build_report`` pass.
     """
-    try:
-        ov = {r.symbol: r for r in overview_rows("daily")}
-    except Exception:
-        ov = {}
+    if ov is None:
+        try:
+            ov = {r.symbol: r for r in overview_rows("daily")}
+        except Exception:
+            ov = {}
     for r in rows:
         v = ov.get(r.symbol)
         if v is not None:
@@ -91,7 +100,7 @@ def _fetch_universe_quotes() -> list[MoverItem]:
         # can iterate the universe without rebuilding the frame shape.
         df = yf.download(
             tickers=" ".join(symbols),
-            period="5d",
+            period="3d",
             interval="1d",
             group_by="ticker",
             auto_adjust=False,
@@ -167,9 +176,13 @@ def _split_broad_to_jumps_dips(
     jumps.sort(key=lambda r: r.change_pct, reverse=True)
     dips = [r for r in all_rows if r.change_pct < 0]
     dips.sort(key=lambda r: r.change_pct)
+    try:
+        ov = {r.symbol: r for r in overview_rows("daily")}
+    except Exception:
+        ov = {}
     return (
-        _enrich_with_curated_signals(jumps[:limit]),
-        _enrich_with_curated_signals(dips[:limit]),
+        _enrich_with_curated_signals(jumps[:limit], ov),
+        _enrich_with_curated_signals(dips[:limit], ov),
     )
 
 
@@ -179,12 +192,12 @@ def broad_movers(side: Literal["jumps", "dips"], limit: int = 10) -> list[MoverI
     return j if side == "jumps" else d
 
 
-def _curated_movers(side: Literal["jumps", "dips"], limit: int) -> list[MoverItem]:
-    """Curated 19-ticker fallback using the existing analyst pipeline."""
+def _curated_movers_pair(limit: int) -> tuple[list[MoverItem], list[MoverItem]]:
+    """One :func:`overview_rows` call, then split to jumps + dips (sorted)."""
     try:
         rows = overview_rows("daily")
     except Exception:
-        return []
+        return [], []
     items = [
         MoverItem(
             symbol=r.symbol,
@@ -198,13 +211,11 @@ def _curated_movers(side: Literal["jumps", "dips"], limit: int) -> list[MoverIte
         )
         for r in rows
     ]
-    if side == "jumps":
-        items = [m for m in items if m.change_pct > 0]
-        items.sort(key=lambda m: m.change_pct, reverse=True)
-    else:
-        items = [m for m in items if m.change_pct < 0]
-        items.sort(key=lambda m: m.change_pct)
-    return items[:limit]
+    jumps = [m for m in items if m.change_pct > 0]
+    jumps.sort(key=lambda m: m.change_pct, reverse=True)
+    dips = [m for m in items if m.change_pct < 0]
+    dips.sort(key=lambda m: m.change_pct)
+    return jumps[:limit], dips[:limit]
 
 
 def movers_with_fallback(
@@ -214,15 +225,15 @@ def movers_with_fallback(
     rows = broad_movers(side, limit)
     if rows:
         return rows, "sp500"
-    return _curated_movers(side, limit), "curated"
+    j, d = _curated_movers_pair(limit)
+    return (j if side == "jumps" else d), "curated"
 
 
 def movers_pair_curated_only(
     limit: int = 10,
 ) -> tuple[list[MoverItem], list[MoverItem], str, str]:
     """Curated lists only (fast) — for instant first paint / ``quick=1`` API."""
-    j = _curated_movers("jumps", limit)
-    d = _curated_movers("dips", limit)
+    j, d = _curated_movers_pair(limit)
     return j, d, "curated", "curated"
 
 
@@ -234,8 +245,7 @@ def movers_pair_with_fallback(
     if all_rows:
         j, d = _split_broad_to_jumps_dips(all_rows, limit)
         return j, d, "sp500", "sp500"
-    j2 = _curated_movers("jumps", limit)
-    d2 = _curated_movers("dips", limit)
+    j2, d2 = _curated_movers_pair(limit)
     return j2, d2, "curated", "curated"
 
 
@@ -244,3 +254,4 @@ def reset_cache() -> None:
     with _broad_fetch_lock:
         _cache["rows"] = []
         _cache["ts"] = 0.0
+    reset_overview_rows_cache()

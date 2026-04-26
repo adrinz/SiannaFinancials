@@ -26,6 +26,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 from .constants import TICKERS, Timeframe
+from .data import _threaded_with_timeout, _YF_REQUEST_TIMEOUT
 from .models import OverviewRow
 from .report import overview_rows
 
@@ -234,8 +235,18 @@ def crypto_snapshot() -> CryptoSnapshot:
 
     for meta in CRYPTO_SYMBOLS:
         try:
-            t = yf.Ticker(meta["symbol"])
-            hist = t.history(period="60d", interval="1d", auto_adjust=True, actions=False)
+            sym = meta["symbol"]
+
+            def _pull_hist():
+                t = yf.Ticker(sym)
+                return t.history(
+                    period="60d", interval="1d", auto_adjust=True, actions=False
+                )
+
+            # Same hard cap as OHLCV so a stuck Yahoo socket cannot block the dashboard.
+            hist = _threaded_with_timeout(
+                _pull_hist, min(45.0, _YF_REQUEST_TIMEOUT)
+            )
             if hist is None or hist.empty or "Close" not in hist.columns:
                 continue
             hist = hist.dropna(subset=["Close"])

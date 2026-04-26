@@ -15,6 +15,7 @@ identical, so the rest of the analyst stack is data-source agnostic.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import math
 import os
@@ -46,6 +47,18 @@ _CACHE_DIR = Path.home() / ".cache" / "square18_signals" / "ohlcv"
 _CACHE_TTL_INTRADAY = int(os.environ.get("SQUARE18_OHLCV_TTL_INTRADAY", 5 * 60))
 _CACHE_TTL_DAILY    = int(os.environ.get("SQUARE18_OHLCV_TTL_DAILY",    15 * 60))
 _CACHE_TTL_WEEKLY   = int(os.environ.get("SQUARE18_OHLCV_TTL_WEEKLY",   24 * 60 * 60))
+
+# yfinance can hang indefinitely on a stuck socket; run each pull in a worker with a hard cap.
+_YF_REQUEST_TIMEOUT = float(os.environ.get("SQUARE18_YF_TIMEOUT", "60"))
+
+
+def _threaded_with_timeout(fn, timeout_sec: float):
+    """Run *fn* in a one-off thread; on timeout or any error, return None."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        try:
+            return ex.submit(fn).result(timeout=timeout_sec)
+        except (concurrent.futures.TimeoutError, Exception):
+            return None
 
 
 def _ttl_for(timeframe: Timeframe) -> int:
@@ -152,57 +165,60 @@ _YFINANCE_PARAMS: dict[Timeframe, dict] = {
 
 
 def _fetch_yfinance(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
-    try:
-        import yfinance as yf  # type: ignore
-    except Exception:
-        return None
-
-    # Some identifiers (indices like VIX) need a different Yahoo symbol.
-    meta = TICKER_MAP.get(symbol.upper(), {})
-    yf_symbol = meta.get("yfinance_symbol", symbol)
-
-    cfg = _YFINANCE_PARAMS[timeframe]
-    try:
-        t = yf.Ticker(yf_symbol)
-        df = t.history(
-            period=cfg["period"],
-            interval=cfg["interval"],
-            auto_adjust=True,
-            actions=False,
-        )
-    except Exception:
-        return None
-
-    if df is None or df.empty or "Close" not in df.columns:
-        return None
-
-    # Ensure chronological order, drop NaNs defensively. Indices (e.g. ^VIX)
-    # don't report volume — fill with 0 so downstream stats don't NaN-explode.
-    df = df.sort_index().dropna(subset=["Open", "High", "Low", "Close"])
-    if "Volume" in df.columns:
-        df["Volume"] = df["Volume"].fillna(0)
-    else:
-        df["Volume"] = 0
-    if df.empty:
-        return None
-
-    if timeframe == "4h":
-        df = _resample_intraday_to_4h(df)
-        if df is None or df.empty:
+    def _pull() -> Optional[OHLCV]:
+        try:
+            import yfinance as yf  # type: ignore
+        except Exception:
             return None
 
-    ts = [x.to_pydatetime().astimezone(timezone.utc).isoformat() for x in df.index]
-    return OHLCV(
-        symbol=symbol.upper(),
-        timeframe=timeframe,
-        timestamps=ts,
-        open=[float(x) for x in df["Open"].tolist()],
-        high=[float(x) for x in df["High"].tolist()],
-        low=[float(x) for x in df["Low"].tolist()],
-        close=[float(x) for x in df["Close"].tolist()],
-        volume=[float(x) for x in df["Volume"].tolist()],
-        source="yfinance",
-    )
+        # Some identifiers (indices like VIX) need a different Yahoo symbol.
+        meta = TICKER_MAP.get(symbol.upper(), {})
+        yf_symbol = meta.get("yfinance_symbol", symbol)
+
+        cfg = _YFINANCE_PARAMS[timeframe]
+        try:
+            t = yf.Ticker(yf_symbol)
+            df = t.history(
+                period=cfg["period"],
+                interval=cfg["interval"],
+                auto_adjust=True,
+                actions=False,
+            )
+        except Exception:
+            return None
+
+        if df is None or df.empty or "Close" not in df.columns:
+            return None
+
+        # Ensure chronological order, drop NaNs defensively. Indices (e.g. ^VIX)
+        # don't report volume — fill with 0 so downstream stats don't NaN-explode.
+        df = df.sort_index().dropna(subset=["Open", "High", "Low", "Close"])
+        if "Volume" in df.columns:
+            df["Volume"] = df["Volume"].fillna(0)
+        else:
+            df["Volume"] = 0
+        if df.empty:
+            return None
+
+        if timeframe == "4h":
+            df = _resample_intraday_to_4h(df)
+            if df is None or df.empty:
+                return None
+
+        ts = [x.to_pydatetime().astimezone(timezone.utc).isoformat() for x in df.index]
+        return OHLCV(
+            symbol=symbol.upper(),
+            timeframe=timeframe,
+            timestamps=ts,
+            open=[float(x) for x in df["Open"].tolist()],
+            high=[float(x) for x in df["High"].tolist()],
+            low=[float(x) for x in df["Low"].tolist()],
+            close=[float(x) for x in df["Close"].tolist()],
+            volume=[float(x) for x in df["Volume"].tolist()],
+            source="yfinance",
+        )
+
+    return _threaded_with_timeout(_pull, _YF_REQUEST_TIMEOUT)  # type: ignore[return-value]
 
 
 def _resample_intraday_to_4h(df):

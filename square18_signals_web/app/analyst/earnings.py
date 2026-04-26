@@ -28,7 +28,7 @@ import urllib.request
 
 from .constants import SCREENER_EARNINGS_WINDOW_DAYS, TICKERS
 from .movers import _broad_universe_rows
-from .report import overview_rows
+from .report import overview_rows, reset_overview_rows_cache
 from .universe import universe_by_symbol
 
 
@@ -296,3 +296,4 @@ def reset_cache() -> None:
     _cache["rows"] = []
     _cache["ts"] = 0.0
     _cache["source"] = ""
+    reset_overview_rows_cache()

@@ -25,6 +25,7 @@ from .analyst import earnings as _earnings  # noqa: E402
 from .analyst import llm as _llm  # noqa: E402
 from .analyst import market as _market  # noqa: E402
 from .analyst import movers as _movers  # noqa: E402
+from .analyst import copy_trade as _copy_trade  # noqa: E402
 from .analyst import search as _search  # noqa: E402
 from .analyst.models import OverviewRow, ReportOut, TickerMeta  # noqa: E402
 from .models import RegimeEnvelope, TickerDetailOut, TickerRowOut  # noqa: E402
@@ -438,6 +439,47 @@ class ScreenerEarningsListOut(BaseModel):
     rows: list[ScreenerEarningsOut]
 
 
+class CopyTradeCreatorOut(BaseModel):
+    id: str
+    name: str
+    type: str
+    description: str = ""
+
+
+class CopyTradeHoldingOut(BaseModel):
+    name: str
+    cusip: str
+    symbol: str | None = None
+    value_000s: int
+    value_usd: float
+    weight_pct: float
+    shares: float | None = None
+
+
+class CopyTradeHoldingsOut(BaseModel):
+    creator_id: str
+    source: str
+    as_of: str
+    accession: str = ""
+    message: str
+    rows: list[CopyTradeHoldingOut]
+
+
+class CopyTradeSignalOut(BaseModel):
+    creator_id: str
+    kind: str
+    as_of: str
+    message: str
+    symbol: str | None = None
+    cusip: str | None = None
+    detail: str = ""
+    ts: float = 0.0
+
+
+class CopyTradeSignalsListOut(BaseModel):
+    rows: list[CopyTradeSignalOut]
+
+
 @app.get(
     "/api/screener/movers",
     response_model=ScreenerMoversPairOut,
@@ -529,6 +571,105 @@ def screener_earnings(
             )
             for r in rows
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Copy trade (research; no orders) — 13F + static themed baskets
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/copy-trade/creators",
+    response_model=list[CopyTradeCreatorOut],
+    tags=["copy-trade"],
+)
+def copy_trade_creators() -> list[CopyTradeCreatorOut]:
+    out: list[CopyTradeCreatorOut] = []
+    for c in _copy_trade.list_creators():
+        out.append(
+            CopyTradeCreatorOut(
+                id=c["id"],
+                name=c["name"],
+                type=c.get("type", ""),
+                description=c.get("description", "") or "",
+            )
+        )
+    return out
+
+
+@app.get(
+    "/api/copy-trade/holdings/{creator_id}",
+    response_model=CopyTradeHoldingsOut,
+    tags=["copy-trade"],
+)
+def copy_trade_holdings(
+    creator_id: str,
+    refresh: int = Query(1, ge=0, le=1, description="1 = refetch from SEC (13F) or recompute; 0 = last saved snapshot if any"),
+) -> CopyTradeHoldingsOut:
+    if not _copy_trade.get_creator_by_id(creator_id):
+        raise HTTPException(404, "Unknown copy-trade creator_id")
+    if refresh == 0:
+        g = _copy_trade.get_stored_snapshot(creator_id)
+        if g:
+            rows, meta = g
+            as_of = (meta or {}).get("as_of") or (meta or {}).get("filing") or ""
+            acc = (meta or {}).get("accession") or ""
+            return CopyTradeHoldingsOut(
+                creator_id=creator_id,
+                source="cached",
+                as_of=as_of,
+                accession=acc,
+                message="Last saved snapshot. Use ?refresh=1 to refetch (SEC may be slow on first run).",
+                rows=[
+                    CopyTradeHoldingOut(
+                        name=r.name,
+                        cusip=r.cusip,
+                        symbol=r.symbol,
+                        value_000s=r.value_000s,
+                        value_usd=r.value_usd,
+                        weight_pct=r.weight_pct,
+                        shares=r.shares,
+                    )
+                    for r in rows
+                ],
+            )
+    res = _copy_trade.refresh_creator_and_signals(creator_id)
+    rows, _, src, as_of, acc, err, _ = res
+    msg = err or f"source={src}"
+    return CopyTradeHoldingsOut(
+        creator_id=creator_id,
+        source=src,
+        as_of=as_of,
+        accession=acc,
+        message=msg,
+        rows=[
+            CopyTradeHoldingOut(
+                name=r.name,
+                cusip=r.cusip,
+                symbol=r.symbol,
+                value_000s=r.value_000s,
+                value_usd=r.value_usd,
+                weight_pct=r.weight_pct,
+                shares=r.shares,
+            )
+            for r in rows
+        ],
+    )
+
+
+@app.get(
+    "/api/copy-trade/signals",
+    response_model=CopyTradeSignalsListOut,
+    tags=["copy-trade"],
+)
+def copy_trade_signals(
+    creator_id: str | None = None, limit: int = 30
+) -> CopyTradeSignalsListOut:
+    n = max(1, min(limit, 200))
+    raw = _copy_trade.get_signals(creator_id, n)
+    return CopyTradeSignalsListOut(
+        rows=[CopyTradeSignalOut(**r) for r in raw]
     )
 
 

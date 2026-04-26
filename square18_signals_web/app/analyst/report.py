@@ -12,6 +12,8 @@ states computed in the same pass.
 from __future__ import annotations
 
 import math
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -40,6 +42,37 @@ from .models import (
     TradePlan,
     VolumeStats,
 )
+
+
+# In-process cache so concurrent screener calls (earnings + movers + enrich) do
+# not each fan out a full build_report for the whole universe.
+_overview_lock = threading.Lock()
+_build_locks_guard = threading.Lock()
+_overview_build_locks: dict[str, threading.Lock] = {}
+_overview_rows_cache: dict[str, tuple[float, list[OverviewRow]]] = {}
+OVERVIEW_ROWS_CACHE_TTL_SEC = 90.0
+
+
+def _lock_for_overview_key(key: str) -> threading.Lock:
+    with _build_locks_guard:
+        if key not in _overview_build_locks:
+            _overview_build_locks[key] = threading.Lock()
+        return _overview_build_locks[key]
+
+
+def _overview_cache_key(
+    timeframe: Timeframe, metas: list[dict] | None
+) -> str:
+    if metas is None:
+        return f"{timeframe}::default"
+    syms = "|".join(sorted(m["symbol"] for m in metas))
+    return f"{timeframe}::{syms}"
+
+
+def reset_overview_rows_cache() -> None:
+    """Test helper: clear the optional overview row cache."""
+    with _overview_lock:
+        _overview_rows_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -154,40 +187,64 @@ def overview_rows(
     metas: list[dict] | None = None,
 ) -> list[OverviewRow]:
     """Compact verdict + recommendation for every entry in *metas* (default: ``TICKERS``)."""
-    universe = metas if metas is not None else TICKERS
-    rows: list[OverviewRow] = []
-    for meta in universe:
-        try:
-            rpt = build_report(meta["symbol"], timeframe)
-        except Exception:
-            continue
-        tp = rpt.options.trade_plan
-        rows.append(
-            OverviewRow(
-                symbol=rpt.symbol,
-                name=rpt.name,
-                sector=rpt.sector,
-                last=round(rpt.price_action.last, 2),
-                change_pct=round(rpt.price_action.change_pct, 2),
-                verdict=rpt.verdict,
-                conviction=rpt.conviction,
-                composite_score=rpt.composite_score,
-                rsi=round(rpt.rsi.value, 1) if rpt.rsi.value is not None else None,
-                trend=rpt.price_action.trend,
-                source=rpt.source,
-                rec_contract_type=tp.contract_type,
-                rec_strike=tp.strike,
-                rec_expiry_date=tp.expiry_date,
-                rec_expiry_dte=tp.expiry_dte,
-                rec_premium=tp.estimated_premium,
-                rec_cost_per_contract=tp.cost_per_contract,
-                rec_break_even=tp.break_even,
-                rec_target=tp.target_price,
-                rec_stop=tp.stop_loss,
-                rec_risk_reward=tp.risk_reward,
+    key = _overview_cache_key(timeframe, metas)
+    now = time.time()
+    with _overview_lock:
+        hit = _overview_rows_cache.get(key)
+        if (
+            hit
+            and (now - hit[0]) < OVERVIEW_ROWS_CACHE_TTL_SEC
+        ):
+            return list(hit[1])
+
+    b_lock = _lock_for_overview_key(key)
+    with b_lock:
+        now2 = time.time()
+        with _overview_lock:
+            hit2 = _overview_rows_cache.get(key)
+            if (
+                hit2
+                and (now2 - hit2[0]) < OVERVIEW_ROWS_CACHE_TTL_SEC
+            ):
+                return list(hit2[1])
+
+        universe = metas if metas is not None else TICKERS
+        rows: list[OverviewRow] = []
+        for meta in universe:
+            try:
+                rpt = build_report(meta["symbol"], timeframe)
+            except Exception:
+                continue
+            tp = rpt.options.trade_plan
+            rows.append(
+                OverviewRow(
+                    symbol=rpt.symbol,
+                    name=rpt.name,
+                    sector=rpt.sector,
+                    last=round(rpt.price_action.last, 2),
+                    change_pct=round(rpt.price_action.change_pct, 2),
+                    verdict=rpt.verdict,
+                    conviction=rpt.conviction,
+                    composite_score=rpt.composite_score,
+                    rsi=round(rpt.rsi.value, 1) if rpt.rsi.value is not None else None,
+                    trend=rpt.price_action.trend,
+                    source=rpt.source,
+                    rec_contract_type=tp.contract_type,
+                    rec_strike=tp.strike,
+                    rec_expiry_date=tp.expiry_date,
+                    rec_expiry_dte=tp.expiry_dte,
+                    rec_premium=tp.estimated_premium,
+                    rec_cost_per_contract=tp.cost_per_contract,
+                    rec_break_even=tp.break_even,
+                    rec_target=tp.target_price,
+                    rec_stop=tp.stop_loss,
+                    rec_risk_reward=tp.risk_reward,
+                )
             )
-        )
-    return rows
+        ts = time.time()
+        with _overview_lock:
+            _overview_rows_cache[key] = (ts, rows)
+        return rows
 
 
 def etf_overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:

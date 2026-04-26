@@ -44,6 +44,20 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Shown on boot failure or a top-level script error; otherwise [hidden] */
+.app-client-error {
+  display: none;
+  padding: 10px 16px;
+  background: #3d1518;
+  border-bottom: 1px solid #a03740;
+  color: #fecaca;
+  font-size: 13px;
+  z-index: 200;
+}
+.app-client-error.is-visible {
+  display: block;
+}
+
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .muted { color: var(--text-muted); }
 
@@ -2150,6 +2164,61 @@ button { font-family: inherit; }
 }
 
 /* --- News card ----------------------------------------------------------- */
+
+/* Copy trade tab */
+.copytrade-header .copytrade-disclaimer strong {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.copytrade-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.copytrade-select {
+  min-width: 220px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--stroke);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 13px;
+}
+.section-inline-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 10px 0;
+  color: var(--text);
+}
+.copytrade-signals {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.copytrade-sig-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--stroke-soft);
+  font-size: 13px;
+}
+.copytrade-sig-kind {
+  min-width: 5.5rem;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.copytrade-sig-msg {
+  flex: 1 1 200px;
+  color: var(--text-muted);
+}
+.copytrade-signals-wrap {
+  margin-top: 20px;
+}
 
 .card-news { padding: 14px 16px; }
 .news-list {

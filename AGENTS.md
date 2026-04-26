@@ -47,6 +47,7 @@ python3 -m pytest square18_signals_web/tests/test_e2e_ui_playwright.py -q
 - API entry: `square18_signals_web/app/main.py`
 - Ticker + ETF watchlists, `TICKER_MAP`, defaults: `square18_signals_web/app/analyst/constants.py`
 - Market/news aggregation: `square18_signals_web/app/analyst/market.py`
+- Copy trade (13F + snapshots): `square18_signals_web/app/analyst/copy_trade.py`
 - Earnings calendar helper: `square18_signals_web/app/analyst/earnings.py`
 - Broad market movers: `square18_signals_web/app/analyst/movers.py`
 - Universe loader (S&P 500, dynamic CSV + bundle fallback): `square18_signals_web/app/analyst/universe.py`

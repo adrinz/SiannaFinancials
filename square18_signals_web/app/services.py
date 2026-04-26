@@ -7,7 +7,7 @@ no hardcoded ticker fixtures are used anymore.
 
 Flow per request:
     /api/screen  -> overview_rows(daily)  -> TickerRowOut[]
-    /api/regime  -> market_pulse(daily) + VIX quote -> RegimeEnvelope
+    /api/regime  -> overview_rows + breadth + VIX quote -> RegimeEnvelope
     /api/tickers/{sym} -> build_report(daily) -> TickerDetailOut
 
 The synthetic TickerSnapshot fixtures in ``app/data.py`` remain in the
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import math
 import statistics
+import threading
+import time
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Optional
@@ -29,7 +31,6 @@ from square18_signals import (
 
 from .analyst.constants import DEFAULT_IV, TICKER_MAP, Timeframe
 from .analyst.data import get_ohlcv
-from .analyst.market import market_pulse
 from .analyst.models import OverviewRow, ReportOut
 from .analyst.report import build_report, overview_rows
 from .models import (
@@ -157,7 +158,6 @@ def regime_envelope(last_scan_iso: str, timeframe: Timeframe = "daily") -> Regim
     * Put/call ratio is still a fixture (needs an options-chain feed).
     * Label is derived from the pair (vix_level, trend_score).
     """
-    pulse = market_pulse(timeframe)
     rows = overview_rows(timeframe)
 
     # Trend score: universe-wide mean composite.
@@ -202,6 +202,11 @@ def regime_envelope(last_scan_iso: str, timeframe: Timeframe = "daily") -> Regim
     )
 
 
+_breadth_lock = threading.Lock()
+_breadth_cache: dict[Timeframe, tuple[float, float]] = {}
+BREADTH_CACHE_TTL_SEC = 300.0
+
+
 def _vix_quote() -> tuple[float, float]:
     """Return (vix_last, vix_1d_change). Falls back to a sensible default."""
     try:
@@ -218,8 +223,8 @@ def _vix_quote() -> tuple[float, float]:
     return 17.0, 0.0
 
 
-def _breadth_above_50d(timeframe: Timeframe) -> float:
-    """% of tracked equities trading above their 50-bar SMA."""
+def _compute_breadth_pct_above_50d(timeframe: Timeframe) -> float:
+    """% of tracked equities trading above their 50-bar SMA (uncached)."""
     from .analyst.indicators import sma
 
     # Equities only — VIX above its own 50d means more fear, which
@@ -244,6 +249,25 @@ def _breadth_above_50d(timeframe: Timeframe) -> float:
     if total == 0:
         return 50.0
     return above / total * 100.0
+
+
+def _breadth_above_50d(timeframe: Timeframe) -> float:
+    """% above 50d SMA — one expensive yfinance pass per *timeframe*; TTL-cached."""
+    now = time.time()
+    with _breadth_lock:
+        hit = _breadth_cache.get(timeframe)
+        if hit and (now - hit[0]) < BREADTH_CACHE_TTL_SEC:
+            return hit[1]
+
+    pct = _compute_breadth_pct_above_50d(timeframe)
+
+    with _breadth_lock:
+        now2 = time.time()
+        hit2 = _breadth_cache.get(timeframe)
+        if hit2 and (now2 - hit2[0]) < BREADTH_CACHE_TTL_SEC:
+            return hit2[1]
+        _breadth_cache[timeframe] = (time.time(), pct)
+    return pct
 
 
 def _regime_label(vix: float, trend_score: float, breadth_pct: float) -> str:

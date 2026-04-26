@@ -4,3 +4,6 @@
 **/__pycache__/
 *.pyc
 .DS_Store
+
+# Copy trade local snapshots / signal log (optional; safe to regenerate)
+square18_signals_web/app/analyst/data/copy_trade_state.json

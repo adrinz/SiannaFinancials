@@ -1,4 +1,4 @@
-"""End-to-end app tests for Dashboard, Detail, Search, ETF signals, and Analyst flows.
+"""End-to-end app tests for Dashboard, Detail, Search, Screener, ETF, Copy trade, Analyst.
 
 These tests exercise the app through FastAPI's TestClient as a browser/API
 consumer would:
@@ -55,12 +55,14 @@ def test_root_serves_all_page_containers(client: TestClient):
     assert 'data-view="search"' in html
     assert 'data-view="analyst"' in html
     assert 'data-view="etf"' in html
+    assert 'data-view="copy-trade"' in html
 
     # Core view containers.
     assert 'class="view view-dashboard' in html
     assert 'class="view view-detail' in html
     assert 'class="view view-search' in html
     assert 'class="view view-etf' in html
+    assert 'class="view view-copy-trade' in html
     assert 'class="view view-analyst' in html
 
     # Key per-page anchors used by app.js.
@@ -73,11 +75,28 @@ def test_root_serves_all_page_containers(client: TestClient):
     assert 'id="analyst-report"' in html
     assert 'id="all-recs-tbody"' in html
     assert 'id="etf-signals-tbody"' in html
+    assert 'id="copytrade-holdings-tbody"' in html
+    assert 'id="copytrade-select"' in html
 
 
 # ---------------------------------------------------------------------------
 # Dashboard flow
 # ---------------------------------------------------------------------------
+
+
+def test_copy_trade_creators_endpoint(client: TestClient):
+    rows = _json(client, "/api/copy-trade/creators")
+    assert isinstance(rows, list) and len(rows) >= 1
+    a = rows[0]
+    for k in ("id", "name", "type", "description"):
+        assert k in a
+
+
+def test_copy_trade_signals_endpoint(client: TestClient):
+    out = _json(client, "/api/copy-trade/signals?limit=3")
+    assert "rows" in out
+    assert isinstance(out["rows"], list)
+
 
 
 def test_dashboard_endpoints_happy_path(client: TestClient):
