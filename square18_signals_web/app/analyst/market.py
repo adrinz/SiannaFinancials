@@ -486,6 +486,90 @@ def _build_internal_snapshot_news(limit: int) -> list[NewsItem]:
     return items[:limit]
 
 
+def _yf_ticker_headlines(symbol: str, limit: int) -> list[NewsItem]:
+    """Yahoo Finance headlines for a symbol (best-effort, short timeout)."""
+    if limit <= 0:
+        return []
+
+    def _read() -> list[NewsItem]:
+        try:
+            import yfinance as yf
+        except ImportError:
+            return []
+        try:
+            tk = yf.Ticker(symbol)
+            raw = getattr(tk, "news", None) or []
+        except Exception:
+            return []
+        out: list[NewsItem] = []
+        for ent in raw:
+            if not isinstance(ent, dict):
+                continue
+            title = (ent.get("title") or "").strip()
+            if not title:
+                continue
+            link = (ent.get("link") or "").strip()
+            pub = ent.get("providerPublishTime")
+            if isinstance(pub, (int, float)):
+                published = datetime.fromtimestamp(float(pub), tz=timezone.utc).isoformat()
+            else:
+                published = ""
+            out.append(
+                NewsItem(
+                    title=title,
+                    publisher=(ent.get("publisher") or "Yahoo Finance")[:64],
+                    url=link,
+                    related=symbol.upper(),
+                    published_at=published,
+                    summary="",
+                )
+            )
+            if len(out) >= limit:
+                break
+        return out
+
+    got = _threaded_with_timeout(_read, min(6.0, _YF_REQUEST_TIMEOUT))
+    return got if isinstance(got, list) else []
+
+
+def news_for_ticker(ticker: str, limit: int = 8) -> list[NewsItem]:
+    """Headlines that mention the ticker (RSS) plus optional Yahoo symbol news."""
+    t = ticker.upper()
+    t_word = re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE)
+    feed = news_feed(50)
+    out: list[NewsItem] = []
+    seen: set[str] = set()
+
+    for item in feed.items:
+        if item.title in seen:
+            continue
+        rel = (item.related or "").upper()
+        if t in rel or t in rel.split() or t_word.search(item.title or "") or t_word.search(
+            item.summary or ""
+        ):
+            seen.add(item.title)
+            out.append(item)
+        if len(out) >= limit:
+            return out
+
+    for item in _yf_ticker_headlines(t, limit - len(out)):
+        if item.title in seen:
+            continue
+        seen.add(item.title)
+        out.append(item)
+        if len(out) >= limit:
+            return out
+
+    for item in feed.items:
+        if item.title in seen:
+            continue
+        seen.add(item.title)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
 def news_feed(limit: int = 12) -> NewsFeed:
     # CNBC RSS first: one or two quick HTTP fetches, continuously updated, no
     # per-ticker yfinance news fan-out (which is slower and often Yahoo-sourced).

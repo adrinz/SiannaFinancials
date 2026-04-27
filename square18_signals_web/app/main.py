@@ -67,9 +67,22 @@ def get_screen(filter: str = "all") -> list[TickerRowOut]:
     return screener_rows(f)
 
 
+_ALLOWED_CHART_RANGES = frozenset({"1d", "5d", "1m", "6m", "1y", "ytd"})
+
+
 @app.get("/api/ticker/{symbol}", response_model=TickerDetailOut, tags=["detail"])
-def get_ticker(symbol: str) -> TickerDetailOut:
-    detail = ticker_detail(symbol)
+def get_ticker(
+    symbol: str,
+    chart_range: str = Query(
+        "1d",
+        description="Price chart window: 1d, 5d, 1m, 6m, 1y, ytd (default 1d = hourly intraday)",
+        alias="range",
+    ),
+) -> TickerDetailOut:
+    rng = chart_range.lower().strip()
+    if rng not in _ALLOWED_CHART_RANGES:
+        raise HTTPException(400, f"range must be one of {sorted(_ALLOWED_CHART_RANGES)}")
+    detail = ticker_detail(symbol, price_range=rng)
     if detail is None:
         raise HTTPException(404, f"unknown symbol: {symbol}")
     return detail

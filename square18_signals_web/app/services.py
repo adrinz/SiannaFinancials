@@ -20,7 +20,7 @@ import math
 import statistics
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Optional
 
@@ -30,7 +30,8 @@ from square18_signals import (
 )
 
 from .analyst.constants import DEFAULT_IV, TICKER_MAP, Timeframe
-from .analyst.data import get_ohlcv
+from .analyst.data import get_ohlcv, get_ohlcv_1d_intraday, OHLCV
+from .analyst.market import news_for_ticker
 from .analyst.models import OverviewRow, ReportOut
 from .analyst.report import build_report, overview_rows
 from .models import (
@@ -43,8 +44,13 @@ from .models import (
     RegimeEnvelope,
     RegimeOut,
     StrategyOut,
+    TickerChartBarOut,
+    TickerChartBundleOut,
+    TickerChartContextOut,
     TickerDetailOut,
+    TickerNewsOut,
     TickerRowOut,
+    TickerSignalLineOut,
     clamp_inf,
 )
 
@@ -312,7 +318,158 @@ def screener_rows(signal_filter: str = "all", timeframe: Timeframe = "daily") ->
     return out
 
 
-def ticker_detail(symbol: str, timeframe: Timeframe = "daily") -> TickerDetailOut | None:
+_ALLOWED_CHART_RANGES = frozenset({"1d", "5d", "1m", "6m", "1y", "ytd"})
+
+
+def _iso_to_date(ts: str) -> date | None:
+    if not ts:
+        return None
+    try:
+        s = str(ts).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        return None
+
+
+def _ohlcv_to_bar_list(data: OHLCV, start: int, end: int) -> list[TickerChartBarOut]:
+    start = max(0, int(start))
+    end = min(len(data), int(end))
+    return [
+        TickerChartBarOut(
+            t=data.timestamps[i],
+            o=round(float(data.open[i]), 4),
+            h=round(float(data.high[i]), 4),
+            l=round(float(data.low[i]), 4),
+            c=round(float(data.close[i]), 4),
+            v=round(float(data.volume[i]), 0) if i < len(data.volume) else 0.0,
+        )
+        for i in range(start, end)
+    ]
+
+
+def _chart_bundle_for_range(symbol: str, range_key: str) -> TickerChartBundleOut:
+    """Slice OHLCV to match Yahoo-style ranges: 1D = minute intraday (smooth), else daily bars."""
+    rk = range_key.lower()
+    if rk not in _ALLOWED_CHART_RANGES:
+        rk = "1d"
+    sym = symbol.upper()
+    bars: list[TickerChartBarOut] = []
+    x_g: str = "day"
+
+    if rk == "1d":
+        # Dense 1m/2m/5m (or interpolated) session — Yahoo-like smooth 1D chart + full day axis
+        idata: OHLCV | None = None
+        try:
+            idata = get_ohlcv_1d_intraday(sym)
+        except Exception:
+            idata = None
+        if idata and len(idata) >= 2:
+            bars = _ohlcv_to_bar_list(idata, 0, len(idata))
+            x_g = "session"
+        else:
+            h = get_ohlcv(sym, "1h")
+            if len(h) >= 2:
+                n = min(16, len(h))
+                bars = _ohlcv_to_bar_list(h, len(h) - n, len(h))
+                x_g = "hour"
+            else:
+                d = get_ohlcv(sym, "daily")
+                n = min(5, len(d))
+                bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d)) if d else []
+    elif rk == "5d":
+        d = get_ohlcv(sym, "daily")
+        n = min(5, len(d))
+        bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d)) if d else []
+    elif rk == "1m":
+        d = get_ohlcv(sym, "daily")
+        n = min(22, len(d))
+        bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d)) if d else []
+    elif rk == "6m":
+        d = get_ohlcv(sym, "daily")
+        n = min(128, len(d))
+        bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d)) if d else []
+    elif rk == "1y":
+        d = get_ohlcv(sym, "daily")
+        n = min(252, len(d))
+        bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d)) if d else []
+    else:  # ytd
+        d = get_ohlcv(sym, "daily")
+        y = datetime.now(timezone.utc).year
+        jan1 = date(y, 1, 1)
+        start_i: int | None = None
+        for i, ts in enumerate(d.timestamps):
+            di = _iso_to_date(ts)
+            if di is not None and di >= jan1:
+                start_i = i
+                break
+        if start_i is None:
+            start_i = max(0, len(d) - 64)
+        bars = _ohlcv_to_bar_list(d, start_i, len(d))
+        if len(bars) < 2:
+            n = min(64, len(d))
+            bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d))
+
+    if len(bars) < 1:
+        d = get_ohlcv(sym, "daily")
+        n = min(5, len(d))
+        if d:
+            bars = _ohlcv_to_bar_list(d, max(0, len(d) - n), len(d))
+            x_g = "day"
+
+    return TickerChartBundleOut(range_key=rk, x_granularity=x_g, bars=bars)
+
+
+def _narrative_excerpt(narrative: str, max_len: int = 720) -> str:
+    t = (narrative or "").strip()
+    if not t:
+        return ""
+    if len(t) <= max_len:
+        return t
+    cut = t[:max_len]
+    if " " in cut:
+        return cut.rsplit(" ", 1)[0] + "…"
+    return cut + "…"
+
+
+def _technical_bullets_from_report(report: ReportOut) -> list[str]:
+    out: list[str] = []
+    s = report.sma
+    if s.price_vs_sma50_pct is not None:
+        extra = ""
+        if s.golden_cross_recent:
+            extra = " (recent golden cross)"
+        elif s.death_cross_recent:
+            extra = " (recent death cross)"
+        out.append(f"SMA: price {s.price_vs_sma50_pct:+.1f}% vs 50d{extra}")
+    pa = report.price_action
+    out.append(f"Price action: {pa.trend}, change {pa.change_pct:+.2f}%")
+    r = report.rsi
+    if r.value is not None:
+        out.append(f"RSI (14): {r.value:.1f} — {r.state}")
+    m = report.macd
+    if m.histogram is not None:
+        out.append(f"MACD: histogram {m.histogram:+.3f}, slope {m.histogram_direction}")
+    else:
+        out.append("MACD: not enough data for a clean read on this window")
+    if report.atr.value is not None and report.atr.pct_of_price is not None:
+        out.append(
+            f"ATR (14): ${report.atr.value:.2f} (~{report.atr.pct_of_price:.2f}% of price)"
+        )
+    v = report.volume
+    out.append(
+        f"Volume vs 20d avg: {v.ratio:.2f}× ({'rising' if v.trending_up else 'flat/soft'} vs its series)"
+    )
+    return out[:10]
+
+
+def ticker_detail(
+    symbol: str,
+    timeframe: Timeframe = "daily",
+    *,
+    price_range: str = "1d",
+) -> TickerDetailOut | None:
     """Detail payload for a single ticker, sourced from the analyst pipeline."""
     sym = symbol.upper()
     meta = TICKER_MAP.get(sym)
@@ -395,11 +552,63 @@ def ticker_detail(symbol: str, timeframe: Timeframe = "daily") -> TickerDetailOu
 
     factors = _derive_factors(report)
 
+    pr = price_range.lower().strip()
+    if pr not in _ALLOWED_CHART_RANGES:
+        pr = "1d"
+
+    try:
+        chart_bundle = _chart_bundle_for_range(sym, pr)
+    except Exception:
+        chart_bundle = TickerChartBundleOut(range_key=pr, x_granularity="day", bars=[])
+
+    chart_closes = [b.c for b in chart_bundle.bars]
+    if chart_closes:
+        price_series = [round(float(c), 4) for c in chart_closes]
+    elif closes:
+        price_series = [round(float(c), 4) for c in closes[-200:]]
+    else:
+        price_series = [round(float(c), 4) for c in report.chart.close[-200:]]
+
+    chart_context = _build_ticker_chart_context(
+        report=report,
+        row=row,
+        factors=factors,
+        closes=closes if closes else list(report.chart.close),
+    )
+
+    try:
+        news_items = [
+            TickerNewsOut(
+                title=n.title,
+                publisher=n.publisher,
+                url=n.url,
+                published_at=n.published_at,
+                summary=n.summary or "",
+            )
+            for n in news_for_ticker(sym, 8)
+        ]
+    except Exception:
+        news_items = []
+
+    signal_detail = (
+        f"{report.headline} — Verdict {report.verdict}, signal {row.signal} "
+        f"at {int(row.confidence * 100)}% confidence; composite {row.composite_score:+.2f}."
+    )
+    narrative_summary = _narrative_excerpt(report.narrative)
+    technical_bullets = _technical_bullets_from_report(report)
+
     return TickerDetailOut(
         row=row,
         factors=factors,
         price_30d=price_30,
+        price_series=price_series,
+        chart=chart_bundle,
+        chart_context=chart_context,
         expected_move=expected,
+        news=news_items,
+        signal_detail=signal_detail,
+        narrative_summary=narrative_summary,
+        technical_bullets=technical_bullets,
         recommendations=[
             RecommendationOut(
                 strategy=StrategyOut(
@@ -428,6 +637,145 @@ def ticker_detail(symbol: str, timeframe: Timeframe = "daily") -> TickerDetailOu
             )
             for r in recs
         ],
+    )
+
+
+def _bollinger_interpretation_for_detail(closes: list[float]) -> str:
+    """Short English read of Bollinger(20, 2σ) on the trailing window."""
+    if not closes:
+        return "No price history for Bollinger bands."
+    tail = closes[-200:]
+    n = 20
+    if len(tail) < n:
+        if len(tail) < 3:
+            return "Not enough bars for a 20-period Bollinger on this window."
+        n = len(tail)
+    window = tail[-n:]
+    m = float(statistics.fmean(window))
+    if len(window) < 2:
+        return f"Mean of last {n} closes ≈ ${m:.2f}."
+    st = float(statistics.pstdev(window))
+    upper = m + 2.0 * st
+    lower = m - 2.0 * st
+    last = float(tail[-1])
+    if st < 1e-12 * max(abs(m), 1.0):
+        return f"20-period mean ≈ ${m:.2f}; volatility band is very tight on this window."
+    span = upper - lower
+    pct_b = (last - lower) / span * 100.0 if span > 0 else 50.0
+    if last >= upper:
+        pos = (
+            "at or above the upper band — price is stretched vs recent 20-bar "
+            "volatility (watch for mean reversion risk in the model's view)."
+        )
+    elif last <= lower:
+        pos = (
+            "at or below the lower band — recent window is weak vs its own "
+            "volatility (often read as oversold until structure improves)."
+        )
+    elif last > m:
+        pos = f"above the midline, in the upper portion of the envelope (%B ≈ {pct_b:.0f}%)."
+    else:
+        pos = f"below the midline, in the lower portion of the envelope (%B ≈ {pct_b:.0f}%)."
+    return (
+        f"On the last {n} closes: mid {m:.2f}, band {lower:.2f} – {upper:.2f} "
+        f"(Bollinger 20, 2σ). Last close {last:.2f} is {pos} "
+        f"The shaded band in the chart is that envelope; midline is the 20-SMA of close."
+    )
+
+
+def _build_ticker_chart_context(
+    *,
+    report: ReportOut,
+    row: TickerRowOut,
+    factors: list[FactorOut],
+    closes: list[float],
+) -> TickerChartContextOut:
+    """Explain RSI/MACD/ATR/BB and factor scores for the detail enlarged view."""
+    lines: list[TickerSignalLineOut] = []
+
+    lines.append(
+        TickerSignalLineOut(
+            label="Model headline",
+            detail=report.headline,
+        )
+    )
+    lines.append(
+        TickerSignalLineOut(
+            label="Signal (screener)",
+            detail=(
+                f"{row.signal} is derived from the same composite as the analyst: "
+                f"verdict {report.verdict} with confidence {int(row.confidence * 100)}%."
+            ),
+        )
+    )
+
+    rsi = report.rsi
+    if rsi.value is not None:
+        st = getattr(rsi, "state", "unknown")
+        lines.append(
+            TickerSignalLineOut(
+                label="RSI (14)",
+                detail=(
+                    f"Reading {rsi.value:.1f} — {st} posture. The model uses RSI "
+                    "50/70/30 style zones for bull/bear and overbought/oversold tilts, "
+                    "not as a stand-alone buy/sell rule."
+                ),
+            )
+        )
+
+    m = report.macd
+    m_parts: list[str] = []
+    if m.histogram is not None:
+        m_parts.append(
+            f"histogram {m.histogram:+.3f}, slope {m.histogram_direction}"
+        )
+    if m.bullish_cross_recent:
+        m_parts.append("fresh bullish MACD/signal cross (recent bars)")
+    if m.bearish_cross_recent:
+        m_parts.append("fresh bearish MACD/signal cross (recent bars)")
+    lines.append(
+        TickerSignalLineOut(
+            label="MACD (12,26,9)",
+            detail=(
+                "; ".join(m_parts)
+                if m_parts
+                else "No strong MACD state — momentum treated as mixed."
+            ),
+        )
+    )
+
+    atr = report.atr
+    if atr.pct_of_price is not None and atr.value is not None:
+        lines.append(
+            TickerSignalLineOut(
+                label="ATR (14) / volatility",
+                detail=(
+                    f"ATR ${atr.value:.2f} is about {atr.pct_of_price:.2f}% of last price — "
+                    "informs option strike distance and how wide a typical session move is."
+                ),
+            )
+        )
+
+    lines.append(
+        TickerSignalLineOut(
+            label="Bollinger (20, 2σ) on chart",
+            detail=_bollinger_interpretation_for_detail(closes),
+        )
+    )
+
+    for f in factors:
+        lines.append(
+            TickerSignalLineOut(
+                label=f"Factor — {f.name}",
+                detail=f"Score {f.score:+.2f} — {f.note}",
+            )
+        )
+
+    return TickerChartContextOut(
+        headline=report.headline,
+        verdict=report.verdict,
+        signal=row.signal,
+        lines=lines,
     )
 
 

@@ -71,7 +71,7 @@ class TradePlan(BaseModel):
     strike: float
     expiry_date: str  # ISO date, e.g. "2026-05-22"
     expiry_dte: int
-    estimated_premium: Optional[float]        # per-share mid (Black-Scholes estimate)
+    estimated_premium: Optional[float]        # per-share: Yahoo chain mid if available, else BS
     cost_per_contract: Optional[float]        # 100 × premium
     spot_at_entry: float
     break_even: Optional[float]

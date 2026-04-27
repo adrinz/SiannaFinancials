@@ -1,0 +1,146 @@
+"""Best-effort Yahoo Finance quotes to align options tickets with broker UIs.
+
+Uses the same free yfinance path as the rest of the app. When Yahoo is
+unreachable or a strike/expiry is not listed, callers fall back to bar
+close + model pricing.
+
+* Underlying: last / regular market price (or last daily close) with a
+  short in-process cache to avoid fan-out during screener builds.
+* Options: (bid+ask)/2 for the chain row nearest the requested strike on
+  the listed expiry **nearest** the ticket expiry (Yahoo’s chain dates,
+  not our internal roll-to-Friday logic, may differ by a day or two).
+"""
+from __future__ import annotations
+
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime
+from typing import Any, Optional
+
+from .constants import TICKER_MAP
+
+_YF_TIMEOUT = 12.0
+_SPOT_CACHE: dict[str, tuple[float, float]] = {}
+_OPT_CACHE: dict[str, tuple[float, float]] = {}
+_SPOT_TTL_SEC = 55.0
+_OPT_TTL_SEC = 90.0
+
+
+def _mapped_symbol(sym: str) -> str:
+    m = TICKER_MAP.get(sym.upper(), {})
+    return m.get("yfinance_symbol", sym)
+
+
+def _run_yf(fn, timeout: float = _YF_TIMEOUT) -> Any:
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        try:
+            return ex.submit(fn).result(timeout=timeout)
+        except Exception:
+            return None
+
+
+def yf_last_price(sym: str) -> Optional[float]:
+    """Latest tradable last from Yahoo (fast_info / history), or None."""
+    u = sym.upper()
+    now = time.time()
+    t_old = _SPOT_CACHE.get(u)
+    if t_old and now - t_old[0] < _SPOT_TTL_SEC:
+        return t_old[1]
+    yfs = _mapped_symbol(u)
+
+    def _pull() -> Optional[float]:
+        import yfinance as yf  # type: ignore
+
+        t = yf.Ticker(yfs)
+        try:
+            fi = t.fast_info
+            for k in ("last_price", "lastPrice", "regularMarketPrice", "previous_close"):
+                try:
+                    v = fi[k]  # type: ignore[index]
+                except (KeyError, TypeError, Exception):
+                    v = None
+                if v is not None and float(v) > 0:
+                    return float(v)
+        except Exception:
+            pass
+        try:
+            h = t.history(period="5d", interval="1d", auto_adjust=True)
+            if h is not None and not h.empty and "Close" in h.columns:
+                return float(h["Close"].iloc[-1])
+        except Exception:
+            pass
+        return None
+
+    v = _run_yf(_pull)
+    if v is not None and v > 0:
+        _SPOT_CACHE[u] = (now, v)
+    return v
+
+
+def yf_option_mid_per_share(
+    sym: str,
+    strike: float,
+    is_call: bool,
+    expiry: date,
+) -> Optional[float]:
+    """(bid+ask)/2 or last for the option row nearest *strike*; or None.
+
+    *expiry* is the ticket’s target date; the **nearest** listed chain
+    expiry to that date is used (same weeklies/dailies as Robinhood’s list).
+    """
+    u = sym.upper()
+    yfs = _mapped_symbol(u)
+    cache_key = f"{u}|{round(float(strike), 4):.4f}|{int(is_call)}|{expiry.isoformat()}"
+    now = time.time()
+    t_old = _OPT_CACHE.get(cache_key)
+    if t_old and now - t_old[0] < _OPT_TTL_SEC:
+        return t_old[1]
+
+    def _pull() -> Optional[float]:
+        import yfinance as yf  # type: ignore
+
+        t = yf.Ticker(yfs)
+        opts: tuple = tuple(getattr(t, "options", None) or ())
+        if not opts:
+            return None
+        best: Optional[str] = None
+        best_d = 10_000
+        for s in opts:
+            try:
+                d_ex = datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+            diff = abs((d_ex - expiry).days)
+            if diff < best_d:
+                best_d = diff
+                best = str(s)[:10]
+        if not best:
+            return None
+        if best_d > 40:
+            return None
+        ch = t.option_chain(best)
+        chain = ch.calls if is_call else ch.puts
+        if chain is None or len(chain) == 0:
+            return None
+        strikes = [float(x) for x in chain["strike"].tolist()]
+        if not strikes:
+            return None
+        idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - float(strike)))
+        row = chain.iloc[idx]
+        bid = float(row.get("bid", 0) or 0)
+        ask = float(row.get("ask", 0) or 0)
+        lastp = float(row.get("lastPrice", 0) or 0)
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        if lastp > 0:
+            return lastp
+        if ask > 0:
+            return ask
+        if bid > 0:
+            return bid
+        return None
+
+    v = _run_yf(_pull)
+    if v is not None and v > 0:
+        _OPT_CACHE[cache_key] = (now, v)
+    return v

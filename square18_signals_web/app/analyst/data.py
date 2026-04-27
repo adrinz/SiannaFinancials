@@ -37,14 +37,15 @@ from .constants import (
 _CACHE_DIR = Path.home() / ".cache" / "square18_signals" / "ohlcv"
 
 # Per-timeframe cache freshness, tuned for a "near-live" dashboard:
-#   * intraday bars refresh every 5 min so the Refresh button actually
-#     pulls new data mid-session
-#   * daily refreshes every 15 min, so prices move during US market hours
-#     without hammering Yahoo (free tier is ~15-20 min delayed anyway)
-#   * weekly is stable — 1 day is plenty
-# Override via the SQUARE18_OHLCV_TTL_* env vars if you need to go faster
-# (for a paid feed) or slower (for offline demo).
+#   * 1h/4h: default 5 min (shared intraday file cache)
+#   * 1D session chart: separate, shorter default (2 min) so the detail
+#     view can poll yfinance that often without hammering 1h/4h
+#   * daily: 15 min — Yahoo free tier is ~15–20 min delayed anyway
+#   * weekly: stable
+# Override via SQUARE18_OHLCV_TTL_* env vars.
 _CACHE_TTL_INTRADAY = int(os.environ.get("SQUARE18_OHLCV_TTL_INTRADAY", 5 * 60))
+# Disk cache for get_ohlcv_1d_intraday() only; align with static DETAIL_CHART_POLL_MS.
+_CACHE_TTL_1D_INTRADAY = int(os.environ.get("SQUARE18_OHLCV_TTL_1D_INTRADAY", 2 * 60))
 _CACHE_TTL_DAILY    = int(os.environ.get("SQUARE18_OHLCV_TTL_DAILY",    15 * 60))
 _CACHE_TTL_WEEKLY   = int(os.environ.get("SQUARE18_OHLCV_TTL_WEEKLY",   24 * 60 * 60))
 
@@ -422,3 +423,197 @@ def _resample_daily_to_weekly(daily: OHLCV) -> OHLCV:
         volume=volumes,
         source=daily.source,
     )
+
+
+# ---------------------------------------------------------------------------
+# One-day intraday chart (1m / 2m / 5m) — smooth Yahoo-style 1D view
+# ---------------------------------------------------------------------------
+
+def _cache_path_1d_intraday(symbol: str) -> Path:
+    return _CACHE_DIR / f"{symbol.upper()}__1d_intraday.json"
+
+
+def _read_cache_1d_intraday(symbol: str) -> Optional[OHLCV]:
+    p = _cache_path_1d_intraday(symbol)
+    if not p.exists():
+        return None
+    try:
+        age = time.time() - p.stat().st_mtime
+        if age > _CACHE_TTL_1D_INTRADAY:
+            return None
+        payload = json.loads(p.read_text())
+        return OHLCV(**payload)
+    except Exception:
+        return None
+
+
+def _write_cache_1d_intraday(series: OHLCV) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_path_1d_intraday(series.symbol).write_text(json.dumps(asdict(series)))
+    except Exception:
+        pass
+
+
+def _df_to_ohlcv_1h_style(symbol: str, df, source: str) -> OHLCV:
+    """Build OHLCV from a yfinance intraday dataframe (minute/2m/5m bars)."""
+    df = df.sort_index().dropna(subset=["Open", "High", "Low", "Close"])
+    if "Volume" in df.columns:
+        df["Volume"] = df["Volume"].fillna(0)
+    else:
+        df["Volume"] = 0
+    if df.empty:
+        raise ValueError("empty frame")
+    ts = [x.to_pydatetime().astimezone(timezone.utc).isoformat() for x in df.index]
+    return OHLCV(
+        symbol=symbol.upper(),
+        timeframe="1h",
+        timestamps=ts,
+        open=[float(x) for x in df["Open"].tolist()],
+        high=[float(x) for x in df["High"].tolist()],
+        low=[float(x) for x in df["Low"].tolist()],
+        close=[float(x) for x in df["Close"].tolist()],
+        volume=[float(x) for x in df["Volume"].tolist()],
+        source=source,
+    )
+
+
+def _filter_last_ny_session_day(df):
+    """Keep rows whose calendar date in New York matches the last row (one session)."""
+    try:
+        idx = df.index
+        if getattr(idx, "tz", None) is None:
+            try:
+                idx_ny = idx.tz_localize("America/New_York", ambiguous="infer", nonexistent="shift_forward")
+            except Exception:
+                idx_ny = idx.tz_localize("UTC").tz_convert("America/New_York")
+        else:
+            idx_ny = idx.tz_convert("America/New_York")
+        last_d = idx_ny[-1].date()
+        mask = [ts.date() == last_d for ts in idx_ny]
+        out = df.loc[mask]
+        return out if len(out) >= 2 else df
+    except Exception:
+        return df
+
+
+def _fetch_yfinance_1d_intraday(symbol: str) -> Optional[OHLCV]:
+    """1m/2m/5m with extended hours, matching Yahoo's dense 1D line."""
+
+    def _pull() -> Optional[OHLCV]:
+        try:
+            import yfinance as yf  # type: ignore
+        except Exception:
+            return None
+        meta = TICKER_MAP.get(symbol.upper(), {})
+        yf_symbol = meta.get("yfinance_symbol", symbol)
+        t = yf.Ticker(yf_symbol)
+
+        for period, interval in (("1d", "1m"), ("1d", "2m"), ("5d", "5m"), ("5d", "15m")):
+            try:
+                df = t.history(
+                    period=period,
+                    interval=interval,
+                    prepost=True,
+                    auto_adjust=True,
+                    actions=False,
+                )
+            except Exception:
+                continue
+            if df is None or df.empty or "Close" not in df.columns:
+                continue
+            if period == "1d" and interval in ("1m", "2m"):
+                df = _filter_last_ny_session_day(df)
+            if period == "5d" and interval in ("5m", "15m"):
+                df = _filter_last_ny_session_day(df)
+            try:
+                o = _df_to_ohlcv_1h_style(symbol, df, "yfinance")
+            except Exception:
+                continue
+            if len(o) < 8:
+                continue
+            return o
+        return None
+
+    return _threaded_with_timeout(_pull, _YF_REQUEST_TIMEOUT)  # type: ignore[return-value]
+
+
+def _synthesize_1d_intraday_from_1h(symbol: str) -> Optional[OHLCV]:
+    """Smooth, dense line when yfinance has no 1m: interpolate last session of 1h bars."""
+    h = get_ohlcv(symbol, "1h")
+    if len(h) < 2:
+        return None
+    nuse = min(10, len(h))
+    t0s = h.timestamps[-nuse:]
+    cls = h.close[-nuse:]
+    t_start = datetime.fromisoformat(
+        t0s[0].replace("Z", "+00:00")
+    )
+    t_end = datetime.fromisoformat(
+        t0s[-1].replace("Z", "+00:00")
+    )
+    span_sec = max(60, (t_end - t_start).total_seconds())
+    n_out = min(400, max(80, int(span_sec // 60) + 1))
+    ts_out: list[str] = []
+    o_out: list[float] = []
+    h_out: list[float] = []
+    l_out: list[float] = []
+    c_out: list[float] = []
+    v_out: list[float] = []
+    for k in range(n_out):
+        alpha = k / max(1, n_out - 1)
+        pos = alpha * (nuse - 1)
+        i = int(pos)
+        f = pos - i
+        i2 = min(i + 1, nuse - 1)
+        c0 = float(cls[i])
+        c1 = float(cls[i2])
+        c = c0 * (1.0 - f) + c1 * f
+        tick = t_start + timedelta(seconds=alpha * span_sec)
+        ts_out.append(tick.astimezone(timezone.utc).isoformat())
+        o_out.append(c)
+        h_out.append(c * 1.0002)
+        l_out.append(c * 0.9998)
+        c_out.append(c)
+        v_out.append(0.0)
+    return OHLCV(
+        symbol=symbol.upper(),
+        timeframe="1h",
+        timestamps=ts_out,
+        open=o_out,
+        high=h_out,
+        low=l_out,
+        close=c_out,
+        volume=v_out,
+        source="synthetic-1d-intra",
+    )
+
+
+def get_ohlcv_1d_intraday(symbol: str) -> OHLCV:
+    """Return dense intraday series for 1D chart (minute bars when available)."""
+    sym = symbol.upper()
+    cached = _read_cache_1d_intraday(sym)
+    if cached is not None:
+        return cached
+    s = _fetch_yfinance_1d_intraday(sym)
+    if s is None or len(s) < 2:
+        s = _synthesize_1d_intraday_from_1h(sym)
+    if s is None or len(s) < 2:
+        h = get_ohlcv(sym, "1h")
+        n = min(16, len(h))
+        if n >= 2 and len(h) >= n:
+            s = OHLCV(
+                symbol=h.symbol,
+                timeframe="1h",
+                timestamps=h.timestamps[-n:],
+                open=h.open[-n:],
+                high=h.high[-n:],
+                low=h.low[-n:],
+                close=h.close[-n:],
+                volume=h.volume[-n:],
+                source=h.source,
+            )
+        else:
+            s = h
+    _write_cache_1d_intraday(s)
+    return s

@@ -129,12 +129,133 @@ const state = {
   filter: 'all',
   activeSymbol: null,
   universe: [], // all symbols (for the detail chip row)
-  details: {}, // symbol -> cached detail payload
+  details: {}, // "SYMBOL|range" -> cached detail payload
+  /** Ticker detail price chart: range matches API `?range=`, view is client-only. */
+  detailChart: { range: '1d', view: 'mountain' },
+  /** 0–1 session ratio window for 1D (6am–6pm ET in full view); scroll to zoom, drag to pan. */
+  detailChartSessionZoom: { start: 0, end: 1 },
+  /** Analyst / Search embed charts use the same API + controls; session zoom is isolated per tab. */
+  analystChart: { range: '1d', view: 'mountain' },
+  analystChartSessionZoom: { start: 0, end: 1 },
+  searchChart: { range: '1d', view: 'mountain' },
+  searchChartSessionZoom: { start: 0, end: 1 },
+  /** Which surface opened the enlarged chart modal (`openDetailChartModal`); drives View toolbar routing. */
+  chartModalSource: null,
 };
+
+const SESSION_1D_MIN_ZOOM = 0.0015; // ≈1 min in a 12h range — zoom in to “minute” scale
+
+function detailCacheKey(symbol) {
+  return `${symbol}|${state.detailChart.range}`;
+}
+
+function reapplySessionDetailChart() {
+  const sym = state.activeSymbol;
+  if (!sym || state.view !== 'detail') return;
+  const d = state.details[detailCacheKey(sym)];
+  if (d) {
+    renderPriceChart(d);
+    const backdrop = $('#chart-enlarge-backdrop');
+    if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'detail') {
+      openDetailChartModal(d, 'detail');
+    }
+  }
+}
+
+function analystTickerCacheKey(symbol) {
+  return `${String(symbol || '').toUpperCase()}|${state.analystChart.range}`;
+}
+
+function searchTickerCacheKey(symbol) {
+  return `${String(symbol || '').toUpperCase()}|${state.searchChart.range}`;
+}
+
+function reapplyAnalystSessionChart() {
+  if (state.view !== 'analyst') return;
+  const sym = analyst.activeSymbol;
+  if (!sym) return;
+  const d = analyst.tickerDetails[analystTickerCacheKey(sym)];
+  if (d) {
+    renderPriceChart(d, 'analyst');
+    const backdrop = $('#chart-enlarge-backdrop');
+    if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'analyst') {
+      openDetailChartModal(d, 'analyst');
+    }
+  }
+}
+
+function reapplySearchSessionChart() {
+  if (state.view !== 'search') return;
+  const d = searchUI.lastTickerDetail;
+  if (d) {
+    renderPriceChart(d, 'search');
+    const backdrop = $('#chart-enlarge-backdrop');
+    if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'search') {
+      openDetailChartModal(d, 'search');
+    }
+  }
+}
+
+/** Live refresh for Ticker detail chart (Yahoo; not tick-by-tick). Align with data._CACHE_TTL_1D_INTRADAY. */
+let detailChartPollTimer = null;
+const DETAIL_CHART_POLL_MS = 2 * 60_000; // 2 min — pair with 1D intraday disk TTL; use 60_000 for 1 min + env TTL
+
+function clearDetailChartPoll() {
+  if (detailChartPollTimer) {
+    clearInterval(detailChartPollTimer);
+    detailChartPollTimer = null;
+  }
+  const live = $('#detail-chart-live');
+  if (live) {
+    live.classList.add('hidden');
+    live.textContent = '';
+  }
+}
+
+function scheduleDetailChartPoll() {
+  clearDetailChartPoll();
+  const live = $('#detail-chart-live');
+  if (live) {
+    live.classList.remove('hidden');
+    {
+      const min = Math.max(1, Math.round(DETAIL_CHART_POLL_MS / 60_000));
+      live.textContent = min === 1
+        ? ' · Live · every 1 min'
+        : ` · Live · every ${min} min`;
+    }
+  }
+  detailChartPollTimer = setInterval(async () => {
+    if (state.view !== 'detail' || !state.activeSymbol) {
+      clearDetailChartPoll();
+      return;
+    }
+    if (document.visibilityState === 'hidden') return;
+    const sym = state.activeSymbol;
+    delete state.details[detailCacheKey(sym)];
+    try {
+      const r = state.detailChart.range;
+      const detail = await api(
+        `/api/ticker/${encodeURIComponent(sym)}?range=${encodeURIComponent(r)}&refresh=${Date.now()}`,
+      );
+      state.details[detailCacheKey(sym)] = detail;
+      if (state.activeSymbol !== sym || state.view !== 'detail') return;
+      renderDetail(detail);
+      const backdrop = $('#chart-enlarge-backdrop');
+      if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'detail') {
+        openDetailChartModal(detail, 'detail');
+      }
+    } catch (e) {
+      /* best-effort; user can use Refresh in header */
+    }
+  }, DETAIL_CHART_POLL_MS);
+}
 
 // ---------- Router / nav ----------------------------------------------------
 
 function switchView(view, opts = {}) {
+  if (view !== 'detail') {
+    clearDetailChartPoll();
+  }
   state.view = view;
   $$('.tab').forEach((t) => {
     const active = t.dataset.view === view;
@@ -611,21 +732,291 @@ function renderScreen(rows) {
 // ---------- Ticker detail ---------------------------------------------------
 
 async function openTicker(symbol) {
+  clearDetailChartPoll();
+  const prevSym = state.activeSymbol;
   state.activeSymbol = symbol;
+  if (prevSym != null && prevSym !== symbol) {
+    state.detailChartSessionZoom = { start: 0, end: 1 };
+  }
   renderChipRow();
 
-  let detail = state.details[symbol];
+  const ck = detailCacheKey(symbol);
+  let detail = state.details[ck];
   if (!detail) {
     $('#detail-hero').innerHTML = '<div class="hero-loading mono">Loading ' + symbol + '…</div>';
     try {
-      detail = await api(`/api/ticker/${encodeURIComponent(symbol)}`);
-      state.details[symbol] = detail;
+      const r = state.detailChart.range;
+      detail = await api(
+        `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`,
+      );
+      state.details[ck] = detail;
     } catch (e) {
       $('#detail-hero').innerHTML = `<div class="hero-loading mono">Failed: ${e}</div>`;
       return;
     }
   }
+  if (detail.chart && detail.chart.range_key) {
+    state.detailChart.range = detail.chart.range_key;
+  }
+  syncDetailChartToolbar();
   renderDetail(detail);
+  if (state.view === 'detail') {
+    scheduleDetailChartPoll();
+  }
+}
+
+function syncDetailChartToolbar() {
+  const r = state.detailChart.range;
+  const v = state.detailChart.view;
+  document.querySelectorAll('#detail-chart-toolbar [data-detail-range]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-detail-range') === r);
+  });
+  document.querySelectorAll('#detail-chart-toolbar [data-detail-view]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-detail-view') === v);
+  });
+}
+
+function syncAnalystChartToolbar() {
+  const r = state.analystChart.range;
+  const v = state.analystChart.view;
+  document.querySelectorAll('#analyst-chart-toolbar [data-analyst-range]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-analyst-range') === r);
+  });
+  document.querySelectorAll('#analyst-chart-toolbar [data-analyst-view]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-analyst-view') === v);
+  });
+}
+
+function syncSearchChartToolbar() {
+  const r = state.searchChart.range;
+  const v = state.searchChart.view;
+  document.querySelectorAll('#search-chart-toolbar [data-search-range]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-search-range') === r);
+  });
+  document.querySelectorAll('#search-chart-toolbar [data-search-view]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-search-view') === v);
+  });
+}
+
+/** Range + chart type: delegate from document so the same controls work in the enlarge modal. */
+function initDetailChartToolbar() {
+  document.addEventListener('click', (e) => {
+    const tr = e.target.closest('#detail-chart-toolbar [data-detail-range]');
+    const tvModal = e.target.closest('#chart-modal-view-toolbar [data-detail-view]');
+    const tvDetail = e.target.closest('#detail-chart-toolbar [data-detail-view]');
+    if (tr) {
+      e.preventDefault();
+      const nr = tr.getAttribute('data-detail-range');
+      if (nr && nr !== state.detailChart.range && state.activeSymbol) {
+        state.detailChart.range = nr;
+        state.detailChartSessionZoom = { start: 0, end: 1 };
+        delete state.details[detailCacheKey(state.activeSymbol)];
+        void openTicker(state.activeSymbol);
+      }
+      return;
+    }
+    if (tvModal) {
+      e.preventDefault();
+      const nv = tvModal.getAttribute('data-detail-view');
+      const src = state.chartModalSource;
+      if (!nv || !src) return;
+      if (src === 'analyst') {
+        if (nv === state.analystChart.view) return;
+        state.analystChart.view = nv;
+        const sym = analyst.activeSymbol;
+        const d = sym ? analyst.tickerDetails[analystTickerCacheKey(sym)] : null;
+        if (d) {
+          renderPriceChart(d, 'analyst');
+          openDetailChartModal(d, 'analyst');
+        }
+        syncAnalystChartToolbar();
+        syncChartModalViewToolbar();
+        return;
+      }
+      if (src === 'search') {
+        if (nv === state.searchChart.view) return;
+        state.searchChart.view = nv;
+        const d = searchUI.lastTickerDetail;
+        if (d) {
+          renderPriceChart(d, 'search');
+          openDetailChartModal(d, 'search');
+        }
+        syncSearchChartToolbar();
+        syncChartModalViewToolbar();
+        return;
+      }
+      if (src === 'detail') {
+        if (nv === state.detailChart.view) return;
+        state.detailChart.view = nv;
+        const d = state.activeSymbol ? state.details[detailCacheKey(state.activeSymbol)] : null;
+        if (d) {
+          renderPriceChart(d, 'detail');
+          openDetailChartModal(d, 'detail');
+        }
+        syncDetailChartToolbar();
+        syncChartModalViewToolbar();
+        return;
+      }
+      return;
+    }
+    if (tvDetail) {
+      e.preventDefault();
+      const nv = tvDetail.getAttribute('data-detail-view');
+      if (nv && nv !== state.detailChart.view) {
+        state.detailChart.view = nv;
+        const d = state.activeSymbol
+          ? state.details[detailCacheKey(state.activeSymbol)]
+          : null;
+        if (d) {
+          renderPriceChart(d, 'detail');
+          const backdrop = $('#chart-enlarge-backdrop');
+          if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'detail') {
+            openDetailChartModal(d, 'detail');
+          }
+        }
+        syncDetailChartToolbar();
+        syncChartModalViewToolbar();
+      }
+    }
+  });
+}
+
+async function loadAnalystTickerDetail(symbol) {
+  const r = state.analystChart.range;
+  const key = `${String(symbol).toUpperCase()}|${r}`;
+  const cached = analyst.tickerDetails[key];
+  if (cached) return cached;
+  const d = await api(
+    `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`
+  );
+  analyst.tickerDetails[key] = d;
+  return d;
+}
+
+function initAnalystChartToolbar() {
+  document.addEventListener('click', (e) => {
+    const tr = e.target.closest('#analyst-chart-toolbar [data-analyst-range]');
+    const tv = e.target.closest('#analyst-chart-toolbar [data-analyst-view]');
+    if (!tr && !tv) return;
+    const sym = analyst.activeSymbol;
+    if (!sym) return;
+    e.preventDefault();
+    if (tr) {
+      const nr = tr.getAttribute('data-analyst-range');
+      if (!nr || nr === state.analystChart.range) return;
+      const oldR = state.analystChart.range;
+      const oldKey = `${sym.toUpperCase()}|${oldR}`;
+      state.analystChart.range = nr;
+      state.analystChartSessionZoom = { start: 0, end: 1 };
+      delete analyst.tickerDetails[oldKey];
+      void (async () => {
+        try {
+          const d = await loadAnalystTickerDetail(sym);
+          if (d && analyst.activeSymbol === sym) {
+            const r = analyst.reports[`${sym}|${analyst.timeframe}`];
+            if (r) renderAnalystReport(r, d);
+            else renderPriceChart(d, 'analyst');
+            syncAnalystChartToolbar();
+          }
+        } catch (err) {
+          const el = $('#analyst-price-chart');
+          if (el) {
+            el.innerHTML = '';
+            el.append(h('div', { class: 'callout callout-warning' },
+              h('div', { class: 'callout-title' }, 'Price chart'),
+              `Could not load chart: ${err}`));
+          }
+        }
+      })();
+      return;
+    }
+    if (tv) {
+      const nv = tv.getAttribute('data-analyst-view');
+      if (nv && nv !== state.analystChart.view) {
+        state.analystChart.view = nv;
+        const d = analyst.tickerDetails[analystTickerCacheKey(sym)];
+        if (d) {
+          renderPriceChart(d, 'analyst');
+          const backdrop = $('#chart-enlarge-backdrop');
+          if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'analyst') {
+            openDetailChartModal(d, 'analyst');
+          }
+        }
+        syncAnalystChartToolbar();
+        syncChartModalViewToolbar();
+      }
+    }
+  });
+}
+
+function initSearchChartToolbar() {
+  document.addEventListener('click', (e) => {
+    const tr = e.target.closest('#search-chart-toolbar [data-search-range]');
+    const tv = e.target.closest('#search-chart-toolbar [data-search-view]');
+    if (!tr && !tv) return;
+    const sym = searchUI.lastQueryResolvedSymbol;
+    if (!sym) return;
+    e.preventDefault();
+    if (tr) {
+      const nr = tr.getAttribute('data-search-range');
+      if (!nr || nr === state.searchChart.range) return;
+      const oldR = state.searchChart.range;
+      const oldKey = `${sym.toUpperCase()}|${oldR}`;
+      state.searchChart.range = nr;
+      state.searchChartSessionZoom = { start: 0, end: 1 };
+      delete searchUI.tickerDetails[oldKey];
+      void (async () => {
+        try {
+          const d = await loadSearchTickerDetail(sym);
+          searchUI.lastTickerDetail = d;
+          const host = $('#search-result');
+          if (host && host.isConnected) {
+            const r = searchUI.lastSearchPayload;
+            if (r) renderSearchResult(r, d);
+            else renderPriceChart(d, 'search');
+            syncSearchChartToolbar();
+          }
+        } catch (err) {
+          const el = $('#search-price-chart');
+          if (el) {
+            el.innerHTML = '';
+            el.append(h('div', { class: 'callout callout-warning' },
+              h('div', { class: 'callout-title' }, 'Price chart'),
+              `Could not load chart: ${err}`));
+          }
+        }
+      })();
+      return;
+    }
+    if (tv) {
+      const nv = tv.getAttribute('data-search-view');
+      if (nv && nv !== state.searchChart.view) {
+        state.searchChart.view = nv;
+        const d = searchUI.tickerDetails[searchTickerCacheKey(sym)];
+        if (d) {
+          renderPriceChart(d, 'search');
+          const backdrop = $('#chart-enlarge-backdrop');
+          if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'search') {
+            openDetailChartModal(d, 'search');
+          }
+        }
+        syncSearchChartToolbar();
+        syncChartModalViewToolbar();
+      }
+    }
+  });
+}
+
+async function loadSearchTickerDetail(symbol) {
+  const r = state.searchChart.range;
+  const key = `${String(symbol).toUpperCase()}|${r}`;
+  const cached = searchUI.tickerDetails[key];
+  if (cached) return cached;
+  const d = await api(
+    `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`
+  );
+  searchUI.tickerDetails[key] = d;
+  return d;
 }
 
 function renderChipRow() {
@@ -650,7 +1041,59 @@ function renderDetail(d) {
   renderPriceChart(d);
   renderFactorChart(d);
   renderFactorTable(d);
+  renderDetailSignalTech(d);
   renderRecommender(d);
+}
+
+function renderDetailSignalTech(d) {
+  const sig = $('#detail-signal-body');
+  if (sig) {
+    sig.textContent = d.signal_detail || d.chart_context?.headline || '—';
+  }
+  const tech = $('#detail-tech-body');
+  if (tech) {
+    tech.innerHTML = '';
+    if (d.narrative_summary) {
+      tech.append(
+        h('p', { class: 'detail-narrative' }, d.narrative_summary),
+      );
+    }
+    if (d.technical_bullets && d.technical_bullets.length) {
+      const ul = h('ul', { class: 'detail-tech-list' });
+      for (const b of d.technical_bullets) {
+        ul.append(h('li', {}, b));
+      }
+      tech.append(ul);
+    } else if (!d.narrative_summary) {
+      tech.append(h('div', { class: 'muted' }, '—'));
+    }
+  }
+  const news = $('#detail-news-body');
+  if (news) {
+    news.innerHTML = '';
+    if (!d.news || !d.news.length) {
+      news.append(
+        h('div', { class: 'muted' }, 'No symbol-specific headlines in the feed right now.'),
+      );
+    } else {
+      for (const it of d.news) {
+        const url = it.url && String(it.url).trim() ? it.url : '#';
+        const when = it.published_at ? fmtESTCompact(it.published_at) : '';
+        const meta = [it.publisher, when].filter(Boolean).join(' · ');
+        news.append(
+          h('div', { class: 'detail-news-item' },
+            h('a', {
+              class: 'detail-news-title',
+              href: url,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+            }, String(it.title || '')),
+            h('div', { class: 'detail-news-meta muted' }, meta),
+          ),
+        );
+      }
+    }
+  }
 }
 
 function renderHero(d) {
@@ -702,15 +1145,223 @@ function heroStat(value, label, opts = {}) {
 
 // ---------- Fancy price chart (SMA overlays, Bollinger, crosshair) --------
 
-function renderPriceChart(d) {
-  const host = $('#price-chart');
+/** @param {string} target "detail" | "analyst" | "search" */
+function renderPriceChart(d, target = 'detail') {
+  const host =
+    target === 'analyst'
+      ? $('#analyst-price-chart')
+      : target === 'search'
+        ? $('#search-price-chart')
+        : $('#price-chart');
+  const btn =
+    target === 'analyst'
+      ? $('#analyst-btn-enlarge-chart')
+      : target === 'search'
+        ? $('#search-btn-enlarge-chart')
+        : $('#btn-enlarge-chart');
+  const titleEl =
+    target === 'analyst'
+      ? $('#analyst-price-card-title')
+      : target === 'search'
+        ? $('#search-price-card-title')
+        : $('#price-chart-card-title');
+  if (!host) return;
   host.innerHTML = '';
-  const series = d.price_30d || [];
+  const ch = d.chart;
+  const bars = ch && Array.isArray(ch.bars) && ch.bars.length >= 2 ? ch.bars : null;
+  const view =
+    target === 'analyst'
+      ? state.analystChart.view || 'mountain'
+      : target === 'search'
+        ? state.searchChart.view || 'mountain'
+        : state.detailChart.view || 'mountain';
+  if (bars) {
+    const vk = (ch.range_key || '1d').toUpperCase();
+    const g =
+      ch.x_granularity === 'session'
+        ? '1D session (ET · 6am–6pm)'
+        : ch.x_granularity === 'hour'
+          ? 'Hourly'
+          : 'Daily';
+    if (titleEl) {
+      titleEl.textContent = `Price · ${g} · ${bars.length} pts · range ${vk}`;
+    }
+    if (btn) {
+      btn.hidden = false;
+      btn.onclick = () => openDetailChartModal(d, target);
+    }
+    const xg = ch.x_granularity || 'day';
+    const o = {
+      yahooLayout: true,
+      width: 1000,
+      height: 300,
+      xGranularity: xg,
+    };
+    if (xg === 'session') {
+      o.sessionZoom =
+        target === 'analyst'
+          ? state.analystChartSessionZoom
+          : target === 'search'
+            ? state.searchChartSessionZoom
+            : state.detailChartSessionZoom;
+      o.onSessionReapply =
+        target === 'analyst'
+          ? reapplyAnalystSessionChart
+          : target === 'search'
+            ? reapplySearchSessionChart
+            : reapplySessionDetailChart;
+    }
+    host.append(tickerOhlcChart(bars, view, d.row.direction, o));
+    return;
+  }
+  const series =
+    d.price_series && d.price_series.length >= 2 ? d.price_series : d.price_30d || [];
   if (series.length < 2) {
+    if (btn) btn.hidden = true;
+    if (titleEl) titleEl.textContent = 'Price';
     host.append(h('div', { class: 'chart-placeholder' }, 'No data'));
     return;
   }
-  host.append(fancyPriceChart(series, d.row.direction));
+  if (titleEl) {
+    titleEl.textContent = `Price · ${series.length} sessions (SMA / EMA / Bollinger)`;
+  }
+  if (btn) {
+    btn.hidden = false;
+    btn.onclick = () => openDetailChartModal(d, target);
+  }
+  host.append(
+    fancyPriceChart(series, d.row.direction, {
+      yahooLayout: true,
+      width: 1000,
+      height: 300,
+    }),
+  );
+}
+
+function openDetailChartModal(d, source = 'detail') {
+  state.chartModalSource = source;
+  const backdrop = $('#chart-enlarge-backdrop');
+  const host = $('#chart-modal-chart-host');
+  const sig = $('#chart-modal-signals');
+  const title = $('#chart-modal-title');
+  if (!backdrop || !host || !sig) return;
+  const ch = d.chart;
+  const bars = ch && Array.isArray(ch.bars) && ch.bars.length >= 2 ? ch.bars : null;
+  host.innerHTML = '';
+  const view =
+    source === 'analyst'
+      ? state.analystChart.view || 'mountain'
+      : source === 'search'
+        ? state.searchChart.view || 'mountain'
+        : state.detailChart.view || 'mountain';
+  if (bars) {
+    const xg = ch.x_granularity || 'day';
+    const o = {
+      yahooLayout: true,
+      width: 1400,
+      height: 420,
+      xGranularity: xg,
+      enlarged: true,
+    };
+    if (xg === 'session') {
+      o.sessionZoom =
+        source === 'analyst'
+          ? state.analystChartSessionZoom
+          : source === 'search'
+            ? state.searchChartSessionZoom
+            : state.detailChartSessionZoom;
+      o.onSessionReapply =
+        source === 'analyst'
+          ? reapplyAnalystSessionChart
+          : source === 'search'
+            ? reapplySearchSessionChart
+            : reapplySessionDetailChart;
+    }
+    host.append(tickerOhlcChart(bars, view, d.row.direction, o));
+  } else {
+    const series =
+      d.price_series && d.price_series.length >= 2 ? d.price_series : d.price_30d || [];
+    if (series.length < 2) return;
+    host.append(
+      fancyPriceChart(series, d.row.direction, {
+        yahooLayout: true,
+        width: 1400,
+        height: 420,
+        enlarged: true,
+      }),
+    );
+  }
+  const ctx = d.chart_context;
+  if (title) {
+    title.textContent = ctx && ctx.headline
+      ? `${d.row.symbol} · ${ctx.headline}`
+      : `${d.row.symbol} · price & indicators`;
+  }
+  sig.innerHTML = '';
+  if (ctx && Array.isArray(ctx.lines) && ctx.lines.length) {
+    for (const line of ctx.lines) {
+      sig.append(
+        h('div', { class: 'chart-signal-line' },
+          h('div', { class: 'chart-signal-label' }, line.label),
+          h('div', { class: 'chart-signal-detail' }, line.detail)
+        )
+      );
+    }
+  } else {
+    sig.append(
+      h('div', { class: 'chart-signal-detail muted' },
+        'Indicator notes are unavailable — refresh the page or re-open this ticker after upgrading the app.'
+      )
+    );
+  }
+  if (source === 'detail') syncDetailChartToolbar();
+  if (source === 'analyst') syncAnalystChartToolbar();
+  if (source === 'search') syncSearchChartToolbar();
+  syncChartModalViewToolbar();
+  backdrop.classList.remove('hidden');
+  document.body.classList.add('chart-enlarge-open');
+}
+
+function syncChartModalViewToolbar() {
+  const v =
+    state.chartModalSource === 'analyst'
+      ? state.analystChart.view
+      : state.chartModalSource === 'search'
+        ? state.searchChart.view
+        : state.detailChart.view;
+  document.querySelectorAll('#chart-modal-view-toolbar [data-detail-view]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-detail-view') === v);
+  });
+}
+
+function closeDetailChartModal() {
+  state.chartModalSource = null;
+  const backdrop = $('#chart-enlarge-backdrop');
+  const host = $('#chart-modal-chart-host');
+  if (backdrop) backdrop.classList.add('hidden');
+  document.body.classList.remove('chart-enlarge-open');
+  if (host) host.innerHTML = '';
+}
+
+function initChartEnlargeModal() {
+  const closeBtn = $('#chart-modal-close');
+  const backdrop = $('#chart-enlarge-backdrop');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      closeDetailChartModal();
+    });
+  }
+  if (backdrop) {
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) closeDetailChartModal();
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!backdrop || backdrop.classList.contains('hidden')) return;
+    closeDetailChartModal();
+  });
 }
 
 function _sma(series, n) {
@@ -760,10 +1411,13 @@ function _bollinger(series, n, mult) {
   return { mid, upper, lower };
 }
 
-function fancyPriceChart(series, direction) {
-  const w = 880;
-  const h0 = 260;
-  const pad = { top: 18, right: 18, bottom: 26, left: 58 };
+function fancyPriceChart(series, direction, opts = {}) {
+  const w = opts.width != null ? opts.width : 960;
+  const h0 = opts.height != null ? opts.height : 280;
+  const yahooLayout = opts.yahooLayout !== false;
+  const pad = yahooLayout
+    ? { top: 16, right: 54, bottom: 34, left: 10 }
+    : { top: 18, right: 18, bottom: 26, left: 58 };
   const innerW = w - pad.left - pad.right;
   const innerH = h0 - pad.top - pad.bottom;
   const n = series.length;
@@ -811,48 +1465,98 @@ function fancyPriceChart(series, direction) {
     direction === 'bull' ? 'var(--success)' :
     direction === 'bear' ? 'var(--danger)'  : 'var(--info)';
 
+  const enlarged = !!opts.enlarged;
+  const smA = yahooLayout ? 0.55 : 0.9;
   const root = svg('svg', {
-    class: 'fancy-chart',
+    class: 'fancy-chart' + (yahooLayout ? ' fancy-chart--yahoo' : ''),
     viewBox: `0 0 ${w} ${h0}`,
     preserveAspectRatio: 'none',
-    style: `height: ${h0}px;`,
+    style: `height: ${h0}px; width: 100%; min-width: 0; display: block;`,
   });
 
   // Defs: gradient for area fill + clip path.
   const defs = svg('defs');
   const gradId = 'grad-' + Math.random().toString(36).slice(2, 8);
   const grad = svg('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 });
+  const gOp0 = yahooLayout ? 0.48 : 0.35;
+  const gOp1 = yahooLayout ? 0.04 : 0;
   grad.append(
-    svg('stop', { offset: '0%', 'stop-color': color, 'stop-opacity': 0.35 }),
-    svg('stop', { offset: '100%', 'stop-color': color, 'stop-opacity': 0 }),
+    svg('stop', { offset: '0%', 'stop-color': color, 'stop-opacity': gOp0 }),
+    svg('stop', { offset: '100%', 'stop-color': color, 'stop-opacity': gOp1 }),
   );
   defs.append(grad);
   root.append(defs);
 
-  // Horizontal gridlines + y-axis labels
+  // Dark plot backdrop (Yahoo-style)
+  if (yahooLayout) {
+    root.append(
+      svg('rect', {
+        x: pad.left,
+        y: pad.top,
+        width: innerW,
+        height: innerH,
+        fill: 'rgba(8, 10, 14, 0.55)',
+        stroke: 'var(--stroke-soft)',
+        'stroke-width': 1,
+        rx: 2,
+      })
+    );
+  }
+
+  // Horizontal gridlines + y-axis labels (right side when Yahoo layout)
+  const yTxt = (xPos, anc, yVal, yPx) => svg('text', {
+    x: xPos, y: yPx + 4, 'text-anchor': anc,
+    fill: 'var(--text-dim)', 'font-size': 11, 'font-family': 'var(--mono)',
+  }, '$' + yVal.toFixed(yVal > 100 ? 0 : 2));
+
   for (let g = 0; g <= 4; g++) {
     const v = lo + (range * g) / 4;
     const y = pad.top + innerH - ((v - lo) / range) * innerH;
     root.append(
       svg('line', {
         x1: pad.left, y1: y, x2: w - pad.right, y2: y,
-        stroke: 'var(--stroke-soft)', 'stroke-dasharray': '2 4',
+        stroke: 'var(--stroke-soft)', 'stroke-dasharray': yahooLayout ? '1 5' : '2 4',
+        'stroke-opacity': yahooLayout ? 0.5 : 1,
       }),
-      svg('text', {
-        x: pad.left - 8, y: y + 3,
-        'text-anchor': 'end',
-        fill: 'var(--text-dim)',
-        'font-size': 10,
-        'font-family': 'var(--mono)',
-      }, '$' + v.toFixed(v > 100 ? 0 : 2))
     );
+    if (yahooLayout) {
+      root.append(yTxt(w - 8, 'end', v, y));
+    } else {
+      root.append(
+        svg('text', {
+          x: pad.left - 8, y: y + 3, 'text-anchor': 'end',
+          fill: 'var(--text-dim)', 'font-size': 10, 'font-family': 'var(--mono)',
+        }, '$' + v.toFixed(v > 100 ? 0 : 2)),
+      );
+    }
   }
 
-  // X-axis ticks (roughly 6 labels showing session N)
-  const nTicks = Math.min(6, n);
+  // Reference: prior bar close (dashed) — "previous session" in window
+  if (n >= 2) {
+    const pClose = series[n - 2];
+    if (pClose != null && pClose >= lo && pClose <= hi) {
+      const yP = pad.top + innerH - ((pClose - lo) / range) * innerH;
+      root.append(
+        svg('line', {
+          x1: pad.left, y1: yP, x2: w - pad.right, y2: yP,
+          stroke: 'var(--text-muted)', 'stroke-dasharray': '4 3', 'stroke-width': 1,
+          'stroke-opacity': 0.75,
+        }),
+        svg('text', {
+          x: pad.left + 4, y: yP - 3, 'text-anchor': 'start',
+          fill: 'var(--text-muted)', 'font-size': 9, 'font-family': 'var(--mono)',
+        }, `Prev bar ${fmtUSD(pClose)}`),
+      );
+    }
+  }
+
+  // X-axis ticks (oldest bar → most recent; index vs window start)
+  const nTicks = Math.min(7, n);
   for (let t = 0; t < nTicks; t++) {
     const idx = Math.round(((n - 1) * t) / (nTicks - 1));
     const x = pad.left + idx * xStep;
+    const rel = idx - (n - 1);
+    const lab = t === 0 ? 'oldest' : t === nTicks - 1 ? 'now' : `d${rel}`;
     root.append(
       svg('text', {
         x, y: h0 - 6,
@@ -860,7 +1564,7 @@ function fancyPriceChart(series, direction) {
         fill: 'var(--text-dim)',
         'font-size': 10,
         'font-family': 'var(--mono)',
-      }, `d${idx - (n - 1)}`)
+      }, lab),
     );
   }
 
@@ -913,27 +1617,28 @@ function fancyPriceChart(series, direction) {
   root.append(svg('path', { d: areaD, fill: `url(#${gradId})`, stroke: 'none' }));
 
   // Indicator lines (lightest → heaviest so price is on top).
+  const sw = yahooLayout ? 1.0 : 1.2;
   root.append(svg('path', {
     d: toPath(sma20),
-    fill: 'none', stroke: '#8b9dd9', 'stroke-width': 1.1, 'stroke-opacity': 0.85,
+    fill: 'none', stroke: '#8b9dd9', 'stroke-width': sw, 'stroke-opacity': 0.75 * smA,
   }));
   root.append(svg('path', {
     d: toPath(sma10),
-    fill: 'none', stroke: '#d9a36b', 'stroke-width': 1.2, 'stroke-opacity': 0.9,
+    fill: 'none', stroke: '#d9a36b', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA,
   }));
   root.append(svg('path', {
     d: toPath(ema9),
-    fill: 'none', stroke: '#bf7af0', 'stroke-width': 1.2,
-    'stroke-dasharray': '4 2', 'stroke-opacity': 0.85,
+    fill: 'none', stroke: '#bf7af0', 'stroke-width': sw,
+    'stroke-dasharray': '4 2', 'stroke-opacity': 0.8 * smA,
   }));
   root.append(svg('path', {
     d: toPath(sma5),
-    fill: 'none', stroke: '#f2d47a', 'stroke-width': 1.2, 'stroke-opacity': 0.85,
+    fill: 'none', stroke: '#f2d47a', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA,
   }));
 
-  // Price line on top
+  // Price line on top (mountain edge)
   root.append(svg('path', {
-    d: lineD, fill: 'none', stroke: color, 'stroke-width': 2,
+    d: lineD, fill: 'none', stroke: color, 'stroke-width': yahooLayout ? 2.2 : 2,
     'stroke-linejoin': 'round', 'stroke-linecap': 'round',
   }));
 
@@ -959,16 +1664,22 @@ function fancyPriceChart(series, direction) {
   root.append(crossG);
 
   const tip = h('div', { class: 'chart-tooltip hidden' });
-
-  const wrap = h('div', { class: 'chart-wrap' }, root, tip,
-    h('div', { class: 'chart-legend mono' },
-      legendSwatch(color, 'Close'),
-      legendSwatch('#f2d47a', `SMA${Math.min(5, n - 1)}`),
-      legendSwatch('#d9a36b', `SMA${Math.min(10, n - 1)}`),
-      legendSwatch('#8b9dd9', `SMA${Math.min(20, n - 1)}`),
-      legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
-      legendSwatch('var(--info)', `BB(${bandWin},2)`, false, true),
-    ),
+  const legendRow = h(
+    'div',
+    { class: 'price-chart-legend-row mono' },
+    legendSwatch(color, yahooLayout ? 'Close (area)' : 'Close'),
+    legendSwatch('#f2d47a', `SMA${Math.min(5, n - 1)}`),
+    legendSwatch('#d9a36b', `SMA${Math.min(10, n - 1)}`),
+    legendSwatch('#8b9dd9', `SMA${Math.min(20, n - 1)}`),
+    legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
+    legendSwatch('var(--info)', `Bollinger (${bandWin},2σ)`, false, true),
+  );
+  const canvas = h('div', { class: 'price-chart-canvas' }, root, tip);
+  const figure = h(
+    'div',
+    { class: 'price-chart-figure' + (enlarged ? ' price-chart-figure--wide' : '') },
+    canvas,
+    legendRow,
   );
 
   const hitArea = svg('rect', {
@@ -997,19 +1708,981 @@ function fancyPriceChart(series, direction) {
       (sma20[i] != null ? `<div class="tt-row"><span>SMA20</span><b>${fmtUSD(sma20[i])}</b></div>` : '') +
       (bb.upper[i] != null ? `<div class="tt-row"><span>BB hi</span><b>${fmtUSD(bb.upper[i])}</b></div>` : '') +
       (bb.lower[i] != null ? `<div class="tt-row"><span>BB lo</span><b>${fmtUSD(bb.lower[i])}</b></div>` : '');
-    const rectWrap = wrap.getBoundingClientRect();
-    const relX = (x / w) * rectWrap.width;
-    const relY = (y / h0) * rectWrap.height;
-    const tipW = 160;
-    tip.style.left = `${Math.min(rectWrap.width - tipW - 8, Math.max(8, relX + 12))}px`;
-    tip.style.top = `${Math.max(8, relY - 60)}px`;
+    const cRect = canvas.getBoundingClientRect();
+    const tipW = 180;
+    const lx = e.clientX - cRect.left;
+    const ly = e.clientY - cRect.top;
+    tip.style.left = `${Math.min(cRect.width - tipW - 6, Math.max(6, lx - tipW / 2))}px`;
+    tip.style.top = `${Math.max(6, ly - 72)}px`;
   });
   hitArea.addEventListener('mouseleave', () => {
     crossG.setAttribute('opacity', 0);
     tip.classList.add('hidden');
   });
 
-  return wrap;
+  return figure;
+}
+
+function _fmtDetailAxisTime(iso, xGran) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso).slice(0, 16);
+  if (xGran === 'hour') {
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', timeZone: 'America/New_York' });
+  }
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/** Minutes from midnight, America/New_York, for a UTC instant. */
+function _etMinFromMidnight(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 9 * 60 + 30;
+  const f = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  });
+  const parts = f.formatToParts(d);
+  let hh = 0;
+  let mm = 0;
+  for (const p of parts) {
+    if (p.type === 'hour') hh = parseInt(p.value, 10);
+    if (p.type === 'minute') mm = parseInt(p.value, 10);
+  }
+  return hh * 60 + mm;
+}
+
+/** X position 0..1 for Yahoo-style 6:00am–6:00pm session strip (extended bars clamped). */
+function _etSessionRatio6am6pm(iso) {
+  const m = _etMinFromMidnight(iso);
+  const start = 6 * 60;
+  const end = 18 * 60; // 6:00pm
+  return Math.max(0, Math.min(1, (m - start) / (end - start)));
+}
+
+/** e.g. "4/27 10:53 AM" (Eastern) for intraday tooltips */
+function _fmtYahooSessionHoverET(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  })
+    .format(d)
+    .replace(', ', ' ');
+}
+
+/**
+ * Regular-session open: `o` of the first bar at or after 9:30 AM America/New_York
+ * (NYSE/Nasdaq RTH open; ET includes EST/EDT).
+ */
+function _rthOpenPrice930Et(bars) {
+  const openMin = 9 * 60 + 30;
+  for (const b of bars) {
+    const m = _etMinFromMidnight(b.t);
+    if (m >= openMin) {
+      const o = b.o;
+      if (o != null && Number.isFinite(Number(o))) return Number(o);
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * 1D intraday: time-based x over a full 6am–6pm ET window, dense minute path, pre-market tint.
+ * Mirrors Yahoo’s smooth “mountain” and candle 1D experience.
+ */
+function tickerOhlcSessionChart(bars, view, direction, opts = {}) {
+  const w = opts.width != null ? opts.width : 1000;
+  const h0 = opts.height != null ? opts.height : 300;
+  const yahooLayout = opts.yahooLayout !== false;
+  const enlarged = !!opts.enlarged;
+  const pad = yahooLayout
+    ? { top: 16, right: 54, bottom: 46, left: 10 }
+    : { top: 18, right: 18, bottom: 40, left: 58 };
+  const innerW = w - pad.left - pad.right;
+  const innerH = h0 - pad.top - pad.bottom;
+
+  const sorted = bars.slice().sort((a, b) => new Date(a.t) - new Date(b.t));
+  const n = sorted.length;
+  if (n < 2) {
+    return h('div', { class: 'chart-placeholder' }, 'Not enough bars for this range');
+  }
+
+  const zWin = opts.sessionZoom != null ? opts.sessionZoom : state.detailChartSessionZoom;
+  const reapplySess = typeof opts.onSessionReapply === 'function' ? opts.onSessionReapply : reapplySessionDetailChart;
+  const zs = zWin.start;
+  const ze = zWin.end;
+  const zspan = Math.max(1e-9, ze - zs);
+  const rToX = (r) => pad.left + ((r - zs) / zspan) * innerW;
+  const ratios = sorted.map((b) => _etSessionRatio6am6pm(b.t));
+  const xs = ratios.map((r) => rToX(r));
+  const inViewBars = sorted.filter((b, i) => {
+    const r = ratios[i];
+    return r >= zs - 1e-5 && r <= ze + 1e-5;
+  });
+  const forRange = inViewBars.length >= 2 ? inViewBars : sorted;
+
+  const series = sorted.map((b) => b.c);
+  const firstC = series[0];
+  const lastC = series[n - 1];
+  const dayDown = lastC < firstC;
+  const yahooC = dayDown ? 'var(--danger)' : 'var(--success)';
+  const color = direction === 'bull' && !dayDown
+    ? 'var(--success)'
+    : direction === 'bear' && dayDown
+      ? 'var(--danger)'
+      : yahooC;
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (const b of forRange) {
+    min = Math.min(min, b.l, b.h, b.o, b.c);
+    max = Math.max(max, b.l, b.h, b.o, b.c);
+  }
+
+  const showOverlays = view === 'mountain' || view === 'line';
+  const sma5 = showOverlays ? _sma(series, Math.min(5, n - 1)) : [];
+  const sma10 = showOverlays ? _sma(series, Math.min(10, n - 1)) : [];
+  const sma20 = showOverlays ? _sma(series, Math.min(20, n - 1)) : [];
+  const ema9 = showOverlays ? _ema(series, Math.min(9, n - 1)) : [];
+  const bandWin = Math.min(20, n - 1);
+  const bb = showOverlays ? _bollinger(series, bandWin, 2) : { mid: [], upper: [], lower: [] };
+
+  const all = [min, max];
+  if (showOverlays) {
+    for (const v of [...series, ...sma5, ...sma10, ...sma20, ...ema9, ...bb.upper, ...bb.lower]) {
+      if (v != null) all.push(v);
+    }
+  } else {
+    for (const b of sorted) {
+      all.push(b.o, b.h, b.l, b.c);
+    }
+  }
+  const dmin = Math.min(...all);
+  const dmax = Math.max(...all);
+  const pad_y = (dmax - dmin) * 0.05 || 1;
+  const lo = dmin - pad_y;
+  const hi = dmax + pad_y;
+  const yrange = hi - lo;
+  const yAt = (v) => pad.top + innerH - ((v - lo) / yrange) * innerH;
+
+  const xyS = (v, i) => [xs[i], yAt(v)];
+
+  const toPath = (ser) => {
+    let path = '';
+    let started = false;
+    for (let i = 0; i < ser.length; i++) {
+      const v = ser[i];
+      if (v == null) { started = false; continue; }
+      const [x, y0] = xyS(v, i);
+      path += (started ? 'L' : 'M') + x.toFixed(2) + ',' + y0.toFixed(2) + ' ';
+      started = true;
+    }
+    return path.trim();
+  };
+
+  const root = svg('svg', {
+    class: 'fancy-chart' + (yahooLayout ? ' fancy-chart--yahoo' : '') + (enlarged ? ' fancy-chart--enlarged' : '') + ' fancy-chart--session',
+    viewBox: `0 0 ${w} ${h0}`,
+    preserveAspectRatio: 'xMidYMid meet',
+    style: `height: ${h0}px; width: 100%; max-width: 100%; min-width: 0; display: block;`,
+  });
+  const defs = svg('defs');
+  const gradId = 's-grad-' + Math.random().toString(36).slice(2, 8);
+  const patId = 's-pre-' + Math.random().toString(36).slice(2, 8);
+  const grad = svg('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 });
+  grad.append(
+    svg('stop', { offset: '0%', 'stop-color': color, 'stop-opacity': 0.5 }),
+    svg('stop', { offset: '100%', 'stop-color': color, 'stop-opacity': 0.04 }),
+  );
+  const pat = svg('pattern', { id: patId, width: 5, height: 5, patternUnits: 'userSpaceOnUse' });
+  pat.append(
+    svg('path', { d: 'M0,5 l5,-5 M-1,1 l2,-2 M4,6 l2,-2', stroke: 'rgba(255,255,255,0.07)', 'stroke-width': 0.8 }),
+  );
+  const clipId = 'sess-clip-' + Math.random().toString(36).slice(2, 9);
+  defs.append(
+    grad,
+    pat,
+    svg('clipPath', { id: clipId },
+      svg('rect', { x: pad.left, y: pad.top, width: innerW, height: innerH }),
+    ),
+  );
+  const gPlot = svg('g', { 'clip-path': `url(#${clipId})` });
+  root.append(defs);
+  root.append(gPlot);
+
+  if (yahooLayout) {
+    gPlot.append(
+      svg('rect', {
+        x: pad.left,
+        y: pad.top,
+        width: innerW,
+        height: innerH,
+        fill: 'rgba(8, 10, 14, 0.55)',
+        stroke: 'var(--stroke-soft)',
+        'stroke-width': 1,
+        rx: 2,
+      }),
+    );
+    const rOpen = ((9 * 60 + 30) - 6 * 60) / (12 * 60);
+    const xPre0 = rToX(0);
+    const xPre1 = rToX(rOpen);
+    const preW = Math.max(0, xPre1 - xPre0);
+    if (preW > 0) {
+      gPlot.append(
+        svg('rect', {
+          x: xPre0,
+          y: pad.top,
+          width: preW,
+          height: innerH,
+          fill: `url(#${patId})`,
+          'fill-opacity': 0.45,
+        }),
+      );
+    }
+  }
+
+  const yTxt = (yVal, yPx) => svg('text', {
+    x: w - 8, y: yPx + 4, 'text-anchor': 'end',
+    fill: 'var(--text-dim)', 'font-size': 11, 'font-family': 'var(--mono)',
+  }, '$' + yVal.toFixed(yVal > 1000 ? 0 : 2));
+
+  for (let g = 0; g <= 4; g++) {
+    const v = lo + (yrange * g) / 4;
+    const y = yAt(v);
+    gPlot.append(
+      svg('line', {
+        x1: pad.left, y1: y, x2: w - pad.right, y2: y,
+        stroke: 'var(--stroke-soft)', 'stroke-dasharray': '1 5', 'stroke-opacity': 0.5,
+      }),
+    );
+    if (yahooLayout) root.append(yTxt(v, y));
+  }
+
+  const rthOpen = _rthOpenPrice930Et(sorted);
+  if (rthOpen != null) {
+    const yRth = yAt(rthOpen);
+    if (Number.isFinite(yRth)) {
+      gPlot.append(
+        svg('line', {
+          x1: pad.left,
+          y1: yRth,
+          x2: w - pad.right,
+          y2: yRth,
+          stroke: 'rgba(210, 215, 225, 0.85)',
+          'stroke-width': 1.35,
+          'pointer-events': 'none',
+        }),
+      );
+    }
+  }
+
+  // X-axis: 2h ticks when wide; 10/5/2 minute ticks when zoomed in
+  {
+    const span = ze - zs;
+    const fullR = (m) => (m - 6 * 60) / (12 * 60);
+    if (span > 0.18) {
+      for (const hr of [6, 8, 10, 12, 14, 16, 18]) {
+        const r = fullR(hr * 60);
+        if (r < zs - 1e-6 || r > ze + 1e-6) continue;
+        const x = rToX(r);
+        if (hr < 18) {
+          const lab = hr < 12
+            ? `${hr}:00 AM`
+            : hr === 12
+              ? '12:00 PM'
+              : `${hr - 12}:00 PM`;
+          root.append(
+            svg('text', { x, y: h0 - 6, 'text-anchor': 'middle', fill: 'var(--text-dim)', 'font-size': 10, 'font-family': 'var(--mono)' },
+              lab),
+          );
+        } else {
+          const d0 = new Date(sorted[n - 1].t);
+          const dateStr = !Number.isNaN(d0.getTime())
+            ? d0.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/New_York' })
+            : '';
+          root.append(
+            svg('text', { x, y: h0 - 18, 'text-anchor': 'end', fill: 'var(--text-dim)', 'font-size': 10, 'font-family': 'var(--mono)' },
+              '6:00 PM'),
+          );
+          root.append(
+            svg('text', { x, y: h0 - 4, 'text-anchor': 'end', fill: 'var(--text-dim)', 'font-size': 10, 'font-family': 'var(--mono)' },
+              dateStr),
+          );
+        }
+      }
+    } else {
+      const stepMin = span > 0.04 ? 10 : span > 0.015 ? 5 : 2;
+      const m0 = Math.ceil((zs * 12 * 60 + 6 * 60) / stepMin) * stepMin;
+      const m1 = ze * 12 * 60 + 6 * 60;
+      for (let m = m0; m <= m1 + 0.1; m += stepMin) {
+        if (m < 6 * 60 || m > 18 * 60) continue;
+        const r = fullR(m);
+        if (r < zs - 1e-6 || r > ze + 1e-6) continue;
+        const hh = Math.floor(m / 60);
+        const mm = m % 60;
+        const am = hh < 12;
+        const dh = am ? (hh % 12 === 0 ? 12 : (hh % 12)) : (hh === 12 ? 12 : hh - 12);
+        const lab = `${dh}:${String(mm).padStart(2, '0')} ${am ? 'AM' : 'PM'}`;
+        root.append(
+          svg('text', { x: rToX(r), y: h0 - 6, 'text-anchor': 'middle', fill: 'var(--text-dim)', 'font-size': 9, 'font-family': 'var(--mono)' },
+            lab),
+        );
+      }
+    }
+  }
+
+  if (view === 'candle' || view === 'bar') {
+    // ~1 minute across plot at full 1:1; scales when zoomed to session subset
+    const bw = Math.max(0.4, (innerW / (720 * zspan)) * 1.0);
+    for (let i = 0; i < n; i++) {
+      const b = sorted[i];
+      const cx = xs[i];
+      const yH = yAt(b.h);
+      const yL = yAt(b.l);
+      const yO = yAt(b.o);
+      const yC0 = yAt(b.c);
+      const bull = b.c >= b.o;
+      const cFill = bull ? 'var(--success)' : 'var(--danger)';
+      if (view === 'candle') {
+        gPlot.append(
+          svg('line', { x1: cx, y1: yH, x2: cx, y2: yL, stroke: cFill, 'stroke-width': 1, 'stroke-opacity': 0.95 }),
+        );
+        const topB = Math.min(yO, yC0);
+        const botB = Math.max(yO, yC0);
+        const hB = Math.max(0.5, botB - topB);
+        gPlot.append(
+          svg('rect', { x: cx - bw / 2, y: topB, width: bw, height: hB, fill: cFill, 'fill-opacity': 0.8, stroke: cFill, rx: 0.4 }),
+        );
+      } else {
+        const tick = bw * 0.55;
+        gPlot.append(
+          svg('line', { x1: cx, y1: yH, x2: cx, y2: yL, stroke: 'var(--text-muted)', 'stroke-width': 1.1 }),
+        );
+        gPlot.append(
+          svg('line', { x1: cx - tick, y1: yO, x2: cx, y2: yO, stroke: cFill, 'stroke-width': 1.2 }),
+        );
+        gPlot.append(
+          svg('line', { x1: cx, y1: yC0, x2: cx + tick, y2: yC0, stroke: cFill, 'stroke-width': 1.2 }),
+        );
+      }
+    }
+  } else {
+    if (showOverlays) {
+      let bandD = '';
+      let startedBand = false;
+      for (let i = 0; i < n; i++) {
+        if (bb.upper[i] == null) { startedBand = false; continue; }
+        const [x, yU] = xyS(bb.upper[i], i);
+        bandD += (startedBand ? 'L' : 'M') + x.toFixed(2) + ',' + yU.toFixed(2) + ' ';
+        startedBand = true;
+      }
+      for (let i = n - 1; i >= 0; i--) {
+        if (bb.lower[i] == null) continue;
+        const [x, y0] = xyS(bb.lower[i], i);
+        bandD += 'L' + x.toFixed(2) + ',' + y0.toFixed(2) + ' ';
+      }
+      if (bandD) {
+        bandD += 'Z';
+        gPlot.append(svg('path', { d: bandD, fill: 'var(--info)', 'fill-opacity': 0.07, stroke: 'none' }));
+        gPlot.append(svg('path', { d: toPath(bb.upper), fill: 'none', stroke: 'var(--info)', 'stroke-opacity': 0.45, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+        gPlot.append(svg('path', { d: toPath(bb.lower), fill: 'none', stroke: 'var(--info)', 'stroke-opacity': 0.45, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+      }
+      const sw = 1.0;
+      const smA = 0.55;
+      gPlot.append(svg('path', { d: toPath(sma20), fill: 'none', stroke: '#8b9dd9', 'stroke-width': sw, 'stroke-opacity': 0.75 * smA }));
+      gPlot.append(svg('path', { d: toPath(sma10), fill: 'none', stroke: '#d9a36b', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA }));
+      gPlot.append(svg('path', { d: toPath(ema9), fill: 'none', stroke: '#bf7af0', 'stroke-width': sw, 'stroke-dasharray': '4 2', 'stroke-opacity': 0.8 * smA }));
+      gPlot.append(svg('path', { d: toPath(sma5), fill: 'none', stroke: '#f2d47a', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA }));
+    }
+    let lineD2 = '';
+    for (let i = 0; i < n; i++) {
+      const [x, y0] = xyS(series[i], i);
+      lineD2 += (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y0.toFixed(2) + ' ';
+    }
+    if (view === 'mountain') {
+      const [x0, y0] = xyS(series[0], 0);
+      const [x1, y1] = xyS(series[n - 1], n - 1);
+      const areaD = lineD2.trim() +
+        ' L' + x1.toFixed(2) + ',' + (pad.top + innerH) +
+        ' L' + x0.toFixed(2) + ',' + (pad.top + innerH) + ' Z';
+      gPlot.append(svg('path', { d: areaD, fill: `url(#${gradId})`, stroke: 'none' }));
+    }
+    gPlot.append(svg('path', {
+      d: lineD2.trim(),
+      fill: 'none',
+      stroke: color,
+      'stroke-width': 2.2,
+      'stroke-linejoin': 'round',
+      'stroke-linecap': 'round',
+    }));
+  }
+
+  // Right margin X for last-price guide
+  const xPlotRight = w - pad.right;
+  const xLastPriceDot = xPlotRight - 5; // stay inside clip
+
+  // Last price horizontal (Yahoo-style): full-width guide + markers on the right margin
+  const yLast = yAt(lastC);
+  gPlot.append(
+    svg('line', {
+      x1: pad.left, y1: yLast, x2: xPlotRight, y2: yLast,
+      stroke: 'var(--info)',
+      'stroke-width': 1.2,
+      'stroke-dasharray': '4 3',
+      'stroke-opacity': 0.85,
+    }),
+  );
+  gPlot.append(
+    svg('circle', { cx: xLastPriceDot, cy: yLast, r: 4.2, fill: color, 'fill-opacity': 0.35 }),
+    svg('circle', { cx: xLastPriceDot, cy: yLast, r: 2.5, fill: color }),
+  );
+  const lastCloseStr = fmtUSD(lastC);
+  const lastLabelW = Math.max(50, lastCloseStr.length * 6.6);
+  const yLastText = Math.max(pad.top + 4, Math.min(pad.top + innerH - 1, yLast + 4));
+  root.append(
+    svg('rect', {
+      x: w - lastLabelW - 10,
+      y: yLastText - 11,
+      width: lastLabelW + 4,
+      height: 16,
+      rx: 3,
+      fill: 'rgba(8, 10, 14, 0.94)',
+      stroke: 'var(--info)',
+      'stroke-width': 1,
+      'pointer-events': 'none',
+    }),
+    svg('text', {
+      x: w - 10,
+      y: yLastText,
+      'text-anchor': 'end',
+      fill: 'var(--info)',
+      'font-size': 11,
+      'font-family': 'var(--mono)',
+      'font-weight': 600,
+      'pointer-events': 'none',
+    }, lastCloseStr),
+  );
+
+  // Crosshair + Yahoo-style O/H/L/C/V tooltip (ET time label on axis)
+  const crossG = svg('g', { class: 'session-crosshair', opacity: 0, 'pointer-events': 'none' });
+  const crossV = svg('line', {
+    x1: 0, y1: pad.top, x2: 0, y2: pad.top + innerH,
+    stroke: 'rgba(255, 255, 255, 0.55)', 'stroke-width': 1, 'stroke-dasharray': '4 3',
+  });
+  const crossH = svg('line', {
+    x1: pad.left, y1: 0, x2: w - pad.right, y2: 0,
+    stroke: 'rgba(255, 255, 255, 0.55)', 'stroke-width': 1, 'stroke-dasharray': '4 3',
+  });
+  const hoverDot = svg('circle', { r: 3.5, fill: 'rgba(255,255,255,0.95)', stroke: color, 'stroke-width': 1.2 });
+  crossG.append(crossV, crossH, hoverDot);
+  const xTimeG = svg('g', { class: 'session-xhover', opacity: 0, 'pointer-events': 'none' });
+  const xTimeBg = svg('rect', { rx: 3, fill: 'rgba(0,0,0,0.9)' });
+  const xTimeTx = svg('text', {
+    y: h0 - 8, 'text-anchor': 'middle', fill: '#fff', 'font-size': 10, 'font-family': 'var(--mono)', 'font-weight': 500,
+  });
+  xTimeG.append(xTimeBg, xTimeTx);
+  const hitSession = svg('rect', {
+    x: pad.left, y: pad.top, width: innerW, height: innerH,
+    fill: 'transparent', 'pointer-events': 'all', style: 'cursor: crosshair;',
+  });
+  root.append(crossG, xTimeG, hitSession);
+  const tip = h('div', { class: 'chart-tooltip chart-tooltip--yahoosession hidden' });
+  const findSessionBar = (mx) => {
+    let j = 0;
+    let best = Infinity;
+    for (let k = 0; k < n; k++) {
+      const d0 = Math.abs(xs[k] - mx);
+      if (d0 < best) {
+        best = d0;
+        j = k;
+      }
+    }
+    return j;
+  };
+  const fmtBarVol = (v) => {
+    if (v == null || v === undefined) return '—';
+    if (typeof v === 'number' && (!Number.isFinite(v) || v < 0)) return '—';
+    return Math.round(Number(v)).toLocaleString('en-US');
+  };
+  const hideSessionHover = () => {
+    crossG.setAttribute('opacity', 0);
+    xTimeG.setAttribute('opacity', 0);
+    tip.classList.add('hidden');
+  };
+  const onSessionMove = (e) => {
+    const rect = root.getBoundingClientRect();
+    const mx = ((e.clientX - rect.left) / Math.max(1e-9, rect.width)) * w;
+    if (mx < pad.left - 0.5 || mx > w - pad.right + 0.5) {
+      hideSessionHover();
+      return;
+    }
+    const j = findSessionBar(mx);
+    const bar = sorted[j];
+    const xi = xs[j];
+    const yC = yAt(bar.c);
+    crossG.setAttribute('opacity', 1);
+    crossV.setAttribute('x1', xi); crossV.setAttribute('x2', xi);
+    crossH.setAttribute('y1', yC); crossH.setAttribute('y2', yC);
+    hoverDot.setAttribute('cx', xi); hoverDot.setAttribute('cy', yC);
+    const tStr = _fmtYahooSessionHoverET(bar.t);
+    const tw = Math.max(52, tStr.length * 5.8);
+    xTimeBg.setAttribute('x', xi - tw / 2 - 4);
+    xTimeBg.setAttribute('y', h0 - 22);
+    xTimeBg.setAttribute('width', tw + 8);
+    xTimeBg.setAttribute('height', 16);
+    xTimeTx.setAttribute('x', xi);
+    xTimeTx.setAttribute('y', h0 - 9);
+    xTimeTx.textContent = tStr;
+    xTimeG.setAttribute('opacity', 1);
+    const volStr = fmtBarVol(bar.v);
+    tip.classList.remove('hidden');
+    tip.innerHTML =
+      `<div class="tt-row"><span>Date</span><b>${tStr}</b></div>` +
+      '<div class="tt-sep"></div>' +
+      `<div class="tt-row"><span>Close</span><b>${fmtUSD(bar.c)}</b></div>` +
+      `<div class="tt-row"><span>Open</span><b>${fmtUSD(bar.o)}</b></div>` +
+      `<div class="tt-row"><span>High</span><b>${fmtUSD(bar.h)}</b></div>` +
+      `<div class="tt-row"><span>Low</span><b>${fmtUSD(bar.l)}</b></div>` +
+      '<div class="tt-sep"></div>' +
+      `<div class="tt-row"><span>Volume</span><b>${volStr}</b></div>`;
+    const pane = root.parentElement;
+    if (!pane) return;
+    const pr = pane.getBoundingClientRect();
+    const tipW = 220;
+    const lx = e.clientX - pr.left;
+    const ly = e.clientY - pr.top;
+    tip.style.left = `${Math.min(pr.width - tipW - 8, Math.max(8, lx + 14))}px`;
+    tip.style.top = `${Math.max(8, Math.min(pr.height - 120, ly - 110))}px`;
+  };
+  hitSession.addEventListener('mousemove', onSessionMove);
+  hitSession.addEventListener('mouseleave', hideSessionHover);
+
+  const showOverlaysLeg = showOverlays;
+  const legendRow = h(
+    'div',
+    { class: 'price-chart-legend-row mono' },
+    legendSwatch(color, `Close / ${String(view).charAt(0).toUpperCase() + String(view).slice(1)} (1D · ET session)`),
+    ...(rthOpen != null
+      ? [legendSwatch('rgba(210, 215, 225, 0.95)', '9:30 ET open (RTH)', false)]
+      : []),
+    ...(showOverlaysLeg
+      ? [
+        legendSwatch('#f2d47a', `SMA${Math.min(5, n - 1)}`),
+        legendSwatch('#d9a36b', `SMA${Math.min(10, n - 1)}`),
+        legendSwatch('#8b9dd9', `SMA${Math.min(20, n - 1)}`),
+        legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
+        legendSwatch('var(--info)', `Bollinger (${Math.min(20, n - 1)},2σ)`, false, true),
+      ]
+      : [h('span', { class: 'muted' }, 'Indicators on Mountain / Line')]),
+    h('span', { class: 'muted' }, 'Scroll to zoom · drag to pan · double-click to reset'),
+  );
+
+  const sessionZoomPane = h('div', { class: 'price-chart-canvas price-chart-canvas--session' }, root, tip);
+  {
+    const padLocal = pad;
+    const innerWLocal = innerW;
+    const zs0 = zs;
+    const zspan0 = zspan;
+    const toRatioAtClientX = (clientX, el) => {
+      if (!el || !el.isConnected) return (zs0 + zspan0) / 2;
+      const rect = el.getBoundingClientRect();
+      const scale = rect.width > 0 ? w / rect.width : 1;
+      const xSvg = (clientX - rect.left) * scale;
+      const t = (xSvg - padLocal.left) / innerWLocal;
+      return zs0 + Math.max(0, Math.min(1, t)) * zspan0;
+    };
+    const onWheel = (e) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 0.9 : 1.1;
+      let newSpan = zspan0 * factor;
+      newSpan = Math.max(SESSION_1D_MIN_ZOOM, Math.min(1, newSpan));
+      if (Math.abs(newSpan - zspan0) < 1e-12) return;
+      const rF = toRatioAtClientX(e.clientX, e.currentTarget);
+      const t0 = (rF - zs0) / zspan0;
+      let nz = rF - t0 * newSpan;
+      let nze = nz + newSpan;
+      if (nz < 0) {
+        nze -= nz;
+        nz = 0;
+      }
+      if (nze > 1) {
+        nz -= nze - 1;
+        nze = 1;
+      }
+      if (nz < 0) nz = 0;
+      zWin.start = nz;
+      zWin.end = nze;
+      reapplySess();
+    };
+    const clampWin = (a, b) => {
+      let zsa = a;
+      let zea = b;
+      if (zsa < 0) {
+        zea -= zsa;
+        zsa = 0;
+      }
+      if (zea > 1) {
+        zsa -= zea - 1;
+        zea = 1;
+      }
+      if (zsa < 0) zsa = 0;
+      return { start: zsa, end: zea };
+    };
+    const onDown = (e) => {
+      if (e.button !== 0) return;
+      const pane = e.currentTarget;
+      const plotW = pane.getBoundingClientRect().width;
+      pane.classList.add('session-chart--panning');
+      let lastClientX = e.clientX;
+      const onMove = (ev) => {
+        if (plotW < 1) return;
+        const dx = ev.clientX - lastClientX;
+        lastClientX = ev.clientX;
+        const dxU = (dx / plotW) * w;
+        const w0 = zWin;
+        const sp = Math.max(1e-9, w0.end - w0.start);
+        const dr = (dxU / innerWLocal) * sp;
+        const next = clampWin(w0.start - dr, w0.end - dr);
+        zWin.start = next.start;
+        zWin.end = next.end;
+        reapplySess();
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        if (pane.isConnected) pane.classList.remove('session-chart--panning');
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    const onDbl = (e) => {
+      e.preventDefault();
+      zWin.start = 0;
+      zWin.end = 1;
+      reapplySess();
+    };
+    sessionZoomPane.addEventListener('wheel', onWheel, { passive: false });
+    sessionZoomPane.addEventListener('mousedown', onDown);
+    sessionZoomPane.addEventListener('dblclick', onDbl);
+  }
+  return h('div', { class: 'price-chart-figure' + (enlarged ? ' price-chart-figure--wide' : '') },
+    sessionZoomPane, legendRow);
+}
+
+/**
+ * OHLC / close chart: mountain & line use overlays on close; candle & bar are raw OHLC.
+ */
+function tickerOhlcChart(bars, view, direction, opts = {}) {
+  const xGran = opts.xGranularity || 'day';
+  if (xGran === 'session' && Array.isArray(bars) && bars.length >= 2) {
+    return tickerOhlcSessionChart(bars, view, direction, opts);
+  }
+  const w = opts.width != null ? opts.width : 1000;
+  const h0 = opts.height != null ? opts.height : 300;
+  const yahooLayout = opts.yahooLayout !== false;
+  const enlarged = !!opts.enlarged;
+  const pad = yahooLayout
+    ? { top: 16, right: 54, bottom: xGran === 'hour' ? 44 : 36, left: 10 }
+    : { top: 18, right: 18, bottom: 28, left: 58 };
+  const innerW = w - pad.left - pad.right;
+  const innerH = h0 - pad.top - pad.bottom;
+  const n = bars.length;
+  if (n < 2) {
+    return h('div', { class: 'chart-placeholder' }, 'Not enough bars for this range');
+  }
+
+  const series = bars.map((b) => b.c);
+  const slotW = innerW / n;
+  const xC = (i) => pad.left + (i + 0.5) * slotW;
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (const b of bars) {
+    min = Math.min(min, b.l, b.h, b.o, b.c);
+    max = Math.max(max, b.l, b.h, b.o, b.c);
+  }
+
+  const showOverlays = view === 'mountain' || view === 'line';
+  const sma5 = showOverlays ? _sma(series, Math.min(5, n - 1)) : [];
+  const sma10 = showOverlays ? _sma(series, Math.min(10, n - 1)) : [];
+  const sma20 = showOverlays ? _sma(series, Math.min(20, n - 1)) : [];
+  const ema9 = showOverlays ? _ema(series, Math.min(9, n - 1)) : [];
+  const bandWin = Math.min(20, n - 1);
+  const bb = showOverlays ? _bollinger(series, bandWin, 2) : { mid: [], upper: [], lower: [] };
+
+  const all = [min, max];
+  if (showOverlays) {
+    for (const v of [...series, ...sma5, ...sma10, ...sma20, ...ema9, ...bb.upper, ...bb.lower]) {
+      if (v != null) all.push(v);
+    }
+  } else {
+    for (const b of bars) {
+      all.push(b.o, b.h, b.l, b.c);
+    }
+  }
+  const dmin = Math.min(...all);
+  const dmax = Math.max(...all);
+  const pad_y = (dmax - dmin) * 0.06 || 1;
+  const lo = dmin - pad_y;
+  const hi = dmax + pad_y;
+  const yrange = hi - lo;
+
+  const yAt = (v) => pad.top + innerH - ((v - lo) / yrange) * innerH;
+  const color =
+    direction === 'bull' ? 'var(--success)' :
+    direction === 'bear' ? 'var(--danger)'  : 'var(--info)';
+
+  const xy = (v, i) => [xC(i), yAt(v)];
+
+  const toPath = (ser) => {
+    let path = '';
+    let started = false;
+    for (let i = 0; i < ser.length; i++) {
+      const v = ser[i];
+      if (v == null) { started = false; continue; }
+      const [x, y0] = xy(v, i);
+      path += (started ? 'L' : 'M') + x.toFixed(2) + ',' + y0.toFixed(2) + ' ';
+      started = true;
+    }
+    return path.trim();
+  };
+
+  const root = svg('svg', {
+    class: 'fancy-chart' + (yahooLayout ? ' fancy-chart--yahoo' : '') + (enlarged ? ' fancy-chart--enlarged' : ''),
+    viewBox: `0 0 ${w} ${h0}`,
+    preserveAspectRatio: 'xMidYMid meet',
+    style: `height: ${h0}px; width: 100%; max-width: 100%; min-width: 0; display: block;`,
+  });
+
+  const defs = svg('defs');
+  const gradId = 'ohlc-grad-' + Math.random().toString(36).slice(2, 8);
+  const grad = svg('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 });
+  const gOp0 = yahooLayout ? 0.48 : 0.35;
+  const gOp1 = yahooLayout ? 0.04 : 0;
+  grad.append(
+    svg('stop', { offset: '0%', 'stop-color': color, 'stop-opacity': gOp0 }),
+    svg('stop', { offset: '100%', 'stop-color': color, 'stop-opacity': gOp1 }),
+  );
+  defs.append(grad);
+  root.append(defs);
+
+  if (yahooLayout) {
+    root.append(
+      svg('rect', {
+        x: pad.left,
+        y: pad.top,
+        width: innerW,
+        height: innerH,
+        fill: 'rgba(8, 10, 14, 0.55)',
+        stroke: 'var(--stroke-soft)',
+        'stroke-width': 1,
+        rx: 2,
+      }),
+    );
+  }
+
+  const yTxt = (xPos, anc, yVal, yPx) => svg('text', {
+    x: xPos, y: yPx + 4, 'text-anchor': anc,
+    fill: 'var(--text-dim)', 'font-size': 11, 'font-family': 'var(--mono)',
+  }, '$' + yVal.toFixed(yVal > 1000 ? 0 : 2));
+
+  for (let g = 0; g <= 4; g++) {
+    const v = lo + (yrange * g) / 4;
+    const y = yAt(v);
+    root.append(
+      svg('line', {
+        x1: pad.left, y1: y, x2: w - pad.right, y2: y,
+        stroke: 'var(--stroke-soft)', 'stroke-dasharray': yahooLayout ? '1 5' : '2 4',
+        'stroke-opacity': yahooLayout ? 0.5 : 1,
+      }),
+    );
+    if (yahooLayout) root.append(yTxt(w - 8, 'end', v, y));
+  }
+
+  // 1D hourly: one label per bar (≤16); if more intraday bars, sample 16 ticks; daily ranges: up to 8
+  const nTicks = xGran === 'hour' ? Math.min(16, n) : Math.min(8, n);
+  for (let t = 0; t < nTicks; t++) {
+    let idx;
+    if (nTicks <= 1) idx = 0;
+    else if (xGran === 'hour' && n <= 16) idx = t;
+    else if (xGran === 'hour') idx = Math.round((t * (n - 1)) / (nTicks - 1));
+    else idx = Math.round(((n - 1) * t) / (nTicks - 1));
+    const x = xC(idx);
+    const bar = bars[idx];
+    const lab = _fmtDetailAxisTime(bar.t, xGran);
+    root.append(
+      svg('text', {
+        x,
+        y: h0 - 6,
+        'text-anchor': 'middle',
+        fill: 'var(--text-dim)',
+        'font-size': 10,
+        'font-family': 'var(--mono)',
+      }, lab),
+    );
+  }
+
+  if (view === 'candle' || view === 'bar') {
+    const bw = Math.max(2, slotW * 0.55);
+    for (let i = 0; i < n; i++) {
+      const b = bars[i];
+      const cx = xC(i);
+      const yH = yAt(b.h);
+      const yL = yAt(b.l);
+      const yO = yAt(b.o);
+      const yC0 = yAt(b.c);
+      const bull = b.c >= b.o;
+      const cFill = bull ? 'var(--success)' : 'var(--danger)';
+      if (view === 'candle') {
+        root.append(
+          svg('line', {
+            x1: cx, y1: yH, x2: cx, y2: yL,
+            stroke: cFill, 'stroke-width': 1.2, 'stroke-opacity': 0.9,
+          }),
+        );
+        const topB = Math.min(yO, yC0);
+        const botB = Math.max(yO, yC0);
+        const hB = Math.max(1, botB - topB);
+        root.append(
+          svg('rect', {
+            x: cx - bw / 2,
+            y: topB,
+            width: bw,
+            height: hB,
+            fill: cFill,
+            'fill-opacity': 0.75,
+            stroke: cFill,
+            'stroke-width': 1,
+            rx: 1,
+          }),
+        );
+      } else {
+        // OHLC "bar" — vertical high–low, ticks for open (left) and close (right)
+        root.append(
+          svg('line', {
+            x1: cx, y1: yH, x2: cx, y2: yL,
+            stroke: 'var(--text-muted)', 'stroke-width': 1.2,
+          }),
+        );
+        const tick = bw * 0.45;
+        root.append(
+          svg('line', { x1: cx - tick, y1: yO, x2: cx, y2: yO, stroke: cFill, 'stroke-width': 1.4 }),
+        );
+        root.append(
+          svg('line', { x1: cx, y1: yC0, x2: cx + tick, y2: yC0, stroke: cFill, 'stroke-width': 1.4 }),
+        );
+      }
+    }
+  } else {
+    if (showOverlays) {
+      let bandD = '';
+      let startedBand = false;
+      for (let i = 0; i < n; i++) {
+        if (bb.upper[i] == null) { startedBand = false; continue; }
+        const [x, yU] = xy(bb.upper[i], i);
+        bandD += (startedBand ? 'L' : 'M') + x.toFixed(2) + ',' + yU.toFixed(2) + ' ';
+        startedBand = true;
+      }
+      for (let i = n - 1; i >= 0; i--) {
+        if (bb.lower[i] == null) continue;
+        const [x, y0] = xy(bb.lower[i], i);
+        bandD += 'L' + x.toFixed(2) + ',' + y0.toFixed(2) + ' ';
+      }
+      if (bandD) {
+        bandD += 'Z';
+        root.append(svg('path', {
+          d: bandD,
+          fill: 'var(--info)',
+          'fill-opacity': 0.07,
+          stroke: 'none',
+        }));
+        root.append(svg('path', {
+          d: toPath(bb.upper),
+          fill: 'none',
+          stroke: 'var(--info)',
+          'stroke-opacity': 0.5,
+          'stroke-width': 1,
+          'stroke-dasharray': '3 3',
+        }));
+        root.append(svg('path', {
+          d: toPath(bb.lower),
+          fill: 'none',
+          stroke: 'var(--info)',
+          'stroke-opacity': 0.5,
+          'stroke-width': 1,
+          'stroke-dasharray': '3 3',
+        }));
+      }
+      const smA = yahooLayout ? 0.55 : 0.9;
+      const sw = yahooLayout ? 1.0 : 1.2;
+      root.append(svg('path', { d: toPath(sma20), fill: 'none', stroke: '#8b9dd9', 'stroke-width': sw, 'stroke-opacity': 0.75 * smA }));
+      root.append(svg('path', { d: toPath(sma10), fill: 'none', stroke: '#d9a36b', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA }));
+      root.append(svg('path', { d: toPath(ema9), fill: 'none', stroke: '#bf7af0', 'stroke-width': sw, 'stroke-dasharray': '4 2', 'stroke-opacity': 0.8 * smA }));
+      root.append(svg('path', { d: toPath(sma5), fill: 'none', stroke: '#f2d47a', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA }));
+    }
+
+    const lineD = series.map((v, i) => {
+      const [x, y0] = xy(v, i);
+      return (i === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y0.toFixed(2);
+    }).join(' ');
+
+    if (view === 'mountain') {
+      const [x0, y0] = xy(series[0], 0);
+      const [x1, y1] = xy(series[n - 1], n - 1);
+      const areaD = lineD +
+        ' L' + x1.toFixed(2) + ',' + (pad.top + innerH) +
+        ' L' + x0.toFixed(2) + ',' + (pad.top + innerH) + ' Z';
+      root.append(svg('path', { d: areaD, fill: `url(#${gradId})`, stroke: 'none' }));
+    }
+
+    root.append(svg('path', {
+      d: lineD,
+      fill: 'none',
+      stroke: color,
+      'stroke-width': yahooLayout ? 2.2 : 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+  }
+
+  const lastX = xC(n - 1);
+  const lastY = yAt(bars[n - 1].c);
+  root.append(
+    svg('circle', { cx: lastX, cy: lastY, r: 5, fill: color, 'fill-opacity': 0.25 }),
+    svg('circle', { cx: lastX, cy: lastY, r: 2.6, fill: color }),
+  );
+
+  const legendRow = h(
+    'div',
+    { class: 'price-chart-legend-row mono' },
+    legendSwatch(color, `Close / ${String(view).charAt(0).toUpperCase() + String(view).slice(1)}`),
+    ...(showOverlays
+      ? [
+        legendSwatch('#f2d47a', `SMA${Math.min(5, n - 1)}`),
+        legendSwatch('#d9a36b', `SMA${Math.min(10, n - 1)}`),
+        legendSwatch('#8b9dd9', `SMA${Math.min(20, n - 1)}`),
+        legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
+        legendSwatch('var(--info)', `Bollinger (${Math.min(20, n - 1)},2σ)`, false, true),
+      ]
+      : [h('span', { class: 'muted' }, 'Indicators on Mountain / Line only')]),
+  );
+
+  const canvas = h('div', { class: 'price-chart-canvas' }, root);
+  const figure = h(
+    'div',
+    { class: 'price-chart-figure' + (enlarged ? ' price-chart-figure--wide' : '') },
+    canvas,
+    legendRow,
+  );
+
+  return figure;
 }
 
 function legendSwatch(color, label, dashed = false, band = false) {
@@ -1031,86 +2704,40 @@ function legendSwatch(color, label, dashed = false, band = false) {
 function renderFactorChart(d) {
   const host = $('#factor-chart');
   host.innerHTML = '';
-  host.append(factorBars(d.factors));
+  host.append(factorBarsHtml(d.factors));
 }
 
-function factorBars(factors) {
-  const w = 400;
-  const h0 = 200;
-  const pad = { top: 10, right: 40, bottom: 10, left: 110 };
-  const innerW = w - pad.left - pad.right;
-  const innerH = h0 - pad.top - pad.bottom;
-  const rowH = innerH / factors.length;
-  const cx = pad.left + innerW / 2;
-
+/** Tight layout: name | bar track (zero at centre) | score — avoids stretched SVG and label overlap. */
+function factorBarsHtml(factors) {
+  const wrap = h('div', { class: 'factor-bars factor-bars--html' });
   const maxMag = Math.max(1, ...factors.map((f) => Math.abs(f.score)));
-
-  const root = svg(
-    'svg',
-    { class: 'factor-bars', viewBox: `0 0 ${w} ${h0}`, preserveAspectRatio: 'none' }
-  );
-
-  // Center zero line
-  root.append(
-    svg('line', {
-      x1: cx, y1: pad.top, x2: cx, y2: pad.top + innerH,
-      stroke: 'var(--stroke)',
-    })
-  );
-
-  factors.forEach((f, i) => {
-    const y = pad.top + i * rowH + rowH * 0.18;
-    const barH = rowH * 0.64;
-    const barW = (Math.abs(f.score) / maxMag) * (innerW / 2 - 6);
+  for (const f of factors) {
     const color =
       f.score > 0.15 ? 'var(--success)' :
       f.score < -0.15 ? 'var(--danger)'  :
       'var(--text-dim)';
-
-    // label
-    root.append(
-      svg(
-        'text',
-        {
-          x: pad.left - 8,
-          y: y + barH / 2 + 3,
-          'text-anchor': 'end',
-          fill: 'var(--text-muted)',
-          'font-size': 11,
-        },
-        f.name
-      )
+    const t = Math.abs(f.score) / maxMag;
+    const pct = Math.max(0, t * 50);
+    const isPos = f.score >= 0;
+    const val = (f.score >= 0 ? '+' : '') + f.score.toFixed(2);
+    wrap.append(
+      h('div', { class: 'factor-bars__row' },
+        h('div', { class: 'factor-bars__name' }, f.name),
+        h('div', { class: 'factor-bars__track' },
+          h('div', { class: 'factor-bars__zero' }),
+          h('div', {
+            class: 'factor-bars__fill ' + (isPos ? 'is-pos' : 'is-neg'),
+            style:
+              (isPos
+                ? `left:50%;width:${pct}%;background:${color};`
+                : `right:50%;width:${pct}%;background:${color};`),
+          }),
+        ),
+        h('div', { class: 'factor-bars__value mono' }, val),
+      ),
     );
-    // bar
-    root.append(
-      svg('rect', {
-        x: f.score >= 0 ? cx : cx - barW,
-        y,
-        width: barW,
-        height: barH,
-        fill: color,
-        'fill-opacity': 0.85,
-        rx: 2,
-      })
-    );
-    // value text
-    root.append(
-      svg(
-        'text',
-        {
-          x: f.score >= 0 ? cx + barW + 4 : cx - barW - 4,
-          y: y + barH / 2 + 3,
-          'text-anchor': f.score >= 0 ? 'start' : 'end',
-          fill: 'var(--text)',
-          'font-size': 10,
-          'font-family': 'var(--mono)',
-        },
-        (f.score >= 0 ? '+' : '') + f.score.toFixed(2)
-      )
-    );
-  });
-
-  return root;
+  }
+  return wrap;
 }
 
 // ---------- Factor table ---------------------------------------------------
@@ -1260,6 +2887,10 @@ const analyst = {
   timeframe: 'daily',
   overview: [],
   reports: {}, // key = sym|tf
+  /** "SYMBOL|range" (client chart range) -> GET /api/ticker payload */
+  tickerDetails: {},
+  /** For resetting session zoom when switching symbols. */
+  _priceChartSymbol: null,
   llm: { enabled: false, model: '' },
   polishCache: {}, // key = sym|tf -> polished narrative
   briefCache: {},  // key = tf -> brief text
@@ -1280,6 +2911,7 @@ const copyTrade = {
 async function initAnalystOnce() {
   if (analyst.initialized) return;
   analyst.initialized = true;
+  initAnalystChartToolbar();
 
   $$('.analyst-timeframes .pill').forEach((p) => {
     p.addEventListener('click', () => {
@@ -1692,6 +3324,10 @@ async function loadCopyTradeData(refresh) {
 }
 
 async function loadAnalystReport(symbol) {
+  if (analyst._priceChartSymbol != null && analyst._priceChartSymbol !== symbol) {
+    state.analystChartSessionZoom = { start: 0, end: 1 };
+  }
+  analyst._priceChartSymbol = symbol;
   analyst.activeSymbol = symbol;
   renderTickerStrip();
   renderOverviewList();
@@ -1714,10 +3350,17 @@ async function loadAnalystReport(symbol) {
       return;
     }
   }
-  renderAnalystReport(rpt);
+  let tickerD = null;
+  try {
+    tickerD = await loadAnalystTickerDetail(symbol);
+  } catch (e) {
+    tickerD = null;
+  }
+  renderAnalystReport(rpt, tickerD);
+  syncAnalystChartToolbar();
 }
 
-function renderAnalystReport(r) {
+function renderAnalystReport(r, tickerD) {
   const root = $('#analyst-report');
   root.innerHTML = '';
 
@@ -1803,26 +3446,117 @@ function renderAnalystReport(r) {
     )
   );
 
-  // Price chart card
+  // Price chart (same Yahoo-style OHLC path as Ticker detail; /api/ticker bars)
+  const rangePills = [
+    ['1d', '1D'],
+    ['5d', '5D'],
+    ['1m', '1M'],
+    ['6m', '6M'],
+    ['1y', '1Y'],
+    ['ytd', 'YTD'],
+  ];
+  const viewPills = [
+    ['mountain', 'Mountain'],
+    ['candle', 'Candle'],
+    ['line', 'Line'],
+    ['bar', 'Bar (OHLC)'],
+  ];
   root.append(
     h(
       'div',
-      { class: 'card chart-card' },
+      { class: 'card chart-card card-lg' },
       h(
         'div',
-        { class: 'card-header' },
-        h('span', { class: 'card-title' },
-          `Price · ${r.timeframe} · with 50 / 200 SMA`),
-        h('span', { class: 'card-trail mono' },
-          `${r.chart.close.length} bars`)
+        { class: 'card-header card-header--chart' },
+        h(
+          'div',
+          { class: 'card-header-titles' },
+          h('span', { class: 'card-title', id: 'analyst-price-card-title' }, 'Price'),
+          h(
+            'span',
+            { class: 'card-trail mono', id: 'analyst-price-card-trail' },
+            `${r.chart.close.length} bars · ${r.timeframe}`,
+          ),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-ghost btn-enlarge-chart',
+            id: 'analyst-btn-enlarge-chart',
+            hidden: true,
+          },
+          'Enlarge chart',
+        ),
       ),
       h(
         'div',
-        { class: 'card-body' },
-        priceWithSmaChart(r.chart, r.price_action.supports, r.price_action.resistances)
-      )
-    )
+        { class: 'card-body card-body--ticker-chart' },
+        h(
+          'div',
+          { class: 'detail-chart-toolbar', id: 'analyst-chart-toolbar' },
+          h(
+            'div',
+            { class: 'detail-chart-toolbar__row', role: 'group', 'aria-label': 'Chart range' },
+            h('span', { class: 'detail-chart-toolbar__label muted' }, 'Range'),
+            h(
+              'div',
+              { class: 'pill-row' },
+              ...rangePills.map(([rk, lab]) =>
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class:
+                      'pill' + (state.analystChart.range === rk ? ' is-active' : ''),
+                    'data-analyst-range': rk,
+                  },
+                  lab,
+                ),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { class: 'detail-chart-toolbar__row', role: 'group', 'aria-label': 'Chart style' },
+            h('span', { class: 'detail-chart-toolbar__label muted' }, 'View'),
+            h(
+              'div',
+              { class: 'pill-row' },
+              ...viewPills.map(([vk, lab]) =>
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: 'pill' + (state.analystChart.view === vk ? ' is-active' : ''),
+                    'data-analyst-view': vk,
+                  },
+                  lab,
+                ),
+              ),
+            ),
+          ),
+        ),
+        h('div', { id: 'analyst-price-chart' },
+          h('div', { class: 'chart-placeholder' }, tickerD ? '…' : 'Loading…')),
+      ),
+    ),
   );
+  if (tickerD) {
+    renderPriceChart(tickerD, 'analyst');
+  } else {
+    const ph = $('#analyst-price-chart');
+    if (ph) {
+      ph.innerHTML = '';
+      ph.append(
+        h(
+          'div',
+          { class: 'chart-placeholder' },
+          'Could not load price bars — check that this symbol is in the universe.',
+        ),
+      );
+    }
+  }
 
   // Narrative — deterministic by default; optionally polished by Claude.
   const narrativeHost = h(
@@ -2254,7 +3988,7 @@ function levelCard(title, levels, cls) {
 
 // ---------- Price + SMA overlay chart --------------------------------------
 
-function priceWithSmaChart(chart, supports, resistances) {
+function priceWithSmaChart(chart) {
   const w = 920;
   const h0 = 280;
   const pad = { top: 16, right: 60, bottom: 22, left: 60 };
@@ -2269,8 +4003,6 @@ function priceWithSmaChart(chart, supports, resistances) {
   for (const v of chart.close) all.push(v);
   for (const v of chart.sma50) if (v != null) all.push(v);
   for (const v of chart.sma200) if (v != null) all.push(v);
-  for (const v of supports) all.push(v);
-  for (const v of resistances) all.push(v);
   const min = Math.min(...all);
   const max = Math.max(...all);
   const range = (max - min) || 1;
@@ -2317,24 +4049,6 @@ function priceWithSmaChart(chart, supports, resistances) {
         'font-family': 'var(--mono)',
       }, '$' + v.toFixed(v > 50 ? 0 : 2))
     );
-  }
-
-  // Support / resistance horizontal lines
-  for (const s of supports) {
-    const [, y] = xy(s, 0);
-    root.append(svg('line', {
-      x1: pad.left, y1: y, x2: w - pad.right, y2: y,
-      stroke: 'var(--success)', 'stroke-opacity': 0.35,
-      'stroke-dasharray': '4 4',
-    }));
-  }
-  for (const s of resistances) {
-    const [, y] = xy(s, 0);
-    root.append(svg('line', {
-      x1: pad.left, y1: y, x2: w - pad.right, y2: y,
-      stroke: 'var(--danger)', 'stroke-opacity': 0.35,
-      'stroke-dasharray': '4 4',
-    }));
   }
 
   // SMA200 then SMA50 (so 50 draws on top)
@@ -2822,11 +4536,17 @@ const searchUI = {
   suggestIndex: -1,
   suggestions: [],
   inFlight: false,
+  lastTickerDetail: null,
+  tickerDetails: {},
+  lastQueryResolvedSymbol: null,
+  lastSearchPayload: null,
+  _lastSearchChartSymbol: null,
 };
 
 function initSearchOnce() {
   if (searchUI.initialized) return;
   searchUI.initialized = true;
+  initSearchChartToolbar();
 
   const input = $('#search-input');
   const suggest = $('#search-suggest');
@@ -2967,7 +4687,23 @@ async function runSearch(query) {
     const r = await api(
       `/api/search?q=${encodeURIComponent(query)}&timeframe=${encodeURIComponent(searchUI.timeframe)}`
     );
-    renderSearchResult(r);
+    const sym = r.resolved && r.resolved.symbol;
+    if (searchUI._lastSearchChartSymbol != null && sym && searchUI._lastSearchChartSymbol !== sym) {
+      state.searchChartSessionZoom = { start: 0, end: 1 };
+    }
+    if (sym) searchUI._lastSearchChartSymbol = sym;
+    searchUI.lastSearchPayload = r;
+    searchUI.lastQueryResolvedSymbol = sym || null;
+    let td = null;
+    if (sym) {
+      try {
+        td = await loadSearchTickerDetail(sym);
+      } catch (e) {
+        td = null;
+      }
+    }
+    searchUI.lastTickerDetail = td;
+    renderSearchResult(r, td);
   } catch (e) {
     host.innerHTML =
       `<div class="callout callout-warning">` +
@@ -2980,12 +4716,15 @@ async function runSearch(query) {
   }
 }
 
-function renderSearchResult(r) {
+function renderSearchResult(r, tickerD) {
   const host = $('#search-result');
   host.innerHTML = '';
   const resolved = r.resolved;
   const plan = r.stock_plan;
   const report = r.report;
+  searchUI.lastSearchPayload = r;
+  searchUI.lastQueryResolvedSymbol = resolved.symbol;
+  if (tickerD) searchUI.lastTickerDetail = tickerD;
 
   const actionCls = plan.action === 'Buy'  ? 'action-buy'
                   : plan.action === 'Sell' ? 'action-sell'
@@ -3056,24 +4795,117 @@ function renderSearchResult(r) {
     )
   );
 
-  // Row 3: fancy chart reuse.
+  // Row 3: Yahoo-style OHLC (same as Ticker detail / Analyst)
+  const sRangePills = [
+    ['1d', '1D'],
+    ['5d', '5D'],
+    ['1m', '1M'],
+    ['6m', '6M'],
+    ['1y', '1Y'],
+    ['ytd', 'YTD'],
+  ];
+  const sViewPills = [
+    ['mountain', 'Mountain'],
+    ['candle', 'Candle'],
+    ['line', 'Line'],
+    ['bar', 'Bar (OHLC)'],
+  ];
   host.append(
-    h('div', { class: 'card card-lg' },
-      h('div', { class: 'card-header' },
-        h('span', { class: 'card-title' }, `${resolved.symbol} · price with indicators`),
-        h('span', { class: 'card-trail mono' },
-          `${report.chart.close.length} bars · ${report.timeframe}`
-        )
+    h(
+      'div',
+      { class: 'card card-lg' },
+      h(
+        'div',
+        { class: 'card-header card-header--chart' },
+        h(
+          'div',
+          { class: 'card-header-titles' },
+          h('span', { class: 'card-title', id: 'search-price-card-title' },
+            `${resolved.symbol} · price`,
+          ),
+          h(
+            'span',
+            { class: 'card-trail mono', id: 'search-price-card-trail' },
+            `${report.chart.close.length} bars · ${report.timeframe}`,
+          ),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-ghost btn-enlarge-chart',
+            id: 'search-btn-enlarge-chart',
+            hidden: true,
+          },
+          'Enlarge chart',
+        ),
       ),
-      h('div', { class: 'card-body' },
-        fancyPriceChart(
-          report.chart.close,
-          report.verdict === 'BULLISH' ? 'bull'
-            : report.verdict === 'BEARISH' ? 'bear' : 'neutral'
-        )
-      )
-    )
+      h(
+        'div',
+        { class: 'card-body card-body--ticker-chart' },
+        h(
+          'div',
+          { class: 'detail-chart-toolbar', id: 'search-chart-toolbar' },
+          h(
+            'div',
+            { class: 'detail-chart-toolbar__row', role: 'group', 'aria-label': 'Chart range' },
+            h('span', { class: 'detail-chart-toolbar__label muted' }, 'Range'),
+            h(
+              'div',
+              { class: 'pill-row' },
+              ...sRangePills.map(([rk, lab]) =>
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: 'pill' + (state.searchChart.range === rk ? ' is-active' : ''),
+                    'data-search-range': rk,
+                  },
+                  lab,
+                ),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { class: 'detail-chart-toolbar__row', role: 'group', 'aria-label': 'Chart style' },
+            h('span', { class: 'detail-chart-toolbar__label muted' }, 'View'),
+            h(
+              'div',
+              { class: 'pill-row' },
+              ...sViewPills.map(([vk, lab]) =>
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: 'pill' + (state.searchChart.view === vk ? ' is-active' : ''),
+                    'data-search-view': vk,
+                  },
+                  lab,
+                ),
+              ),
+            ),
+          ),
+        ),
+        h('div', { id: 'search-price-chart' },
+          h('div', { class: 'chart-placeholder' }, tickerD ? '…' : 'Loading…')),
+      ),
+    ),
   );
+  if (tickerD) {
+    renderPriceChart(tickerD, 'search');
+  } else {
+    const ph = $('#search-price-chart');
+    if (ph) {
+      ph.innerHTML = '';
+      ph.append(
+        h('div', { class: 'chart-placeholder' },
+          'Could not load price chart for this symbol.',
+        ),
+      );
+    }
+  }
+  syncSearchChartToolbar();
 
   // Row 4: compact technical summary from the report.
   host.append(
@@ -3241,6 +5073,8 @@ function boot() {
     initTabs();
     initFilters();
     startESTClock();
+    initChartEnlargeModal();
+    initDetailChartToolbar();
     void initPoweredBy();
     void loadDashboard();
     initRefresh();

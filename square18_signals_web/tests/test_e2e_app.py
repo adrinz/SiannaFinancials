@@ -198,6 +198,22 @@ def test_ticker_detail_matches_dashboard_symbol(client: TestClient):
     assert isinstance(detail["factors"], list)
     assert isinstance(detail["price_30d"], list)
     assert len(detail["price_30d"]) > 0
+    assert isinstance(detail["price_series"], list)
+    assert len(detail["price_series"]) >= 2
+    assert isinstance(detail["chart"], dict)
+    assert detail["chart"]["range_key"] == "1d"
+    assert detail["chart"]["x_granularity"] == "session"
+    assert len(detail["chart"]["bars"]) == len(detail["price_series"])
+    assert isinstance(detail.get("news"), list)
+    assert "signal_detail" in detail
+    assert "narrative_summary" in detail
+    assert isinstance(detail.get("technical_bullets"), list)
+    cc = detail["chart_context"]
+    assert cc["headline"]
+    assert cc["verdict"] in ("BULLISH", "BEARISH", "NEUTRAL")
+    assert cc["signal"] in ("Buy", "Sell", "Hold")
+    assert isinstance(cc["lines"], list)
+    assert len(cc["lines"]) >= 1
     assert "one_sigma_usd" in detail["expected_move"]
     assert "one_sigma_pct" in detail["expected_move"]
     assert isinstance(detail["recommendations"], list)
@@ -206,6 +222,11 @@ def test_ticker_detail_matches_dashboard_symbol(client: TestClient):
 def test_ticker_detail_unknown_symbol_returns_404(client: TestClient):
     r = client.get("/api/ticker/THIS_DOES_NOT_EXIST")
     assert r.status_code == 404
+
+
+def test_ticker_detail_invalid_range_returns_400(client: TestClient):
+    r = client.get("/api/ticker/AAPL?range=10y")
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------

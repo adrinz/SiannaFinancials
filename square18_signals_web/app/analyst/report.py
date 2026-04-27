@@ -21,6 +21,7 @@ from square18_signals.pricing import black_scholes_price
 
 from .constants import DEFAULT_IV, ETF_SIGNAL_TICKERS, TICKER_MAP, TICKERS, Timeframe
 from .data import OHLCV, get_ohlcv
+from .yahoo_quotes import yf_last_price, yf_option_mid_per_share
 from .indicators import (
     atr as _atr,
     macd as _macd,
@@ -102,6 +103,8 @@ def build_report(
         raise ValueError(f"insufficient history for {sym} at {timeframe}")
 
     closes = data.close
+    y_spot = yf_last_price(sym)
+    spot_for_options = float(y_spot) if (y_spot is not None and y_spot > 0) else float(closes[-1])
     highs = data.high
     lows = data.low
     volumes = data.volume
@@ -140,7 +143,7 @@ def build_report(
     market_ctx = _market_context_text(sym, meta["sector"], data.source)
     options = _build_options_suggestion(
         sym=sym,
-        spot=closes[-1],
+        spot=spot_for_options,
         closes=closes,
         atr_block=atr_block,
         price_action=price_action,
@@ -221,7 +224,7 @@ def overview_rows(
                     symbol=rpt.symbol,
                     name=rpt.name,
                     sector=rpt.sector,
-                    last=round(rpt.price_action.last, 2),
+                    last=round(rpt.options.trade_plan.spot_at_entry, 2),
                     change_pct=round(rpt.price_action.change_pct, 2),
                     verdict=rpt.verdict,
                     conviction=rpt.conviction,
@@ -945,17 +948,28 @@ def _build_trade_plan(
         expiry_dt += timedelta(days=1)
     expiry_date_iso = expiry_dt.isoformat()
 
-    # Black-Scholes mid as an estimated premium.
-    try:
-        premium: Optional[float] = round(
-            black_scholes_price(
-                S=spot, K=strike, T=T, r=0.045, sigma=iv, q=0.0,
-                option_type=contract_type,
-            ),
-            2,
-        )
-    except Exception:
-        premium = None
+    # Premium: Yahoo option chain (bid+ask)/2 when a listed expiry/strike exists,
+    # else Black–Scholes so the ticket still renders offline.
+    premium: Optional[float] = None
+    premium_source = "model"
+    chain_mid = yf_option_mid_per_share(
+        sym, strike, contract_type == "call", expiry_dt
+    )
+    if chain_mid is not None and chain_mid > 0:
+        premium = round(chain_mid, 2)
+        premium_source = "yahoo_chain"
+    if premium is None:
+        try:
+            premium = round(
+                black_scholes_price(
+                    S=spot, K=strike, T=T, r=0.045, sigma=iv, q=0.0,
+                    option_type=contract_type,
+                ),
+                2,
+            )
+            premium_source = "model"
+        except Exception:
+            premium = None
     cost = round(premium * 100, 2) if premium is not None else None
     break_even: Optional[float] = None
     if premium is not None:
@@ -1008,7 +1022,11 @@ def _build_trade_plan(
         risk_reward = round((spot - target_price) / (stop_loss - spot), 2)
 
     # ---- Rationale ---------------------------------------------------------
-    prem_txt = f"${premium:.2f}/sh (${cost:.0f}/contract)" if premium else "premium pending"
+    if premium is not None:
+        _src = "Yahoo chain mid" if premium_source == "yahoo_chain" else "BS model"
+        prem_txt = f"${premium:.2f}/sh ({_src}; ${cost:.0f}/contract)"
+    else:
+        prem_txt = "premium pending"
     be_txt = f"BE ${break_even:.2f}" if break_even is not None else "BE pending"
     tgt_txt = f"target ${target_price:.2f}" if target_price is not None else "target 1σ"
     stop_txt = f"invalidate ${stop_loss:.2f}" if stop_loss is not None else "2×ATR stop"

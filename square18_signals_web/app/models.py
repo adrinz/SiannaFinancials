@@ -84,12 +84,62 @@ class ExpectedMoveOut(BaseModel):
     one_sigma_pct: float
 
 
+class TickerSignalLineOut(BaseModel):
+    """One line of interpretation for the enlarged chart / indicator panel."""
+
+    label: str
+    detail: str
+
+
+class TickerChartContextOut(BaseModel):
+    """Headline + structured reasons shown next to the enlarged price chart."""
+
+    headline: str
+    verdict: str
+    signal: str
+    lines: list[TickerSignalLineOut]
+
+
+class TickerChartBarOut(BaseModel):
+    """One OHLC bar (timestamp + ohlc) for the ticker price chart."""
+
+    t: str
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float = 0.0  # volume for bar (e.g. minute share volume); 0 if unknown
+
+
+class TickerChartBundleOut(BaseModel):
+    """Range-selected OHLC series for line / mountain / candle / bar views."""
+
+    range_key: str
+    x_granularity: Literal["hour", "day", "session"] = "day"
+    bars: list[TickerChartBarOut]
+
+
+class TickerNewsOut(BaseModel):
+    title: str
+    publisher: str
+    url: str
+    published_at: str
+    summary: str = ""
+
+
 class TickerDetailOut(BaseModel):
     row: TickerRowOut
     factors: list[FactorOut]
     price_30d: list[float]
+    price_series: list[float]  # close series for legacy/spark; mirrors selected range when chart is present
+    chart: TickerChartBundleOut
+    chart_context: TickerChartContextOut
     expected_move: ExpectedMoveOut
     recommendations: list[RecommendationOut]
+    news: list[TickerNewsOut] = Field(default_factory=list)
+    signal_detail: str = ""
+    narrative_summary: str = ""
+    technical_bullets: list[str] = Field(default_factory=list)
 
 
 class RegimeEnvelope(BaseModel):

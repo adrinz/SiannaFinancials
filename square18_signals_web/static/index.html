@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=sianna-2026-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=sianna-yahoo-chart-1" />
   </head>
   <body>
     <div
@@ -410,22 +410,82 @@
 
         <div class="detail-grid">
           <div class="card card-lg">
-            <div class="card-header">
-              <span class="card-title">Price · 30 sessions</span>
-              <span class="card-trail mono" id="price-change-trail"></span>
+            <div class="card-header card-header--chart">
+              <div class="card-header-titles">
+                <span class="card-title" id="price-chart-card-title">Price · 30 sessions</span>
+                <span class="card-trail mono" id="price-change-trail"></span>
+                <span
+                  class="detail-chart-live muted hidden"
+                  id="detail-chart-live"
+                  aria-live="polite"
+                ></span>
+              </div>
+              <button
+                type="button"
+                class="btn-ghost btn-enlarge-chart"
+                id="btn-enlarge-chart"
+                hidden
+              >
+                Enlarge chart
+              </button>
             </div>
-            <div class="card-body" id="price-chart">
-              <div class="chart-placeholder">—</div>
+            <div class="card-body card-body--ticker-chart">
+              <div class="detail-chart-toolbar" id="detail-chart-toolbar">
+                <div class="detail-chart-toolbar__row" role="group" aria-label="Chart range">
+                  <span class="detail-chart-toolbar__label muted">Range</span>
+                  <div class="pill-row">
+                    <button type="button" class="pill is-active" data-detail-range="1d">1D</button>
+                    <button type="button" class="pill" data-detail-range="5d">5D</button>
+                    <button type="button" class="pill" data-detail-range="1m">1M</button>
+                    <button type="button" class="pill" data-detail-range="6m">6M</button>
+                    <button type="button" class="pill" data-detail-range="1y">1Y</button>
+                    <button type="button" class="pill" data-detail-range="ytd">YTD</button>
+                  </div>
+                </div>
+                <div class="detail-chart-toolbar__row" role="group" aria-label="Chart style">
+                  <span class="detail-chart-toolbar__label muted">View</span>
+                  <div class="pill-row">
+                    <button type="button" class="pill is-active" data-detail-view="mountain">Mountain</button>
+                    <button type="button" class="pill" data-detail-view="candle">Candle</button>
+                    <button type="button" class="pill" data-detail-view="line">Line</button>
+                    <button type="button" class="pill" data-detail-view="bar">Bar (OHLC)</button>
+                  </div>
+                </div>
+              </div>
+              <div id="price-chart">
+                <div class="chart-placeholder">—</div>
+              </div>
             </div>
           </div>
 
-          <div class="card">
+          <div class="card card-factor-contrib">
             <div class="card-header">
               <span class="card-title">Factor contributions</span>
             </div>
             <div class="card-body" id="factor-chart">
               <div class="chart-placeholder">—</div>
             </div>
+          </div>
+        </div>
+
+        <div class="detail-info-grid" id="detail-info-grid">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Signal detail</span>
+            </div>
+            <div class="card-body" id="detail-signal-body"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Technical analysis</span>
+            </div>
+            <div class="card-body" id="detail-tech-body"></div>
+          </div>
+          <div class="card card-news-wide">
+            <div class="card-header">
+              <span class="card-title">News headlines</span>
+            </div>
+            <div class="card-body" id="detail-news-body"></div>
           </div>
         </div>
 
@@ -810,6 +870,61 @@
       Not a financial advice, this is for educational research only. Data may be delayed or inaccurate.
     </div>
 
-    <script src="/static/app.js?v=sianna-boot-2026-1" defer></script>
+    <div
+      id="chart-enlarge-backdrop"
+      class="chart-enlarge-backdrop hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="chart-modal-title"
+    >
+      <div class="chart-enlarge-panel" role="document">
+        <div class="chart-enlarge-head">
+          <h2 class="chart-enlarge-title" id="chart-modal-title">Price chart</h2>
+          <button
+            type="button"
+            class="btn-ghost chart-enlarge-close"
+            id="chart-modal-close"
+            aria-label="Close enlarged chart"
+          >
+            ×
+          </button>
+        </div>
+        <div
+          class="chart-enlarge-view-bar"
+          id="chart-modal-view-toolbar"
+          role="group"
+          aria-label="Chart style"
+        >
+          <span class="detail-chart-toolbar__label muted">View</span>
+          <div class="pill-row">
+            <button type="button" class="pill is-active" data-detail-view="mountain">
+              Mountain
+            </button>
+            <button type="button" class="pill" data-detail-view="candle">Candle</button>
+            <button type="button" class="pill" data-detail-view="line">Line</button>
+            <button type="button" class="pill" data-detail-view="bar">Bar (OHLC)</button>
+          </div>
+        </div>
+        <div class="chart-enlarge-body chart-enlarge-body--stacked">
+          <div class="chart-enlarge-viz" id="chart-modal-chart-host"></div>
+          <div class="chart-enlarge-below" id="chart-enlarge-below">
+            <div class="chart-enlarge-legend-h">Signal detail</div>
+            <p class="muted small chart-enlarge-legend-txt">
+              Use the View buttons to switch Mountain (area + close), Candle, Line, or OHLC
+              bar chart. On Mountain/Line, SMA, EMA, and Bollinger follow close. The legend
+              sits under the plot. Data cadence is the same as the feed (not tick-by-tick).
+            </p>
+            <div
+              class="chart-enlarge-signals"
+              id="chart-modal-signals"
+              role="region"
+              aria-label="Indicator explanations"
+            ></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js?v=sianna-yahoo-chart-1" defer></script>
   </body>
 </html>
