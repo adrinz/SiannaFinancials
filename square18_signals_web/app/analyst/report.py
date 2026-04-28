@@ -15,27 +15,42 @@ import math
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from square18_signals.pricing import black_scholes_price
 
-from .constants import DEFAULT_IV, ETF_SIGNAL_TICKERS, TICKER_MAP, TICKERS, Timeframe
+from .constants import (
+    DEFAULT_IV,
+    ETF_SIGNAL_TICKERS,
+    SCREENER_EARNINGS_WINDOW_DAYS,
+    TICKER_MAP,
+    TICKERS,
+    Timeframe,
+)
 from .data import OHLCV, get_ohlcv
+from .factors import bull_bear_balance_percent, derive_factors_from_report
 from .yahoo_quotes import yf_last_price, yf_option_mid_per_share
 from .indicators import (
+    adx as _adx,
     atr as _atr,
+    bollinger as _bollinger,
     macd as _macd,
     rolling_std,
     rsi as _rsi,
     sma,
+    stochastic as _stochastic,
     support_resistance,
 )
 from .models import (
     ChartPayload,
+    EarningsSoonOut,
+    IndicatorADX,
     IndicatorATR,
+    IndicatorBollinger,
     IndicatorMACD,
     IndicatorRSI,
     IndicatorSMA,
+    IndicatorStochastic,
     OptionsSuggestion,
     OverviewRow,
     PriceAction,
@@ -114,6 +129,9 @@ def build_report(
     rsi_series = _rsi(closes, 14)
     macd_line, signal_line, hist_line = _macd(closes)
     atr_series = _atr(highs, lows, closes, 14)
+    adx_series, plus_di_series, minus_di_series = _adx(highs, lows, closes, 14)
+    bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2.0)
+    stoch_k, stoch_d = _stochastic(highs, lows, closes, 14, 3, 3)
 
     price_action = _price_action(closes, highs, lows, sma50_series)
     volume_stats = _volume_stats(volumes)
@@ -121,9 +139,19 @@ def build_report(
     rsi_block = _rsi_block(rsi_series)
     macd_block = _macd_block(macd_line, signal_line, hist_line)
     atr_block = _atr_block(atr_series, closes)
+    adx_block = _adx_block(adx_series, plus_di_series, minus_di_series)
+    bb_block = _bollinger_block(closes, bb_mid, bb_upper, bb_lower)
+    stoch_block = _stochastic_block(stoch_k, stoch_d)
 
     composite, verdict, conviction, headline = _score_and_verdict(
-        sym, timeframe, price_action, volume_stats, sma_block, rsi_block, macd_block
+        sym,
+        timeframe,
+        price_action,
+        volume_stats,
+        sma_block,
+        rsi_block,
+        macd_block,
+        adx_block,
     )
 
     narrative = _compose_narrative(
@@ -136,6 +164,9 @@ def build_report(
         rsi_block=rsi_block,
         macd_block=macd_block,
         atr_block=atr_block,
+        adx_block=adx_block,
+        bollinger_block=bb_block,
+        stoch_block=stoch_block,
         verdict=verdict,
         conviction=conviction,
     )
@@ -160,7 +191,22 @@ def build_report(
         sma200=sma200_series,
     )
 
-    return ReportOut(
+    # Lazy import avoids circular dependency (earnings.py imports overview_rows from this module).
+    from .earnings import earnings_within_window_days
+
+    ew = earnings_within_window_days(
+        sym,
+        meta,
+        window_days=SCREENER_EARNINGS_WINDOW_DAYS,
+    )
+    earnings_soon = (
+        EarningsSoonOut(earnings_date=ew[0], days_until=ew[1])
+        if ew is not None
+        else None
+    )
+
+    bull_pct, bear_pct = bull_bear_balance_percent(composite)
+    report = ReportOut(
         symbol=sym,
         name=meta["name"],
         sector=meta["sector"],
@@ -170,6 +216,9 @@ def build_report(
         verdict=verdict,
         conviction=round(conviction, 3),
         composite_score=round(composite, 3),
+        bull_pct=bull_pct,
+        bear_pct=bear_pct,
+        verdict_factors=[],
         headline=headline,
         narrative=narrative,
         price_action=price_action,
@@ -178,9 +227,16 @@ def build_report(
         rsi=rsi_block,
         macd=macd_block,
         atr=atr_block,
+        adx=adx_block,
+        bollinger=bb_block,
+        stochastic=stoch_block,
         market_context=market_ctx,
         options=options,
         chart=chart,
+        earnings_soon=earnings_soon,
+    )
+    return report.model_copy(
+        update={"verdict_factors": derive_factors_from_report(report)}
     )
 
 
@@ -358,6 +414,14 @@ def _sma_block(
     golden = _cross_recent(sma50_series, sma200_series, direction="up", lookback=20)
     death = _cross_recent(sma50_series, sma200_series, direction="down", lookback=20)
 
+    stack = (
+        "stacked bullish"
+        if stacked_bull
+        else "stacked bearish"
+        if stacked_bear
+        else "mixed"
+    )
+
     return IndicatorSMA(
         sma50=round(s50, 2) if s50 else None,
         sma200=round(s200, 2) if s200 else None,
@@ -367,6 +431,7 @@ def _sma_block(
         stacked_bearish=stacked_bear,
         golden_cross_recent=golden,
         death_cross_recent=death,
+        stack=stack,
     )
 
 
@@ -428,6 +493,12 @@ def _macd_block(
         else:
             direction = "flat"
 
+    state_parts: list[str] = [f"histogram {direction}"]
+    if bull_cross:
+        state_parts.append("bull cross")
+    elif bear_cross:
+        state_parts.append("bear cross")
+
     return IndicatorMACD(
         macd=round(m, 3) if m is not None else None,
         signal=round(s, 3) if s is not None else None,
@@ -435,7 +506,18 @@ def _macd_block(
         bullish_cross_recent=bull_cross,
         bearish_cross_recent=bear_cross,
         histogram_direction=direction,
+        state=" · ".join(state_parts),
     )
+
+
+def _atr_regime(pct: float) -> str:
+    if pct >= 6.0:
+        return "very high vs spot"
+    if pct >= 4.0:
+        return "elevated volatility"
+    if pct >= 2.0:
+        return "moderate volatility"
+    return "quiet vs spot"
 
 
 def _atr_block(
@@ -443,10 +525,157 @@ def _atr_block(
 ) -> IndicatorATR:
     v = atr_series[-1]
     if v is None:
-        return IndicatorATR(value=None, pct_of_price=None)
+        return IndicatorATR(value=None, pct_of_price=None, regime="unknown")
+    pct = round(v / closes[-1] * 100, 2)
     return IndicatorATR(
         value=round(v, 3),
-        pct_of_price=round(v / closes[-1] * 100, 2),
+        pct_of_price=pct,
+        regime=_atr_regime(float(pct)),
+    )
+
+
+StrengthT = Literal["unknown", "absent", "weak", "moderate", "strong"]
+
+
+def _adx_trend_strength(val: Optional[float]) -> StrengthT:
+    if val is None:
+        return "unknown"
+    if val < 20.0:
+        return "absent"
+    if val < 25.0:
+        return "weak"
+    if val < 40.0:
+        return "moderate"
+    return "strong"
+
+
+def _adx_directional_bias(
+    plus_di: Optional[float], minus_di: Optional[float]
+) -> Literal["bullish", "bearish", "neutral", "unknown"]:
+    if plus_di is None or minus_di is None:
+        return "unknown"
+    if plus_di > minus_di * 1.05:
+        return "bullish"
+    if minus_di > plus_di * 1.05:
+        return "bearish"
+    return "neutral"
+
+
+def _adx_block(
+    adx_series: list[Optional[float]],
+    plus_di_series: list[Optional[float]],
+    minus_di_series: list[Optional[float]],
+) -> IndicatorADX:
+    av = adx_series[-1] if adx_series else None
+    pd = plus_di_series[-1] if plus_di_series else None
+    md = minus_di_series[-1] if minus_di_series else None
+    return IndicatorADX(
+        value=round(av, 3) if av is not None else None,
+        plus_di=round(pd, 3) if pd is not None else None,
+        minus_di=round(md, 3) if md is not None else None,
+        trend_strength=_adx_trend_strength(av),
+        directional_bias=_adx_directional_bias(pd, md),
+    )
+
+
+BBPos = Literal[
+    "above_upper",
+    "near_upper",
+    "mid",
+    "near_lower",
+    "below_lower",
+    "unknown",
+]
+
+
+def _bb_position(pct_b: Optional[float]) -> BBPos:
+    if pct_b is None:
+        return "unknown"
+    if pct_b > 1.0:
+        return "above_upper"
+    if pct_b < 0.0:
+        return "below_lower"
+    if pct_b >= 0.8:
+        return "near_upper"
+    if pct_b <= 0.2:
+        return "near_lower"
+    return "mid"
+
+
+def _bollinger_block(
+    closes: list[float],
+    middle: list[Optional[float]],
+    upper: list[Optional[float]],
+    lower: list[Optional[float]],
+) -> IndicatorBollinger:
+    m = middle[-1] if middle else None
+    u = upper[-1] if upper else None
+    l = lower[-1] if lower else None
+    lc = closes[-1]
+    if m is None or u is None or l is None:
+        return IndicatorBollinger(
+            middle=None,
+            upper=None,
+            lower=None,
+            bandwidth_pct=None,
+            pct_b=None,
+            position="unknown",
+        )
+    bw = u - l
+    bandwidth_pct = round((bw / m) * 100.0, 3) if m else None
+    pct_b: Optional[float]
+    if bw > 1e-12:
+        pct_b = round((lc - l) / bw, 4)
+    else:
+        pct_b = 0.5
+    return IndicatorBollinger(
+        middle=round(m, 4),
+        upper=round(u, 4),
+        lower=round(l, 4),
+        bandwidth_pct=bandwidth_pct,
+        pct_b=pct_b,
+        position=_bb_position(pct_b),
+    )
+
+
+def _stochastic_block(
+    k_series: list[Optional[float]],
+    d_series: list[Optional[float]],
+) -> IndicatorStochastic:
+    k = k_series[-1] if k_series else None
+    d = d_series[-1] if d_series else None
+    if k is None or d is None:
+        return IndicatorStochastic(
+            pct_k=None,
+            pct_d=None,
+            state="unknown",
+            bullish_cross_recent=False,
+            bearish_cross_recent=False,
+        )
+
+    kv = round(float(k), 2)
+    dv = round(float(d), 2)
+
+    if kv >= 80:
+        state = "overbought"
+    elif kv <= 20:
+        state = "oversold"
+    elif kv >= 55 and kv > dv:
+        state = "bullish"
+    elif kv <= 45 and kv < dv:
+        state = "bearish"
+    else:
+        state = "neutral"
+
+    bull = _cross_recent(k_series, d_series, "up", lookback=5)
+    bear = _cross_recent(k_series, d_series, "down", lookback=5)
+
+    return IndicatorStochastic(
+        pct_k=kv,
+        pct_d=dv,
+        state=state,
+        bullish_cross_recent=bull,
+        bearish_cross_recent=bear,
     )
 
 
@@ -463,6 +692,7 @@ def _score_and_verdict(
     sb: IndicatorSMA,
     rsi_b: IndicatorRSI,
     macd_b: IndicatorMACD,
+    adx_b: IndicatorADX,
 ) -> tuple[float, str, float, str]:
     score = 0.0
     # Trend (weight 0.35)
@@ -509,6 +739,17 @@ def _score_and_verdict(
     if vs.unusual and vs.ratio > 1.5 and pa.change_pct > 0:
         score += 0.04
 
+    # Trend strength (+DI vs −DI) complements SMA / MACD momentum.
+    if adx_b.trend_strength in ("moderate", "strong"):
+        if pa.trend == "uptrend" and adx_b.directional_bias == "bullish":
+            score += 0.04
+        elif pa.trend == "downtrend" and adx_b.directional_bias == "bearish":
+            score += 0.04
+        elif pa.trend == "uptrend" and adx_b.directional_bias == "bearish":
+            score -= 0.03
+        elif pa.trend == "downtrend" and adx_b.directional_bias == "bullish":
+            score -= 0.03
+
     score = max(-1.0, min(1.0, score))
 
     if score >= 0.3:
@@ -519,7 +760,16 @@ def _score_and_verdict(
         verdict = "NEUTRAL"
 
     conviction = min(1.0, abs(score) * 1.25 + 0.25)
-    headline = _headline(symbol, timeframe, verdict, pa, sb, macd_b, rsi_b)
+    headline = _headline(
+        symbol,
+        timeframe,
+        verdict,
+        pa,
+        sb,
+        macd_b,
+        rsi_b,
+        adx_b,
+    )
     return score, verdict, conviction, headline
 
 
@@ -531,6 +781,7 @@ def _headline(
     sb: IndicatorSMA,
     macd_b: IndicatorMACD,
     rsi_b: IndicatorRSI,
+    adx_b: IndicatorADX,
 ) -> str:
     tf_word = {"1h": "intraday", "4h": "swing", "daily": "daily", "weekly": "weekly"}[timeframe]
     direction = {"BULLISH": "Bullish", "BEARISH": "Bearish", "NEUTRAL": "Range-bound"}[verdict]
@@ -545,6 +796,8 @@ def _headline(
         tags.append("fresh MACD bear cross")
     if rsi_b.state in ("overbought", "oversold"):
         tags.append(f"RSI {rsi_b.state}")
+    if adx_b.value is not None and adx_b.trend_strength in ("moderate", "strong"):
+        tags.append(f"ADX {adx_b.value:.0f}")
     tag_s = f" — {', '.join(tags)}" if tags else ""
     return f"{symbol} {tf_word} view: {direction}{tag_s}."
 
@@ -565,6 +818,9 @@ def _compose_narrative(
     rsi_block: IndicatorRSI,
     macd_block: IndicatorMACD,
     atr_block: IndicatorATR,
+    adx_block: IndicatorADX,
+    bollinger_block: IndicatorBollinger,
+    stoch_block: IndicatorStochastic,
     verdict: str,
     conviction: float,
 ) -> str:
@@ -658,10 +914,54 @@ def _compose_narrative(
             f"MACD {macd_block.macd:.3f} vs signal {macd_block.signal:.3f} "
             f"(histogram {macd_block.histogram_direction}{cross})"
         )
+    if stoch_block.pct_k is not None and stoch_block.pct_d is not None:
+        scross = ""
+        if stoch_block.bullish_cross_recent:
+            scross = ", fresh %K cross above %D"
+        elif stoch_block.bearish_cross_recent:
+            scross = ", fresh %K cross below %D"
+        mo.append(
+            f"Stochastic(14/3/3) %K/%D {stoch_block.pct_k:.1f}"
+            f"/{stoch_block.pct_d:.1f} — {stoch_block.state}{scross}"
+        )
     if mo:
         lines.append("Momentum: " + "; ".join(mo) + ".")
 
-    # Paragraph 6 — volatility / sizing.
+    # ADX — trend conviction (distinct from RSI momentum).
+    if adx_block.value is not None:
+        dpi = adx_block.plus_di
+        dmi = adx_block.minus_di
+        di_txt = ""
+        if dpi is not None and dmi is not None:
+            di_txt = f", +DI {dpi:.2f} vs −DI {dmi:.2f}"
+        lines.append(
+            f"ADX(14) reads {adx_block.value:.2f}{di_txt}"
+            f" — trend strength is {adx_block.trend_strength.replace('_', ' ')}, "
+            f"directional bias {adx_block.directional_bias} vs the last bar."
+        )
+
+    # Bollinger Bands — mean-reversion context vs band walk.
+    if (
+        bollinger_block.upper is not None
+        and bollinger_block.lower is not None
+        and bollinger_block.middle is not None
+    ):
+        pct_b_txt = ""
+        if bollinger_block.pct_b is not None:
+            pct_b_txt = f"Williams %B (position inside bands): {bollinger_block.pct_b:.2f}; "
+        lines.append(
+            f"Bollinger(20, 2σ) mid ${bollinger_block.middle:.2f}"
+            f", band ${bollinger_block.lower:.2f}"
+            f"–${bollinger_block.upper:.2f}"
+            + (
+                f" (bandwidth {bollinger_block.bandwidth_pct:.2f}% of mid)."
+                if bollinger_block.bandwidth_pct is not None
+                else "."
+            )
+            + f" {pct_b_txt}Price is labeled as {bollinger_block.position.replace('_', ' ')}."
+        )
+
+    # Paragraph — volatility / sizing (ATR).
     if atr_block.value is not None and atr_block.pct_of_price is not None:
         lines.append(
             f"ATR(14) is ${atr_block.value:.2f} ({atr_block.pct_of_price:.2f}% of spot) — "

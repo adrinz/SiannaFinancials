@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-from ..models import RecommendationOut  # re-use existing recommender payload
+from ..models import FactorOut, RecommendationOut  # re-use API payloads
 
 
 Verdict = Literal["BULLISH", "BEARISH", "NEUTRAL"]
@@ -20,6 +20,7 @@ class IndicatorSMA(BaseModel):
     stacked_bearish: bool
     golden_cross_recent: bool
     death_cross_recent: bool
+    stack: str  # e.g. stacked bullish | stacked bearish | mixed
 
 
 class IndicatorRSI(BaseModel):
@@ -34,11 +35,50 @@ class IndicatorMACD(BaseModel):
     bullish_cross_recent: bool
     bearish_cross_recent: bool
     histogram_direction: Literal["rising", "falling", "flat", "unknown"]
+    state: str  # one-line synopsis: hist slope + crosses
 
 
 class IndicatorATR(BaseModel):
     value: Optional[float]
     pct_of_price: Optional[float]
+    """Plain-English volatility regime from ATR % of price."""
+    regime: str
+
+
+class IndicatorADX(BaseModel):
+    value: Optional[float]
+    plus_di: Optional[float]
+    minus_di: Optional[float]
+    trend_strength: Literal["unknown", "absent", "weak", "moderate", "strong"]
+    directional_bias: Literal["bullish", "bearish", "neutral", "unknown"]
+
+
+class IndicatorBollinger(BaseModel):
+    middle: Optional[float]
+    upper: Optional[float]
+    lower: Optional[float]
+    bandwidth_pct: Optional[float]
+    pct_b: Optional[float]
+    position: Literal[
+        "above_upper",
+        "near_upper",
+        "mid",
+        "near_lower",
+        "below_lower",
+        "unknown",
+    ]
+
+
+class IndicatorStochastic(BaseModel):
+    """Full stochastic (14 / 3 / 3 defaults): smoothed %K and %D."""
+
+    pct_k: Optional[float]
+    pct_d: Optional[float]
+    state: Literal[
+        "overbought", "oversold", "bullish", "bearish", "neutral", "unknown"
+    ]
+    bullish_cross_recent: bool
+    bearish_cross_recent: bool
 
 
 class VolumeStats(BaseModel):
@@ -102,6 +142,13 @@ class ChartPayload(BaseModel):
     sma200: list[Optional[float]]
 
 
+class EarningsSoonOut(BaseModel):
+    """Next earnings within the configured screener window (same rule as Analyst highlight)."""
+
+    earnings_date: str  # ISO date YYYY-MM-DD
+    days_until: int
+
+
 class ReportOut(BaseModel):
     symbol: str
     name: str
@@ -112,6 +159,9 @@ class ReportOut(BaseModel):
     verdict: Verdict
     conviction: float  # 0..1
     composite_score: float  # -1..+1
+    bull_pct: float  # 0–100: maps composite −1..+1 to bull side of a bar
+    bear_pct: float  # 100 − bull_pct
+    verdict_factors: list[FactorOut]  # Trend / Momentum / Mean reversion / Volume
     headline: str  # one-line summary
     narrative: str  # multi-paragraph written analysis
 
@@ -121,10 +171,14 @@ class ReportOut(BaseModel):
     rsi: IndicatorRSI
     macd: IndicatorMACD
     atr: IndicatorATR
+    adx: IndicatorADX
+    bollinger: IndicatorBollinger
+    stochastic: IndicatorStochastic
 
     market_context: str
     options: OptionsSuggestion
     chart: ChartPayload
+    earnings_soon: Optional[EarningsSoonOut] = None
 
 
 class OverviewRow(BaseModel):

@@ -11,6 +11,8 @@ Conventions
 - Wilder's smoothing is used for RSI and ATR, matching TradingView / most
   charting packages.
 - MACD uses the standard 12 / 26 / 9 EMA recipe.
+- Stochastic defaults (14, 3, 3): raw %K over ``k_period`` highs/lows,
+  then SMA-smoothed %K and %D (standard "full stoch" convention).
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from typing import Optional
 
 __all__ = [
     "sma", "ema", "rsi", "macd", "atr", "rolling_std",
+    "adx", "bollinger", "stochastic",
     "pivots", "support_resistance",
 ]
 
@@ -152,6 +155,158 @@ def atr(
         assert prev is not None
         out[i] = (prev * (period - 1) + tr[i]) / period
     return out
+
+
+def bollinger(
+    closes: list[float],
+    period: int = 20,
+    num_std: float = 2.0,
+) -> tuple[
+    list[Optional[float]],
+    list[Optional[float]],
+    list[Optional[float]],
+]:
+    """Bollinger Bands: middle = SMA, upper/lower = middle ± ``num_std`` × σ.
+
+    σ uses the same trailing window as ``rolling_std`` (sample std).
+    """
+    mid = sma(closes, period)
+    std_s = rolling_std(closes, period)
+    upper: list[Optional[float]] = [None] * len(closes)
+    lower: list[Optional[float]] = [None] * len(closes)
+    for i in range(len(closes)):
+        m, s = mid[i], std_s[i]
+        if m is not None and s is not None:
+            upper[i] = m + num_std * s
+            lower[i] = m - num_std * s
+    return mid, upper, lower
+
+
+def stochastic(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    k_period: int = 14,
+    k_smooth: int = 3,
+    d_smooth: int = 3,
+) -> tuple[list[Optional[float]], list[Optional[float]]]:
+    """Stochastic %K and %D (oscillator 0–100).
+
+    Raw %K uses the highest high / lowest low over ``k_period`` bars and
+    compares the current close to that range. Fast %K applies a
+    ``k_smooth``-bar simple average of raw; %D is a ``d_smooth``-bar
+    average of %K (TradingView-style 14 / 3 / 3 when defaults are used).
+    """
+    n = len(closes)
+    if not (len(highs) == len(lows) == n):
+        raise ValueError("highs/lows/closes must share length")
+    if k_period < 1 or k_smooth < 1 or d_smooth < 1:
+        raise ValueError("periods must be >= 1")
+
+    k_line: list[Optional[float]] = [None] * n
+    d_line: list[Optional[float]] = [None] * n
+
+    first_raw = k_period - 1
+    if n <= first_raw:
+        return k_line, d_line
+
+    raw: list[Optional[float]] = [None] * n
+    for i in range(first_raw, n):
+        lo = min(lows[i - k_period + 1 : i + 1])
+        hi = max(highs[i - k_period + 1 : i + 1])
+        denom = hi - lo
+        raw[i] = 50.0 if denom <= 1e-15 else 100.0 * (closes[i] - lo) / denom
+
+    first_k_idx = k_period + k_smooth - 2
+    for i in range(first_k_idx, n):
+        w_raw = raw[i - k_smooth + 1 : i + 1]
+        k_line[i] = sum(float(x) for x in w_raw) / float(k_smooth)
+
+    first_d_idx = k_period + k_smooth + d_smooth - 3
+    for i in range(first_d_idx, n):
+        w_k = k_line[i - d_smooth + 1 : i + 1]
+        d_line[i] = sum(float(x) for x in w_k) / float(d_smooth)
+
+    return k_line, d_line
+
+
+def adx(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    period: int = 14,
+) -> tuple[
+    list[Optional[float]],
+    list[Optional[float]],
+    list[Optional[float]],
+]:
+    """Wilder ADX with +DI / −DI (Welles Wilder formulation).
+
+    Returns ``(adx, plus_di, minus_di)``, aligned bar-for-bar with ``closes``.
+    First finite values appear after roughly ``2 × period`` bars.
+    """
+    n = len(closes)
+    if not (len(highs) == len(lows) == n):
+        raise ValueError("highs/lows/closes must share length")
+    adx_out: list[Optional[float]] = [None] * n
+    pdi_out: list[Optional[float]] = [None] * n
+    mdi_out: list[Optional[float]] = [None] * n
+    # First finite ADX sits at index ``2*period - 1`` (0-based).
+    if n < 2 * period:
+        return adx_out, pdi_out, mdi_out
+
+    tr_raw = [0.0] * n
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    for i in range(1, n):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0.0
+        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0.0
+        tr_raw[i] = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+
+    cur_tr = sum(tr_raw[1 : period + 1]) / period
+    cur_pp = sum(plus_dm[1 : period + 1]) / period
+    cur_mm = sum(minus_dm[1 : period + 1]) / period
+    dx_hist: list[Optional[float]] = [None] * n
+
+    for i in range(period, n):
+        if i > period:
+            cur_tr = (cur_tr * (period - 1) + tr_raw[i]) / period
+            cur_pp = (cur_pp * (period - 1) + plus_dm[i]) / period
+            cur_mm = (cur_mm * (period - 1) + minus_dm[i]) / period
+
+        tr_d = cur_tr if cur_tr > 1e-15 else 1e-15
+        pdi_val = 100.0 * (cur_pp / tr_d)
+        mdi_val = 100.0 * (cur_mm / tr_d)
+        pdi_out[i] = pdi_val
+        mdi_out[i] = mdi_val
+        denom = pdi_val + mdi_val
+        dx_hist[i] = (
+            100.0 * abs(pdi_val - mdi_val) / denom if denom > 1e-15 else 0.0
+        )
+
+    # ADX is Wilder-smoothed DX; first finite ADX averages ``period`` DX samples.
+    first_adx_bar = 2 * period - 1
+    if first_adx_bar >= n:
+        return adx_out, pdi_out, mdi_out
+
+    avg_dx = sum(dx_hist[i] or 0.0 for i in range(period, first_adx_bar + 1)) / period
+    adx_out[first_adx_bar] = avg_dx
+
+    prev_adx = avg_dx
+    for k in range(first_adx_bar + 1, n):
+        dv = dx_hist[k]
+        if dv is None:
+            continue
+        prev_adx = (prev_adx * (period - 1) + dv) / period
+        adx_out[k] = prev_adx
+
+    return adx_out, pdi_out, mdi_out
 
 
 def rolling_std(values: list[float], period: int) -> list[Optional[float]]:

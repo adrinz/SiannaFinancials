@@ -3360,6 +3360,35 @@ async function loadAnalystReport(symbol) {
   syncAnalystChartToolbar();
 }
 
+function factorTone(score) {
+  if (score >= 0.25) return 'pos';
+  if (score <= -0.25) return 'neg';
+  return '';
+}
+
+/** API `verdict_factors` — why the model leans bull/bear (ticker detail parity). */
+function renderVerdictFactors(factors) {
+  if (!factors || !factors.length) return null;
+  return h(
+    'div',
+    { class: 'verdict-factors', role: 'region', 'aria-label': 'Factors behind the verdict' },
+    h('div', { class: 'verdict-factors-title muted' }, 'What’s driving the bias'),
+    h(
+      'ul',
+      { class: 'verdict-factors-list' },
+      ...factors.map((f) =>
+        h(
+          'li',
+          { class: 'verdict-factor' },
+          h('span', { class: 'vf-name' }, f.name),
+          h('span', { class: `vf-score mono ${factorTone(f.score)}` }, fmtScore(f.score)),
+          h('span', { class: 'vf-note muted' }, f.note),
+        )
+      ),
+    ),
+  );
+}
+
 function renderAnalystReport(r, tickerD) {
   const root = $('#analyst-report');
   root.innerHTML = '';
@@ -3378,15 +3407,99 @@ function renderAnalystReport(r, tickerD) {
           r.verdict, h('span', { class: 'muted', style: 'font-weight:500;letter-spacing:normal;' },
             ` · conviction ${Math.round(r.conviction * 100)}%`)
         ),
+        (() => {
+          const bp = r.bull_pct;
+          const brp = r.bear_pct;
+          const has = bp != null && brp != null;
+          return h(
+            'div',
+            {
+              class: 'verdict-balance-highlight',
+              role: 'group',
+              'aria-label': has
+                ? `Net directional balance: ${bp.toFixed(1)} percent bull, ${brp.toFixed(1)} percent bear`
+                : 'Net directional balance',
+            },
+            h(
+              'div',
+              { class: 'verdict-balance-highlight-head' },
+              h('span', { class: 'verdict-balance-highlight-icon', 'aria-hidden': 'true' }),
+              h('span', { class: 'verdict-balance-label' }, 'Net directional balance'),
+            ),
+            has
+              ? h(
+                'div',
+                { class: 'vb-meter-wrap' },
+                h(
+                  'div',
+                  { class: 'vb-meter-track', 'aria-hidden': 'true' },
+                  h('div', { class: 'vb-meter-bull', style: `width: ${bp}%` }),
+                  h('div', { class: 'vb-meter-bear', style: `width: ${brp}%` }),
+                ),
+                h(
+                  'div',
+                  { class: 'vb-num-row mono' },
+                  h(
+                    'div',
+                    { class: 'vb-num-stack' },
+                    h('span', { class: 'vb-num vb-num-bull tabular-nums' }, `${bp.toFixed(1)}%`),
+                    h('span', { class: 'vb-num-sub vb-num-sub-bull' }, 'bull'),
+                  ),
+                  h(
+                    'div',
+                    { class: 'vb-num-stack vb-num-stack-right' },
+                    h('span', { class: 'vb-num vb-num-bear tabular-nums' }, `${brp.toFixed(1)}%`),
+                    h('span', { class: 'vb-num-sub vb-num-sub-bear' }, 'bear'),
+                  ),
+                ),
+              )
+              : h('div', { class: 'vb-meter-fallback muted' }, '—'),
+            h(
+              'p',
+              { class: 'verdict-balance-hint' },
+              'Composite score −1…+1 mapped to a single bull vs bear gauge.',
+            ),
+          );
+        })(),
+        renderVerdictFactors(r.verdict_factors),
         h('div', { class: 'report-hero-headline' }, r.headline)
       ),
       h(
         'div',
         { class: 'report-hero-meta' },
-        heroMetaCard(fmtUSD(r.price_action.last), 'Last price'),
-        heroMetaCard(fmtPct(r.price_action.change_pct), 'Change', r.price_action.change_pct >= 0 ? 'pos' : 'neg'),
+        h(
+          'div',
+          { class: 'report-hero-meta-prices' },
+          h(
+            'div',
+            { class: 'report-hero-meta-price-row' },
+            heroMetaCard(fmtUSD(r.price_action.last), 'Last price'),
+            heroMetaCard(fmtPct(r.price_action.change_pct), 'Change',
+              r.price_action.change_pct >= 0 ? 'pos' : 'neg'),
+          ),
+          r.earnings_soon
+            ? h(
+              'div',
+              {
+                class: 'analyst-earnings-soon-banner',
+                role: 'status',
+                'aria-label': `Upcoming earnings in ${r.earnings_soon.days_until} days`,
+              },
+              h('span', { class: 'analyst-earnings-soon-icon', 'aria-hidden': 'true' }, '◆'),
+              h(
+                'span',
+                { class: 'analyst-earnings-soon-body mono' },
+                h('strong', {}, 'Earnings · '),
+                formatEarningsDate(
+                  r.earnings_soon.earnings_date,
+                  r.earnings_soon.days_until,
+                ),
+              ),
+            )
+            : null,
+        ),
         heroMetaCard(r.timeframe.toUpperCase(), 'Timeframe'),
-        heroMetaCard(r.source, 'Source')
+        heroMetaCard(r.source, 'Source'),
       )
     )
   );
@@ -3396,6 +3509,9 @@ function renderAnalystReport(r, tickerD) {
   const macd = r.macd;
   const atr = r.atr;
   const smaB = r.sma;
+  const adxR = r.adx;
+  const bbR = r.bollinger;
+  const st = r.stochastic;
   root.append(
     h(
       'div',
@@ -3406,6 +3522,19 @@ function renderAnalystReport(r, tickerD) {
         rsi.state.toUpperCase(),
         rsi.state === 'overbought' || rsi.state === 'bullish' ? 'pos' :
         rsi.state === 'oversold'  || rsi.state === 'bearish' ? 'neg' : ''
+      ),
+      indicatorCard(
+        'Stochastic (14/3/3)',
+        st.pct_k != null && st.pct_d != null
+          ? `${st.pct_k.toFixed(1)} / ${st.pct_d.toFixed(1)}`
+          : '—',
+        st.state !== 'unknown'
+          ? (st.state.toUpperCase() +
+              (st.bullish_cross_recent ? ' · K>D' : '') +
+              (st.bearish_cross_recent ? ' · K<D' : ''))
+          : '—',
+        st.state === 'oversold' || st.bullish_cross_recent ? 'pos' :
+        st.state === 'overbought' || st.bearish_cross_recent ? 'neg' : ''
       ),
       indicatorCard(
         'MACD (12/26/9)',
@@ -3430,8 +3559,28 @@ function renderAnalystReport(r, tickerD) {
       indicatorCard(
         'ATR (14)',
         atr.value != null ? `$${atr.value.toFixed(2)}` : '—',
-        atr.pct_of_price != null ? `${atr.pct_of_price.toFixed(2)}% of spot` : '—',
+        atr.pct_of_price != null
+          ? `${atr.pct_of_price.toFixed(2)}% of spot · ${atr.regime}`
+          : '—',
         (atr.pct_of_price ?? 0) > 4 ? 'warning' : ''
+      ),
+      indicatorCard(
+        'ADX (14)',
+        adxR.value != null ? adxR.value.toFixed(1) : '—',
+        adxR.plus_di != null && adxR.minus_di != null
+          ? `+DI ${adxR.plus_di.toFixed(2)} · −DI ${adxR.minus_di.toFixed(2)} · ${adxR.trend_strength}`
+          : (adxR.trend_strength || '—'),
+        adxR.directional_bias === 'bullish' ? 'pos' :
+        adxR.directional_bias === 'bearish' ? 'neg' : ''
+      ),
+      indicatorCard(
+        'Bollinger (20, 2σ)',
+        bbR.middle != null ? fmtUSD(bbR.middle) : '—',
+        bbR.upper != null && bbR.lower != null
+          ? `${fmtUSD(bbR.lower)} – ${fmtUSD(bbR.upper)} · %B ${bbR.pct_b != null ? bbR.pct_b.toFixed(2) : '—'} · ${bbR.position}`
+          : '—',
+        bbR.position === 'above_upper' ? 'warning' :
+        bbR.position === 'below_lower' ? 'neg' : ''
       )
     )
   );
@@ -4914,6 +5063,11 @@ function renderSearchResult(r, tickerD) {
       techBox('RSI(14)',
         report.rsi.value != null ? report.rsi.value.toFixed(0) : '—',
         report.rsi.state),
+      techBox('Stoch(14/3/3)',
+        report.stochastic.pct_k != null && report.stochastic.pct_d != null
+          ? `${report.stochastic.pct_k.toFixed(0)}/${report.stochastic.pct_d.toFixed(0)}`
+          : '—',
+        report.stochastic.state || ''),
       techBox('SMA 50 / 200',
         (report.sma.sma50 != null ? fmtUSD(report.sma.sma50) : '—') +
         ' / ' +
@@ -4922,11 +5076,23 @@ function renderSearchResult(r, tickerD) {
       techBox('MACD hist',
         report.macd.histogram != null ? report.macd.histogram.toFixed(3) : '—',
         report.macd.state),
+      techBox('ADX(14)',
+        report.adx.value != null ? report.adx.value.toFixed(0) : '—',
+        report.adx.directional_bias || ''),
+      techBox('BB(20)',
+        report.bollinger.pct_b != null ? report.bollinger.pct_b.toFixed(2) : '—',
+        report.bollinger.position),
       techBox('ATR(14)',
         report.atr.value != null ? report.atr.value.toFixed(2) : '—',
         report.atr.regime),
+      techBox('Net bias',
+        report.bull_pct != null && report.bear_pct != null
+          ? `${report.bull_pct.toFixed(0)}% bull / ${report.bear_pct.toFixed(0)}% bear`
+          : '—',
+        'from composite −1…+1',
+        'tech-box--net-bias'),
       techBox('Verdict', report.verdict,
-        `composite ${fmtScore(report.composite_score || 0)}`)
+        `composite ${fmtScore(report.composite_score || 0)} · conv ${Math.round((report.conviction || 0) * 100)}%`)
     )
   );
 
@@ -4958,8 +5124,8 @@ function recTile(label, value, sub, extra = '') {
   );
 }
 
-function techBox(label, value, sub = '') {
-  return h('div', { class: 'tech-box' },
+function techBox(label, value, sub = '', extraClass = '') {
+  return h('div', { class: 'tech-box' + (extraClass ? ` ${extraClass}` : '') },
     h('div', { class: 'tech-label muted' }, label),
     h('div', { class: 'tech-value mono' }, value),
     sub ? h('div', { class: 'tech-sub muted' }, sub) : null

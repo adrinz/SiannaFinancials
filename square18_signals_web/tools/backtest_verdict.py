@@ -54,13 +54,20 @@ if str(_WEB_ROOT) not in sys.path:
 
 from app.analyst.constants import TICKERS, Timeframe  # noqa: E402
 from app.analyst.data import get_ohlcv  # noqa: E402
+from app.analyst.indicators import adx as _adx  # noqa: E402
 from app.analyst.indicators import atr as _atr  # noqa: E402
 from app.analyst.indicators import macd as _macd  # noqa: E402
 from app.analyst.indicators import rsi as _rsi  # noqa: E402
 from app.analyst.indicators import sma  # noqa: E402
 from app.analyst.report import (  # noqa: E402
-    _atr_block, _macd_block, _price_action, _rsi_block, _score_and_verdict,
-    _sma_block, _volume_stats,
+    _adx_block,
+    _atr_block,
+    _macd_block,
+    _price_action,
+    _rsi_block,
+    _score_and_verdict,
+    _sma_block,
+    _volume_stats,
 )
 
 
@@ -115,6 +122,7 @@ def _score_window(closes, highs, lows, volumes, sym, timeframe) -> tuple[str, fl
     rsi_series = _rsi(closes, 14)
     macd_line, signal_line, hist_line = _macd(closes)
     atr_series = _atr(highs, lows, closes, 14)
+    adx_series, plus_di_series, minus_di_series = _adx(highs, lows, closes, 14)
 
     pa = _price_action(closes, highs, lows, sma50)
     vs = _volume_stats(volumes)
@@ -122,9 +130,10 @@ def _score_window(closes, highs, lows, volumes, sym, timeframe) -> tuple[str, fl
     rsi_b = _rsi_block(rsi_series)
     macd_b = _macd_block(macd_line, signal_line, hist_line)
     _atr_block(atr_series, closes)  # not used directly in _score_and_verdict
+    adx_b = _adx_block(adx_series, plus_di_series, minus_di_series)
 
     score, verdict, conviction, _headline = _score_and_verdict(
-        sym, timeframe, pa, vs, sb, rsi_b, macd_b
+        sym, timeframe, pa, vs, sb, rsi_b, macd_b, adx_b
     )
     return verdict, conviction, score
 

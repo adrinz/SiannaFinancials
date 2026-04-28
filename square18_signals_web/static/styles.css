@@ -1310,6 +1310,75 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
   color: var(--text-muted);
 }
 
+/* Analyst report: stacked Last / Change + upcoming earnings ribbon */
+.report-hero-meta-prices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.report-hero-meta-price-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.analyst-earnings-soon-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-top: 2px;
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(234, 179, 72, 0.55);
+  background: linear-gradient(
+    135deg,
+    rgba(234, 179, 72, 0.18),
+    rgba(251, 191, 36, 0.08)
+  );
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.2),
+    0 4px 16px rgba(234, 179, 72, 0.12);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  animation: analyst-earnings-soft-pulse 2.8s ease-in-out infinite;
+}
+
+.analyst-earnings-soon-banner strong {
+  color: rgba(251, 191, 36, 0.98);
+  font-weight: 700;
+}
+
+.analyst-earnings-soon-icon {
+  flex-shrink: 0;
+  color: rgba(251, 191, 36, 0.95);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.analyst-earnings-soon-body {
+  text-align: right;
+}
+
+@keyframes analyst-earnings-soft-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.2),
+      0 4px 16px rgba(234, 179, 72, 0.12);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(234, 179, 72, 0.45),
+      0 6px 22px rgba(234, 179, 72, 0.28);
+  }
+}
+
 .verdict-badge {
   display: inline-flex;
   align-items: center;
@@ -1324,6 +1393,180 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
 .verdict-badge.BULLISH { color: var(--success); background: var(--success-soft); border: 1px solid color-mix(in srgb, var(--success) 45%, transparent); }
 .verdict-badge.BEARISH { color: var(--danger);  background: var(--danger-soft);  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); }
 .verdict-badge.NEUTRAL { color: var(--text-muted); background: var(--bg-raised); border: 1px solid var(--stroke); }
+
+/* Analyst hero — net directional balance (high-visibility callout) */
+.verdict-balance-highlight {
+  margin-top: 14px;
+  padding: 14px 18px 14px 16px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--stroke));
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--accent) 12%, var(--bg-elev)) 0%,
+      var(--bg-elev) 45%,
+      color-mix(in srgb, var(--success) 8%, var(--bg-elev)) 100%
+    );
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+    0 6px 28px rgba(0, 0, 0, 0.22),
+    0 0 40px color-mix(in srgb, var(--accent) 15%, transparent);
+  position: relative;
+  overflow: hidden;
+}
+.verdict-balance-highlight::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(
+    180deg,
+    var(--success) 0%,
+    var(--accent) 50%,
+    var(--danger) 100%
+  );
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.verdict-balance-highlight-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.verdict-balance-highlight-icon {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 2px;
+  background: radial-gradient(
+    circle at 30% 30%,
+    #fff 0%,
+    var(--accent) 45%,
+    color-mix(in srgb, var(--accent) 40%, #1a1f2e) 100%
+  );
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 0 14px color-mix(in srgb, var(--accent) 50%, transparent);
+  animation: verdict-balance-pulse 2.4s ease-in-out infinite;
+}
+@keyframes verdict-balance-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 40%, transparent); }
+  50% { opacity: 0.92; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 22px color-mix(in srgb, var(--accent) 55%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .verdict-balance-highlight-icon { animation: none; }
+}
+.verdict-balance-highlight .verdict-balance-label {
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.vb-meter-wrap { padding-left: 4px; }
+.vb-meter-track {
+  display: flex;
+  height: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  outline: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25) inset;
+  margin-bottom: 12px;
+}
+.vb-meter-bull {
+  min-width: 3px;
+  height: 100%;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--success) 95%, #fff),
+    color-mix(in srgb, var(--success) 75%, #0a2620)
+  );
+  transition: width 0.35s ease;
+}
+.vb-meter-bear {
+  min-width: 3px;
+  height: 100%;
+  flex-shrink: 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--danger) 88%, #fff),
+    color-mix(in srgb, var(--danger) 72%, #2a1518)
+  );
+}
+.vb-num-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-end;
+}
+.vb-num-stack { display: flex; flex-direction: column; gap: 2px; }
+.vb-num-stack-right { align-items: flex-end; text-align: right; }
+.vb-num {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.vb-num-bull { color: var(--success); text-shadow: 0 0 24px color-mix(in srgb, var(--success) 55%, transparent); }
+.vb-num-bear { color: var(--danger); text-shadow: 0 0 24px color-mix(in srgb, var(--danger) 50%, transparent); }
+.vb-num-sub {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.vb-num-sub-bull { color: color-mix(in srgb, var(--success) 85%, var(--text-muted)); }
+.vb-num-sub-bear { color: color-mix(in srgb, var(--danger) 85%, var(--text-muted)); }
+.vb-meter-fallback { padding: 8px 0; font-size: 13px; }
+.verdict-balance-hint {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--stroke) 80%, transparent);
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.vf-score.pos { color: var(--success); }
+.vf-score.neg { color: var(--danger); }
+
+.verdict-factors {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--stroke);
+  background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
+}
+.verdict-factors-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.verdict-factors-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.verdict-factor {
+  display: grid;
+  grid-template-columns: minmax(100px, 28%) auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--stroke);
+}
+.verdict-factor:last-child { border-bottom: none; }
+.vf-name { font-weight: 600; color: var(--text); }
+.vf-score { font-variant-numeric: tabular-nums; min-width: 3.5rem; }
+.vf-note { font-size: 11px; line-height: 1.35; color: var(--text-muted); }
 
 .report-narrative {
   background: var(--bg-elev);
@@ -2163,6 +2406,24 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
   font-size: 11px;
   margin-top: 2px;
   text-transform: capitalize;
+}
+.tech-box--net-bias {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--stroke));
+  background: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--accent) 14%, var(--bg-elev)),
+    var(--bg-elev) 55%,
+    color-mix(in srgb, var(--success) 7%, var(--bg-elev)) 100%
+  );
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+}
+.tech-box--net-bias .tech-value {
+  font-size: 17px;
+  background: linear-gradient(90deg, var(--success), var(--accent) 52%, var(--danger));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: saturate(1.15);
 }
 
 @media (max-width: 900px) {

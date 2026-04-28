@@ -30,6 +30,7 @@ from square18_signals import (
 )
 
 from .analyst.constants import DEFAULT_IV, TICKER_MAP, Timeframe
+from .analyst.factors import derive_factors_from_report
 from .analyst.data import get_ohlcv, get_ohlcv_1d_intraday, OHLCV
 from .analyst.market import news_for_ticker
 from .analyst.models import OverviewRow, ReportOut
@@ -448,6 +449,11 @@ def _technical_bullets_from_report(report: ReportOut) -> list[str]:
     r = report.rsi
     if r.value is not None:
         out.append(f"RSI (14): {r.value:.1f} — {r.state}")
+    st = report.stochastic
+    if st.pct_k is not None and st.pct_d is not None:
+        out.append(
+            f"Stochastic (14/3/3): %K={st.pct_k:.1f}, %D={st.pct_d:.1f} — {st.state}"
+        )
     m = report.macd
     if m.histogram is not None:
         out.append(f"MACD: histogram {m.histogram:+.3f}, slope {m.histogram_direction}")
@@ -456,6 +462,17 @@ def _technical_bullets_from_report(report: ReportOut) -> list[str]:
     if report.atr.value is not None and report.atr.pct_of_price is not None:
         out.append(
             f"ATR (14): ${report.atr.value:.2f} (~{report.atr.pct_of_price:.2f}% of price)"
+        )
+    ad = report.adx
+    if ad.value is not None:
+        out.append(
+            f"ADX (14): {ad.value:.1f} (+/− DI bias {ad.directional_bias}; "
+            f"trend strength {ad.trend_strength})"
+        )
+    bb = report.bollinger
+    if bb.middle is not None and bb.pct_b is not None:
+        out.append(
+            f"Bollinger (20): %B≈{bb.pct_b:.2f}, position={bb.position}"
         )
     v = report.volume
     out.append(
@@ -550,7 +567,7 @@ def ticker_detail(
     except Exception:
         recs = []
 
-    factors = _derive_factors(report)
+    factors = derive_factors_from_report(report)
 
     pr = price_range.lower().strip()
     if pr not in _ALLOWED_CHART_RANGES:
@@ -777,110 +794,6 @@ def _build_ticker_chart_context(
         signal=row.signal,
         lines=lines,
     )
-
-
-def _derive_factors(report: ReportOut) -> list[FactorOut]:
-    """Turn an analyst report into the 4 factor scores the UI expects.
-
-    Scores are in [-1, +1]. We expose the deterministic components so the
-    user can see *why* the verdict is what it is, rather than a black box.
-    """
-    # Trend: SMA stack + price action direction.
-    sma = report.sma
-    pa_trend = report.price_action.trend
-    trend_score = 0.0
-    trend_notes: list[str] = []
-    if sma.stacked_bullish:
-        trend_score += 0.6
-        trend_notes.append("50d above 200d")
-    if sma.stacked_bearish:
-        trend_score -= 0.6
-        trend_notes.append("50d below 200d")
-    if sma.golden_cross_recent:
-        trend_score += 0.2
-        trend_notes.append("recent golden cross")
-    if sma.death_cross_recent:
-        trend_score -= 0.2
-        trend_notes.append("recent death cross")
-    if pa_trend == "uptrend":
-        trend_score += 0.2
-    elif pa_trend == "downtrend":
-        trend_score -= 0.2
-    trend_score = max(-1.0, min(1.0, trend_score))
-    trend_note = ", ".join(trend_notes) if trend_notes else f"price action: {pa_trend}"
-
-    # Momentum: RSI posture + MACD state.
-    rsi = report.rsi
-    macd = report.macd
-    mom = 0.0
-    mom_notes: list[str] = []
-    if rsi.state == "bullish":
-        mom += 0.4
-        mom_notes.append(f"RSI {rsi.value:.0f}")
-    elif rsi.state == "bearish":
-        mom -= 0.4
-        mom_notes.append(f"RSI {rsi.value:.0f}")
-    elif rsi.state == "overbought":
-        mom += 0.1
-        mom_notes.append(f"RSI overbought ({rsi.value:.0f})")
-    elif rsi.state == "oversold":
-        mom -= 0.1
-        mom_notes.append(f"RSI oversold ({rsi.value:.0f})")
-    if macd.histogram_direction == "rising":
-        mom += 0.3
-        mom_notes.append("MACD hist rising")
-    elif macd.histogram_direction == "falling":
-        mom -= 0.3
-        mom_notes.append("MACD hist falling")
-    if macd.bullish_cross_recent:
-        mom += 0.2
-        mom_notes.append("bull cross")
-    if macd.bearish_cross_recent:
-        mom -= 0.2
-        mom_notes.append("bear cross")
-    mom = max(-1.0, min(1.0, mom))
-    mom_note = ", ".join(mom_notes) if mom_notes else "quiet"
-
-    # Mean reversion: inverse of stretch vs 50d SMA.
-    mr = 0.0
-    if sma.price_vs_sma50_pct is not None:
-        stretch = sma.price_vs_sma50_pct
-        if stretch > 8:
-            mr -= min(0.8, (stretch - 8) / 10)
-            mr_note = f"stretched +{stretch:.1f}% vs 50d"
-        elif stretch < -8:
-            mr += min(0.8, (-stretch - 8) / 10)
-            mr_note = f"stretched {stretch:.1f}% vs 50d"
-        else:
-            mr_note = f"{stretch:+.1f}% vs 50d (in band)"
-    else:
-        mr_note = "no SMA yet"
-    mr = max(-1.0, min(1.0, mr))
-
-    # Volume flow.
-    v = report.volume
-    if v.ratio >= 1.5 and report.price_action.change_pct > 0:
-        vol_score = 0.6
-        vol_note = f"buyers in ({v.ratio:.1f}× avg)"
-    elif v.ratio >= 1.5 and report.price_action.change_pct < 0:
-        vol_score = -0.6
-        vol_note = f"sellers in ({v.ratio:.1f}× avg)"
-    elif v.ratio <= 0.6:
-        vol_score = -0.1
-        vol_note = f"quiet ({v.ratio:.1f}× avg)"
-    elif v.trending_up:
-        vol_score = 0.2
-        vol_note = f"volume trending up ({v.ratio:.1f}× avg)"
-    else:
-        vol_score = 0.0
-        vol_note = f"normal ({v.ratio:.1f}× avg)"
-
-    return [
-        FactorOut(name="Trend",          score=round(trend_score, 2), note=trend_note),
-        FactorOut(name="Momentum",       score=round(mom, 2),         note=mom_note),
-        FactorOut(name="Mean reversion", score=round(mr, 2),          note=mr_note),
-        FactorOut(name="Volume flow",    score=round(vol_score, 2),   note=vol_note),
-    ]
 
 
 __all__ = [

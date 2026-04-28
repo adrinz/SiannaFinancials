@@ -35,12 +35,21 @@ python3 -m pytest square18_signals_web/tests/test_market_news.py -q
 python3 -m pytest square18_signals_web/tests/test_screener.py -q
 ```
 
-Optional browser E2E:
+Optional browser E2E (Playwright Chromium; complements API E2E in `test_e2e_app.py`).
+Install Python deps plus the browser binaries once:
 
 ```bash
+pip3 install -r square18_signals_web/requirements.txt   # includes `playwright`
 python3 -m playwright install chromium
-python3 -m pytest square18_signals_web/tests/test_e2e_ui_playwright.py -q
 ```
+
+Run browser tests (`PYTHONPATH` must include `square18_signals/src`):
+
+```bash
+cd square18_signals_web && PYTHONPATH="../square18_signals/src:$PWD" python3 -m pytest tests/test_e2e_ui_playwright.py -v
+```
+
+The suite drives a real Chromium instance against a temporary localhost server (`tests/test_e2e_ui_playwright.py`).
 
 ## High-Impact Files
 

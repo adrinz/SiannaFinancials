@@ -12,13 +12,17 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT.parent / "square18_signals" / "src"))
 
+from app.analyst.factors import bull_bear_balance_percent  # noqa: E402
 from app.analyst.indicators import (  # noqa: E402
+    adx,
     atr,
+    bollinger,
     ema,
     macd,
     pivots,
     rsi,
     sma,
+    stochastic,
     support_resistance,
 )
 
@@ -26,6 +30,13 @@ from app.analyst.indicators import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # SMA / EMA
 # ---------------------------------------------------------------------------
+
+
+def test_bull_bear_balance_maps_composite_minus1_to_plus1():
+    assert bull_bear_balance_percent(-1.0) == (0.0, 100.0)
+    assert bull_bear_balance_percent(1.0) == (100.0, 0.0)
+    b, br = bull_bear_balance_percent(0.0)
+    assert b == pytest.approx(50.0) and br == pytest.approx(50.0)
 
 
 def test_sma_basic():
@@ -142,6 +153,36 @@ def test_pivots_find_obvious_peaks():
     sh, sl = pivots(highs, lows, lookback=3)
     assert 10 in sh
     assert 10 in sl  # symmetric by construction
+
+
+def test_bollinger_mid_is_sma20():
+    closes = [float(100 + (-1) ** i * 0.5) for i in range(80)]
+    mid, up, lo = bollinger(closes, 20, 2.0)
+    assert mid[-1] is not None and up[-1] is not None and lo[-1] is not None
+    assert up[-1] > mid[-1] > lo[-1]
+
+
+def test_adx_positive_on_trend():
+    n = 160
+    highs = [100.0 + i * 0.2 for i in range(n)]
+    lows = [99.0 + i * 0.2 for i in range(n)]
+    closes = [99.5 + i * 0.2 for i in range(n)]
+    a, pdi, mdi = adx(highs, lows, closes, 14)
+    assert a[-1] is not None and pdi[-1] is not None and mdi[-1] is not None
+    assert pdi[-1] > mdi[-1]
+    assert a[-1] > 20.0
+
+
+def test_stochastic_k_bounded_and_uptrend_high_k():
+    n = 120
+    lows = [100.0 + i * 0.1 * 1.005 for i in range(n)]
+    highs = [101.5 + i * 0.1 * 1.005 for i in range(n)]
+    closes = [100.5 + i * 0.1 * 1.005 for i in range(n)]
+    k, d = stochastic(highs, lows, closes, 14, 3, 3)
+    assert k[-1] is not None and d[-1] is not None
+    assert 0.0 <= k[-1] <= 100.0
+    assert 0.0 <= d[-1] <= 100.0
+    assert k[-1] > 60.0
 
 
 def test_support_resistance_clusters_dedupe():

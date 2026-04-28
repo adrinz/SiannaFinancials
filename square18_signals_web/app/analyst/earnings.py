@@ -297,3 +297,28 @@ def reset_cache() -> None:
     _cache["ts"] = 0.0
     _cache["source"] = ""
     reset_overview_rows_cache()
+
+
+def earnings_within_window_days(
+    symbol: str,
+    meta: dict,
+    *,
+    window_days: int,
+) -> tuple[str, int] | None:
+    """Next earnings `(iso_date, days_until)` via yfinance if within ``window_days``.
+
+    Aligns with the screener "upcoming earnings" window — used for Analyst tab UI.
+    """
+    try:
+        import yfinance as yf  # type: ignore
+    except Exception:
+        return None
+    yf_sym = (meta.get("yfinance_symbol") or symbol).upper()
+    d = _next_earnings_date(yf, yf_sym)
+    if d is None:
+        return None
+    today = date.today()
+    days_until = (d - today).days
+    if days_until < 0 or days_until > window_days:
+        return None
+    return (d.isoformat(), days_until)

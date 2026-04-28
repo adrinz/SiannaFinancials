@@ -9,6 +9,16 @@ Playwright:
 
 The tests run against a temporary uvicorn process on localhost to mirror
 production behavior as closely as possible.
+
+Setup (once per machine)::
+
+    pip install -r requirements.txt   # installs playwright Python package
+    python -m playwright install chromium
+
+Run::
+
+    cd square18_signals_web
+    PYTHONPATH="../square18_signals/src:$PWD" python3 -m pytest tests/test_e2e_ui_playwright.py -v
 """
 from __future__ import annotations
 
@@ -137,8 +147,13 @@ def test_dashboard_manual_refresh_button_works(page):
 
 
 def test_ticker_detail_open_from_dashboard_row(page):
-    page.wait_for_selector("#screen-tbody tr")
-    page.click("#screen-tbody tr:first-child")
+    # Wait for real data rows (not the initial "Loading…" placeholder).
+    page.wait_for_function(
+        "() => !!document.querySelector('#screen-tbody tr td.sym')",
+        timeout=45_000,
+    )
+    # Prefer the explicit button so the click is not lost on wide table layouts.
+    page.locator("#screen-tbody tr").first.locator("button").click()
     page.wait_for_selector('.view[data-view="detail"]:not(.hidden)')
     page.wait_for_selector("#detail-hero .hero-symbol")
     page.wait_for_selector("#symbol-chips .chip")
@@ -205,4 +220,48 @@ def test_analyst_signal_report_menu_and_markdown_download(page):
     dl = dl_info.value
     # Server sets this prefix in Content-Disposition.
     assert "sianna_signal_report_" in dl.suggested_filename
+
+
+def test_analyst_report_indicator_grid_renders(page):
+    _click_tab(page, "analyst")
+    page.wait_for_selector("#analyst-report")
+    page.wait_for_function(
+        "() => { const el=document.querySelector('#analyst-report'); "
+        "return !!el && !/Select a ticker|Loading/.test(el.textContent || ''); }"
+    )
+    page.wait_for_selector("#analyst-report .indicator-grid")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#analyst-report .indicator-card').length >= 3"
+    )
+
+
+def test_screener_tab_loads_movers_sections(page):
+    _click_tab(page, "screener")
+    page.wait_for_selector("#screener-jumps", timeout=35_000)
+    page.wait_for_selector("#screener-dips")
+    page.wait_for_selector("#screener-earnings")
+
+
+def test_etf_signals_tab_loads_table(page):
+    _click_tab(page, "etf")
+    page.wait_for_selector("#etf-signals-table", timeout=35_000)
+    page.wait_for_function(
+        "() => { "
+        "const tb = document.querySelector('#etf-signals-tbody'); "
+        "return !!tb && tb.querySelectorAll('tr').length >= 1; }"
+    )
+
+
+def test_copy_trade_tab_loads_creator_select_and_signals(page):
+    _click_tab(page, "copy-trade")
+    page.wait_for_selector("#copytrade-select", timeout=35_000)
+    # <option> nodes inside <select> may not satisfy :visible in Playwright; assert via DOM.
+    page.wait_for_function(
+        "() => { "
+        "const s = document.querySelector('#copytrade-select'); "
+        "return !!(s && s.options && s.options.length >= 1); }",
+        timeout=45_000,
+    )
+    page.wait_for_selector("#copytrade-holdings-tbody")
+    page.wait_for_selector("#copytrade-signals")
 

@@ -230,8 +230,8 @@ rather than speculate.
 Structure the output as:
 Paragraph 1 — price action, trend, and what structure implies for the \
 recommended contract.
-Paragraph 2 — indicator alignment (SMA stack, RSI state, MACD posture, \
-ATR regime) and volume confirmation/divergence.
+Paragraph 2 — indicator alignment (SMA stack, RSI, MACD, Stochastic %K/%D, \
+ADX / +DI vs −DI, Bollinger band position, ATR) and volume confirmation/divergence.
 Paragraph 3 — the specific trade: contract, strike, expiry, estimated \
 cost, target, stop, and risk/reward from <facts>.
 Paragraph 4 (optional, only if meaningful) — risks / thesis \
