@@ -251,17 +251,3 @@ def test_etf_signals_tab_loads_table(page):
         "return !!tb && tb.querySelectorAll('tr').length >= 1; }"
     )
 
-
-def test_copy_trade_tab_loads_creator_select_and_signals(page):
-    _click_tab(page, "copy-trade")
-    page.wait_for_selector("#copytrade-select", timeout=35_000)
-    # <option> nodes inside <select> may not satisfy :visible in Playwright; assert via DOM.
-    page.wait_for_function(
-        "() => { "
-        "const s = document.querySelector('#copytrade-select'); "
-        "return !!(s && s.options && s.options.length >= 1); }",
-        timeout=45_000,
-    )
-    page.wait_for_selector("#copytrade-holdings-tbody")
-    page.wait_for_selector("#copytrade-signals")
-

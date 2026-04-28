@@ -12,6 +12,7 @@ close + model pricing.
 """
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
@@ -22,8 +23,9 @@ from .constants import TICKER_MAP
 _YF_TIMEOUT = 12.0
 _SPOT_CACHE: dict[str, tuple[float, float]] = {}
 _OPT_CACHE: dict[str, tuple[float, float]] = {}
-_SPOT_TTL_SEC = 55.0
-_OPT_TTL_SEC = 90.0
+# Tunable when not using bypass — lower defaults so Cost/contract is less stale.
+_SPOT_TTL_SEC = float(os.environ.get("SQUARE18_SPOT_QUOTE_TTL_SEC", "30"))
+_OPT_TTL_SEC = float(os.environ.get("SQUARE18_OPTIONS_QUOTE_TTL_SEC", "30"))
 
 
 def _mapped_symbol(sym: str) -> str:
@@ -39,13 +41,18 @@ def _run_yf(fn, timeout: float = _YF_TIMEOUT) -> Any:
             return None
 
 
-def yf_last_price(sym: str) -> Optional[float]:
-    """Latest tradable last from Yahoo (fast_info / history), or None."""
+def yf_last_price(sym: str, *, bypass_cache: bool = False) -> Optional[float]:
+    """Latest tradable last from Yahoo (fast_info / history), or None.
+
+    Set ``bypass_cache=True`` to force a fresh pull (used for Analyst trade
+    tickets so spot aligns with live option mids).
+    """
     u = sym.upper()
     now = time.time()
-    t_old = _SPOT_CACHE.get(u)
-    if t_old and now - t_old[0] < _SPOT_TTL_SEC:
-        return t_old[1]
+    if not bypass_cache:
+        t_old = _SPOT_CACHE.get(u)
+        if t_old and now - t_old[0] < _SPOT_TTL_SEC:
+            return t_old[1]
     yfs = _mapped_symbol(u)
 
     def _pull() -> Optional[float]:
@@ -82,19 +89,27 @@ def yf_option_mid_per_share(
     strike: float,
     is_call: bool,
     expiry: date,
+    *,
+    bypass_cache: bool = False,
 ) -> Optional[float]:
     """(bid+ask)/2 or last for the option row nearest *strike*; or None.
 
     *expiry* is the ticket’s target date; the **nearest** listed chain
     expiry to that date is used (same weeklies/dailies as Robinhood’s list).
+
+    Yahoo’s free chain is typically **delayed** (~15 min). ``bypass_cache``
+    skips only **our** in-process cache so each Analyst report recomputes
+    from the latest yfinance snapshot for that HTTP request — not the same as
+    a paid real-time NBBO tape.
     """
     u = sym.upper()
     yfs = _mapped_symbol(u)
     cache_key = f"{u}|{round(float(strike), 4):.4f}|{int(is_call)}|{expiry.isoformat()}"
     now = time.time()
-    t_old = _OPT_CACHE.get(cache_key)
-    if t_old and now - t_old[0] < _OPT_TTL_SEC:
-        return t_old[1]
+    if not bypass_cache:
+        t_old = _OPT_CACHE.get(cache_key)
+        if t_old and now - t_old[0] < _OPT_TTL_SEC:
+            return t_old[1]
 
     def _pull() -> Optional[float]:
         import yfinance as yf  # type: ignore

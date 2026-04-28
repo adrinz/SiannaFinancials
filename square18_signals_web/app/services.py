@@ -494,7 +494,7 @@ def ticker_detail(
         return None
 
     try:
-        report = build_report(sym, timeframe)
+        report = build_report(sym, timeframe, fresh_quotes=True)
     except Exception:
         return None
 

@@ -119,11 +119,25 @@ def etf_signals(timeframe: str = "daily") -> list[OverviewRow]:
     response_model=ReportOut,
     tags=["analyst"],
 )
-def analyst_report(symbol: str, timeframe: str = "daily") -> ReportOut:
+def analyst_report(
+    symbol: str,
+    timeframe: str = "daily",
+    fresh_quotes: int = Query(
+        1,
+        ge=0,
+        le=1,
+        description=(
+            "1 = pull live Yahoo spot + option chain mids for this request (bypass in-app quote cache); "
+            "0 = reuse short TTL cache where available (lighter on Yahoo)."
+        ),
+    ),
+) -> ReportOut:
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     try:
-        return build_report(symbol, timeframe)  # type: ignore[arg-type]
+        return build_report(  # type: ignore[arg-type]
+            symbol, timeframe, fresh_quotes=bool(fresh_quotes)
+        )
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -728,7 +742,7 @@ def analyst_polish(symbol: str, timeframe: str = "daily") -> LLMTextOut:
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     try:
-        rpt = build_report(symbol, timeframe)  # type: ignore[arg-type]
+        rpt = build_report(symbol, timeframe, fresh_quotes=True)  # type: ignore[arg-type]
     except ValueError as e:
         raise HTTPException(404, str(e))
     text = _llm.polish_narrative(rpt.model_dump())
@@ -768,7 +782,7 @@ def analyst_explain(symbol: str, body: ExplainIn) -> LLMTextOut:
     if not body.question or not body.question.strip():
         raise HTTPException(400, "question is required")
     try:
-        rpt = build_report(symbol, body.timeframe)  # type: ignore[arg-type]
+        rpt = build_report(symbol, body.timeframe, fresh_quotes=True)  # type: ignore[arg-type]
     except ValueError as e:
         raise HTTPException(404, str(e))
     text = _llm.explain_ticket(rpt.model_dump(), body.question)

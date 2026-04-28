@@ -1,4 +1,4 @@
-"""End-to-end app tests for Dashboard, Detail, Search, Screener, ETF, Copy trade, Analyst.
+"""End-to-end app tests for Dashboard, Detail, Search, Screener, ETF, Analyst.
 
 These tests exercise the app through FastAPI's TestClient as a browser/API
 consumer would:
@@ -39,6 +39,47 @@ def _json(client: TestClient, url: str, expected: int = 200) -> dict | list:
     return r.json()
 
 
+def _assert_trade_plan_json_math(tp: dict) -> None:
+    """Cross-check TradePlan numbers from API JSON (cost, break-even, underlying R:R)."""
+    prem = tp.get("estimated_premium")
+    if prem is not None:
+        cost = tp.get("cost_per_contract")
+        assert cost is not None
+        assert cost == round(prem * 100, 2)
+
+    ct = tp["contract_type"]
+    assert ct in {"call", "put"}
+
+    if prem is not None:
+        be = tp.get("break_even")
+        assert be is not None
+        stk = float(tp["strike"])
+        if ct == "call":
+            assert be == round(stk + prem, 2)
+        else:
+            assert be == round(stk - prem, 2)
+
+    rr = tp.get("risk_reward")
+    spot = float(tp["spot_at_entry"])
+    tgt = tp.get("target_price")
+    stl = tp.get("stop_loss")
+    if rr is None:
+        return
+
+    assert tgt is not None and stl is not None
+    tgt = float(tgt)
+    stl = float(stl)
+    if ct == "call":
+        assert spot > stl and tgt > spot
+        expected = round((tgt - spot) / (spot - stl), 2)
+    else:
+        assert spot < stl and tgt < spot
+        expected = round((spot - tgt) / (stl - spot), 2)
+
+    # Server may use unrounded internals for R:R; display fields should match within 0.02
+    assert rr == pytest.approx(expected, abs=0.02)
+
+
 # ---------------------------------------------------------------------------
 # App shell / page containers
 # ---------------------------------------------------------------------------
@@ -55,14 +96,12 @@ def test_root_serves_all_page_containers(client: TestClient):
     assert 'data-view="search"' in html
     assert 'data-view="analyst"' in html
     assert 'data-view="etf"' in html
-    assert 'data-view="copy-trade"' in html
 
     # Core view containers.
     assert 'class="view view-dashboard' in html
     assert 'class="view view-detail' in html
     assert 'class="view view-search' in html
     assert 'class="view view-etf' in html
-    assert 'class="view view-copy-trade' in html
     assert 'class="view view-analyst' in html
 
     # Key per-page anchors used by app.js.
@@ -75,8 +114,6 @@ def test_root_serves_all_page_containers(client: TestClient):
     assert 'id="analyst-report"' in html
     assert 'id="all-recs-tbody"' in html
     assert 'id="etf-signals-tbody"' in html
-    assert 'id="copytrade-holdings-tbody"' in html
-    assert 'id="copytrade-select"' in html
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +133,6 @@ def test_copy_trade_signals_endpoint(client: TestClient):
     out = _json(client, "/api/copy-trade/signals?limit=3")
     assert "rows" in out
     assert isinstance(out["rows"], list)
-
 
 
 def test_dashboard_endpoints_happy_path(client: TestClient):
@@ -364,6 +400,18 @@ def test_analyst_tickers_overview_report_flow(client: TestClient):
     ):
         assert k in report
     assert report["options"]["contract_type"] in {"call", "put"}
+
+
+def test_analyst_report_fresh_quotes_trade_plan_derived_math(client: TestClient):
+    """Live report with fresh_quotes=1: cost/contract, BE, target/stop vs R:R stay consistent."""
+    tickers = _json(client, "/api/analyst/tickers")
+    symbol = str(tickers[0]["symbol"])
+    report = _json(client, f"/api/analyst/report/{symbol}?timeframe=daily&fresh_quotes=1")
+    assert report["symbol"] == symbol
+    tp = report["options"]["trade_plan"]
+    # Normal symbols should have Yahoo or model premium — otherwise cost/BE assertions are skipped.
+    assert tp.get("estimated_premium") is not None
+    _assert_trade_plan_json_math(tp)
 
 
 @pytest.mark.parametrize("tf", ["1h", "4h", "daily", "weekly"])

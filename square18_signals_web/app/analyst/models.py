@@ -112,14 +112,14 @@ class TradePlan(BaseModel):
     expiry_date: str  # ISO date, e.g. "2026-05-22"
     expiry_dte: int
     estimated_premium: Optional[float]        # per-share: Yahoo chain mid if available, else BS
-    cost_per_contract: Optional[float]        # 100 × premium
+    cost_per_contract: Optional[float]        # 100 × premium (listed equity contract multiplier)
     spot_at_entry: float
     break_even: Optional[float]
     target_price: Optional[float]             # technical price objective for the underlying
     stop_loss: Optional[float]                # underlying stop level (for "thesis invalidated")
     one_sigma_move_usd: Optional[float]       # expected move over DTE
     one_sigma_move_pct: Optional[float]
-    risk_reward: Optional[float]              # (target - spot) / (spot - stop) for calls; mirrored for puts
+    risk_reward: Optional[float]  # underlying directional R:R — call: (Tgt−S)/(S−stop); put: (S−Tgt)/(stop−S); not option $P&L/max loss
     rationale: str                            # 1-2 sentence plain-English "why"
 
 

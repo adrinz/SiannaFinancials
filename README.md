@@ -10,7 +10,7 @@ Sianna Financials is a stocks and options analyzer workspace with:
 - `square18_signals/`  
   Core pricing, IV, strategy payoff, and strategy recommendation library.
 - `square18_signals_web/`  
-  Web application (API + UI) that serves dashboard, ticker detail, search, screener (S&P 500 jumps / dips / earnings), ETF signals, copy-trade (13F research), and analyst views.
+  Web application (API + UI) that serves dashboard, ticker detail, search, screener (S&P 500 jumps / dips / earnings), ETF signals, copy-trade (13F research API), and analyst views.
 - `Claude.md`  
   Full assistant-oriented project context and runbook.
 

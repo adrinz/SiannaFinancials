@@ -74,17 +74,11 @@ Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 - Timeframe pills match the rest of the app (1H / 4H / Daily / Weekly).
 - Click a row to open the full ticker detail and technical report.
 
-**Copy trade (research)**
+**Copy trade (research)** — API-only / tests
 
-- Select a **13F filer** (e.g. Berkshire Hathaway) or a **static themed basket**
-  (curated symbols from the tracked universe). Holdings and weights are for
-  research only: **no brokerage connection** and **no auto-execution**.
-- 13F data is **quarterly** and **lagged**; “signals” compare the latest saved
-  snapshot in this app to the previous one (not live social copy-trading).
-- Optional card explains that **unusual options** / tick-level flows need vendor
-  data in a future version.
-- Local state (snapshots/signals log) may be written to
-  `app/analyst/data/copy_trade_state.json` (gitignored).
+- Clients use `GET /api/copy-trade/creators`, `holdings/{id}`, `signals` — 13F +
+  static themed basket; quarterly **lagged** data, no brokerage connection.
+- Local state may be written to `app/analyst/data/copy_trade_state.json` (gitignored).
 
 **Ticker detail**
 

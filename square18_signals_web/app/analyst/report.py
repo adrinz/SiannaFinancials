@@ -100,6 +100,8 @@ def build_report(
     symbol: str,
     timeframe: Timeframe,
     meta_override: dict | None = None,
+    *,
+    fresh_quotes: bool = False,
 ) -> ReportOut:
     """Build a full analyst report for a ticker.
 
@@ -107,6 +109,10 @@ def build_report(
     directly. Otherwise the caller may pass ``meta_override`` (e.g. from
     a live yfinance lookup) to supply ``name``/``sector``/``bias`` — this
     is how the /api/search endpoint supports arbitrary tickers.
+
+    Pass ``fresh_quotes=True`` to bypass in-process Yahoo spot/option quote
+    caches so trade-plan cost reflects the latest chain pull on this request
+    (still subject to Yahoo’s own delay tier, not brokerage tick-by-tick data).
     """
     sym = symbol.upper()
     meta = meta_override or TICKER_MAP.get(sym)
@@ -118,7 +124,7 @@ def build_report(
         raise ValueError(f"insufficient history for {sym} at {timeframe}")
 
     closes = data.close
-    y_spot = yf_last_price(sym)
+    y_spot = yf_last_price(sym, bypass_cache=fresh_quotes)
     spot_for_options = float(y_spot) if (y_spot is not None and y_spot > 0) else float(closes[-1])
     highs = data.high
     lows = data.low
@@ -182,6 +188,7 @@ def build_report(
         conviction=conviction,
         composite_score=composite,
         timeframe=timeframe,
+        fresh_quotes=fresh_quotes,
     )
 
     chart = ChartPayload(
@@ -1084,6 +1091,7 @@ def _build_options_suggestion(
     conviction: float,
     composite_score: float,
     timeframe: Timeframe,
+    fresh_quotes: bool = False,
 ) -> OptionsSuggestion:
     """Build a single directional ticket.
 
@@ -1132,6 +1140,7 @@ def _build_options_suggestion(
         conviction=conviction,
         composite_score=composite_score,
         verdict=verdict,
+        fresh_quotes=fresh_quotes,
     )
 
     direction_word = "bullish" if contract_type == "call" else "bearish"
@@ -1237,6 +1246,7 @@ def _build_trade_plan(
     conviction: float,
     composite_score: float,
     verdict: str,
+    fresh_quotes: bool = False,
 ) -> TradePlan:
     T = max(1, dte) / 365.0
     one_sigma_usd = round(spot * iv * math.sqrt(T), 2)
@@ -1253,7 +1263,11 @@ def _build_trade_plan(
     premium: Optional[float] = None
     premium_source = "model"
     chain_mid = yf_option_mid_per_share(
-        sym, strike, contract_type == "call", expiry_dt
+        sym,
+        strike,
+        contract_type == "call",
+        expiry_dt,
+        bypass_cache=fresh_quotes,
     )
     if chain_mid is not None and chain_mid > 0:
         premium = round(chain_mid, 2)

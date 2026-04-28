@@ -286,9 +286,6 @@ function initTabs() {
       } else if (target === 'etf') {
         switchView('etf');
         initEtfOnce();
-      } else if (target === 'copy-trade') {
-        switchView('copy-trade');
-        initCopyTradeOnce();
       } else {
         switchView(target);
       }
@@ -2902,12 +2899,6 @@ const etf = {
   overview: [],
 };
 
-const copyTrade = {
-  initialized: false,
-  creators: [],
-  activeId: null,
-};
-
 async function initAnalystOnce() {
   if (analyst.initialized) return;
   analyst.initialized = true;
@@ -3188,141 +3179,6 @@ function renderEtfTable() {
   }
 }
 
-async function initCopyTradeOnce() {
-  if (copyTrade.initialized) return;
-  copyTrade.initialized = true;
-  const sel = $('#copytrade-select');
-  const trail = $('#copytrade-trail');
-  if (!sel) return;
-  try {
-    const list = await api('/api/copy-trade/creators');
-    copyTrade.creators = list;
-    sel.innerHTML = '';
-    for (const c of list) {
-      sel.append(h('option', { value: c.id }, c.name));
-    }
-    if (list.length) {
-      copyTrade.activeId = list[0].id;
-      sel.value = copyTrade.activeId;
-    }
-  } catch (e) {
-    if (trail) trail.textContent = 'Failed to load creators: ' + e;
-    return;
-  }
-  const btn = $('#copytrade-refresh');
-  if (btn) {
-    btn.addEventListener('click', () => loadCopyTradeData(true));
-  }
-  sel.addEventListener('change', () => {
-    copyTrade.activeId = sel.value;
-    loadCopyTradeData(true);
-  });
-  loadCopyTradeData(true);
-}
-
-async function loadCopyTradeData(refresh) {
-  const id = copyTrade.activeId
-    || (copyTrade.creators[0] && copyTrade.creators[0].id);
-  if (!id) return;
-  const tbody = $('#copytrade-holdings-tbody');
-  const trail = $('#copytrade-trail');
-  const ul = $('#copytrade-signals');
-  if (tbody) {
-    tbody.innerHTML =
-      '<tr><td colspan="6" class="loading">Loading holdings…</td></tr>';
-  }
-  if (ul) ul.innerHTML = '<li class="loading">Loading activity…</li>';
-  const q = refresh ? '?refresh=1' : '?refresh=0';
-  try {
-    const hold = await api(
-      `/api/copy-trade/holdings/${encodeURIComponent(id)}${q}`
-    );
-    if (trail) {
-      const parts = [
-        `source: ${hold.source}`,
-        hold.as_of ? `as of ${hold.as_of}` : null,
-        hold.message ? hold.message : null,
-      ].filter(Boolean);
-      trail.textContent = parts.join(' · ');
-    }
-    if (tbody) {
-      tbody.innerHTML = '';
-      if (!hold.rows || !hold.rows.length) {
-        tbody.append(
-          h('tr', {},
-            h('td', { colspan: 6, class: 'loading' },
-              hold.as_of
-                ? 'No rows (check SEC parse or use another portfolio).'
-                : 'No data.'))
-        );
-      } else {
-        for (const r of hold.rows) {
-          const sym = r.symbol || '—';
-          const open = (ev) => {
-            if (r.symbol) {
-              ev.stopPropagation();
-              switchView('detail', { symbol: r.symbol });
-            }
-          };
-          tbody.append(
-            h('tr', {
-              class: r.symbol ? 'clickable' : '',
-              onClick: open,
-            },
-            h('td', { class: 'sym mono' }, sym),
-            h('td', { class: 'name' }, r.name),
-            h('td', { class: 'num mono' }, fmtUSD(r.value_usd)),
-            h('td', { class: 'num mono' }, (r.weight_pct != null
-              ? r.weight_pct.toFixed(2) : '—') + '%'),
-            h('td', { class: 'num mono' }, (r.value_000s != null
-              ? r.value_000s.toLocaleString() : '—')),
-            h('td', { class: 'mono muted' }, r.cusip)
-            )
-          );
-        }
-      }
-    }
-    const sigs = await api(
-      `/api/copy-trade/signals?creator_id=${encodeURIComponent(id)}&limit=25`
-    );
-    if (ul) {
-      ul.innerHTML = '';
-      const rows = (sigs && sigs.rows) || [];
-      if (!rows.length) {
-        ul.append(
-          h('li', { class: 'muted' }, 'No change signals yet — refresh after a new filing is saved.')
-        );
-      } else {
-        for (const s of rows) {
-          const kind = s.kind || '';
-          const kcls = kind === 'INCREASED' ? 'pos'
-            : kind === 'DECREASED' || kind === 'EXIT' ? 'neg' : 'muted';
-          ul.append(
-            h('li', { class: 'copytrade-sig-item' },
-              h('span', { class: `copytrade-sig-kind mono ${kcls}` }, kind),
-              s.symbol
-                ? h('span', { class: 'mono' }, s.symbol)
-                : '',
-              h('span', { class: 'copytrade-sig-msg' },
-                escapeHtml(s.message || '')),
-              s.as_of
-                ? h('span', { class: 'muted mono' }, s.as_of)
-                : ''
-            )
-          );
-        }
-      }
-    }
-  } catch (e) {
-    if (tbody) {
-      tbody.innerHTML = `<tr><td colspan="6" class="loading">Failed: ${escapeHtml(
-        String(e)
-      )}</td></tr>`;
-    }
-    if (trail) trail.textContent = 'Error: ' + e;
-  }
-}
-
 async function loadAnalystReport(symbol) {
   if (analyst._priceChartSymbol != null && analyst._priceChartSymbol !== symbol) {
     state.analystChartSessionZoom = { start: 0, end: 1 };
@@ -3341,7 +3197,7 @@ async function loadAnalystReport(symbol) {
     try {
       rpt = await api(
         `/api/analyst/report/${encodeURIComponent(symbol)}` +
-        `?timeframe=${encodeURIComponent(analyst.timeframe)}`
+        `?timeframe=${encodeURIComponent(analyst.timeframe)}`,
       );
       analyst.reports[key] = rpt;
     } catch (e) {
@@ -4318,9 +4174,6 @@ async function refreshAll({ reason = 'manual' } = {}) {
     }
     if (state.view === 'etf') {
       loadEtfOverview();
-    }
-    if (state.view === 'copy-trade' && copyTrade.initialized) {
-      loadCopyTradeData(true);
     }
     // Re-check LLM health on every refresh so the badge recovers from
     // transient errors (e.g. right after the user adds credits).

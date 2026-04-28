@@ -1,4 +1,4 @@
-"""Copy trade V1: curated institutional 13F-style holdings and static themes.
+"""Copy-trade V1: curated institutional 13F-style holdings and static themes.
 
 Data is for research only — not real-time, not trade execution. See /api
 responses and the UI disclaimer for 13F reporting lag and limitations.
@@ -85,9 +85,16 @@ def _http_get(
     *,
     timeout: float = 30.0,
 ) -> bytes:
+    # SEC blocks requests without a descriptive User-Agent; see
+    # https://www.sec.gov/os/accessing-edgar-data
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": SEC_USER_AGENT, "Accept": "application/json, text/plain, */*"},
+        headers={
+            "User-Agent": SEC_USER_AGENT,
+            "Accept": "application/json, text/xml, application/xml;q=0.9, text/plain, */*;q=0.8",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+        },
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
         return r.read()
@@ -208,8 +215,25 @@ def _fetch_submissions_json(cik: int) -> dict[str, Any]:
             return deepcopy(hit[1])
     cik10 = _cik_10(cik)
     url = f"{SEC_DATA_BASE}/submissions/CIK{cik10}.json"
-    data = _http_get(url, timeout=25.0)
-    payload = json.loads(data.decode("utf-8"))
+    try:
+        data = _http_get(url, timeout=25.0)
+        payload = json.loads(data.decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Never bubble to FastAPI as 500 — common causes: 403 missing/blocked UA,
+        # rate limits, or egress filters.
+        hint = ""
+        if e.code == 403:
+            hint = (
+                " (SEC often requires a browser-like User-Agent and may block "
+                "datacenter IPs; try again later or from another network.)"
+            )
+        err = (
+            f"SEC HTTP {e.code} on submissions CIK{cik10}{hint}: "
+            f"{getattr(e, 'reason', '') or 'forbidden'}"
+        )
+        return {"_sec_fetch_error": err}
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        return {"_sec_fetch_error": f"SEC submissions fetch failed: {e}"}
     with _STATE_LOCK:
         _FETCH_CACHE[key] = (now, deepcopy(payload))
     return payload
@@ -302,7 +326,27 @@ def fetch_13f_holdings(
     Return (raw_rows, source, as_of, accession, note).
     as_of = filing date when known.
     """
+    try:
+        return _fetch_13f_holdings_impl(cik)
+    except urllib.error.HTTPError as e:
+        return (
+            [],
+            "unavailable",
+            "",
+            "",
+            f"SEC HTTP {e.code} ({getattr(e, 'reason', '') or 'error'}).",
+        )
+    except urllib.error.URLError as e:
+        return [], "unavailable", "", "", f"SEC request failed: {e.reason!s}"
+
+
+def _fetch_13f_holdings_impl(
+    cik: int,
+) -> tuple[list[dict[str, Any]], str, str, str, str]:
     sub = _fetch_submissions_json(cik)
+    err = sub.get("_sec_fetch_error")
+    if err:
+        return [], "unavailable", "", "", err
     found = _find_latest_13f_accession(sub)
     if not found:
         return [], "unavailable", "", "", "No 13F-HR filing found in recent submissions."

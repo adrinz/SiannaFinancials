@@ -400,7 +400,9 @@ def search(query: str, timeframe: Timeframe = "daily") -> SearchResult:
         "sector": resolved.sector,
         "bias": 0.0,
     }
-    report = build_report(resolved.symbol, timeframe, meta_override=meta)
+    report = build_report(
+        resolved.symbol, timeframe, meta_override=meta, fresh_quotes=True
+    )
     plan = build_stock_plan(report)
     return SearchResult(resolved=resolved, report=report, stock_plan=plan)
 
