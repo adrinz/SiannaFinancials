@@ -1,259 +1,237 @@
 # square18_signals_web
 
-A local **web UI for Sianna Financials** (the stocks & options
-analyzer). FastAPI backend wrapping the `square18_signals` Python
-package, serving a single-page app built with plain HTML, CSS, and
-vanilla JS — no npm build step, no framework, no lock file.
+A **web UI for Sianna Financials** — stocks & options analyzer. FastAPI backend wrapping the
+`square18_signals` Python package, serving a single-page app built with plain HTML, CSS, and
+vanilla JS. No npm build step, no framework.
 
 Launch once with `./run.sh` and open <http://127.0.0.1:8000>.
 
-## What's new
+---
 
-- **Stock Screener tab** — three quick views across the **S&P 500**:
-  today's biggest price jumps, today's biggest price dips, and a
-  calendar of upcoming earnings (next 7 days by default). The S&P 500 list itself
-  is **refreshed** from a public CSV on a schedule (24h by default;
-  set `SQUARE18_SP500_REFRESH_HOURS` / optional `SQUARE18_SP500_CSV_URL` in
-  `app/analyst/universe.py`); a bundled `data/sp500.json` is used
-  offline, and a failed refresh keeps the last good list (`stale`)
-  with at-most-hourly retry. Movers use a single batched
-  `yfinance.download` over the current universe. Earnings use Nasdaq's
-  public calendar API. Both also fall back to the tracked-ticker
-  analyst pipeline when required. The API `source` field is
-  `sp500` / `curated` / `unavailable` for the UI.
-- **Sianna Financials** brand (formerly "Square18 Signals").
-- All timestamps render in **US Eastern (America/New_York)** — live
-  clock in the top bar and a full date/time in the footer.
-- **Manual Refresh button** in the top bar plus **automatic data
-  refresh every 5 minutes** (with visibility-aware catch-up when the
-  tab comes back into focus).
-- Fancier **ticker-detail chart** — close line, SMA(5/10/20), EMA(9),
-  Bollinger(20, 2σ) envelope, hover crosshair with tooltip, legend.
-- **Powered by Claude Sonnet 4.5** footer badge; set
-  `ANTHROPIC_API_KEY` to enable narrative polish, the Claude desk brief,
-  and per-ticket Q&A (see "Claude layer" below).
-
-## What it shows
+## What the app does
 
 **Dashboard**
-
 - Market-regime banner (VIX, breadth, put/call, trend score).
-- Five-up KPI strip (universe size, longs, shorts, holds, VIX).
-- Today's signals table — click any row to open its detail view.
+- Today's signals table — click any row to open Ticker detail.
 - Filter pills (All / Buy / Sell / Hold).
-- **Market news** — CNBC RSS (primary), then MarketWatch RSS, then a
-  deterministic internal snapshot if both feeds are empty.
+- Market news (CNBC RSS → MarketWatch RSS → internal snapshot).
 
-**Screener** (universe: S&P 500)
-
-- Three cards on a dedicated tab:
-  - **Daily price jumps** — top S&P 500 gainers today.
-  - **Daily price dips** — top S&P 500 losers today.
-  - **Upcoming earnings** — S&P 500 companies reporting in the next
-    7 days, decorated with current price and day's change. Verdicts
-    show only for symbols that overlap the tracked TICKERS list (no
-    full analyst pipeline is run for the wider universe).
-- A scope pill in the header reflects the current data source: `S&P 500`
-  on the broad path, or `Tracked` when the broad source is offline.
-- **Two-phase movers:** the UI first loads a **quick** tracked-list
-  for jumps/dips, then refetches the full S&P 500 view when ready (with
-  a small “Updating to full S&P 500 list…” line while the large batch
-  is in flight), so the tab is never empty for long.
-- Click any row to jump to the full Ticker Detail view.
-- Auto-refreshes alongside the rest of the dashboard. The full S&P 500
-  yfinance batch can still be slow on a cold run; the UI loads a
-  **quick** tracked list first, then upgrades to the broad list. The
-  backend reuses a single daily overview pass and a short in-memory
-  cache so those requests do not each repeat full per-ticker analysis.
+**Screener** (S&P 500 universe)
+- Daily price jumps, daily price dips, upcoming earnings (7-day window).
+- Two-phase load: quick tracked-list first, then full S&P 500 upgrade.
 
 **ETF signals**
+- Verdict + composite + recommended option for a fixed basket of liquid ETFs.
 
-- Dedicated tab: verdict, composite, and headline options-style recommendation
-  fields (same `OverviewRow` contract as the analyst overview) for a fixed
-  basket of liquid ETFs in `app/analyst/constants.py` (`ETF_SIGNAL_TICKERS`).
-- Timeframe pills match the rest of the app (1H / 4H / Daily / Weekly).
-- Click a row to open the full ticker detail and technical report.
+**Analyst tab** ← primary enhanced view
+- Universe verdict table with all recommendations at a glance.
+- Full technical report per ticker: indicators, price chart, narrative, trade ticket.
+- **Multi-layer signal pipeline** (see below).
+- Optional Claude Sonnet 4.5 narrative polish, desk brief, and Q&A.
 
-**Copy trade (research)** — API-only / tests
+**Ticker detail / Search**
+- OHLC chart, factor breakdown, strategy recommendations.
+- Free-form search: Buy / Sell / Hold plan for any ticker.
 
-- Clients use `GET /api/copy-trade/creators`, `holdings/{id}`, `signals` — 13F +
-  static themed basket; quarterly **lagged** data, no brokerage connection.
-- Local state may be written to `app/analyst/data/copy_trade_state.json` (gitignored).
+---
 
-**Ticker detail**
+## Signal pipeline — what's been built
 
-- Hero strip with price, Δ, composite score, confidence, IV rank,
-  and expected move (1σ) over the recommender's horizon.
-- 30-session price sparkline (colored by direction).
-- Horizontal factor bar chart and the "why this signal" factor table.
-- **Strategy recommender panel** — up to 4 cards, each showing:
-  legs, max gain / max loss / POP, break-evens, net debit/credit,
-  rationale, tags, and a fit-score bar. Metrics come from the real
-  `square18_signals` pricing + payoff + POP engine.
+### Tier-1 signal quality (configurable, backtest-tuned)
+
+| Feature | File |
+|---------|------|
+| Tunable BULLISH/BEARISH thresholds via `signal_thresholds.json` | `app/analyst/signal_config.py` |
+| Walk-forward τ search: `python -m tools.backtest_verdict --search-tau` | `tools/backtest_verdict.py` |
+| Multi-timeframe (MTF) confluence bonus/veto | `app/analyst/report.py` |
+| Regime gate: VIX level + market breadth | `app/analyst/regime.py` |
+| Calibrated historical hit-rate probability on every report | `app/analyst/report.py` |
+| Conviction capped at 85% (proportional to score, never 100%) | `_score_to_verdict` |
+
+### Tier-2 options intelligence (Yahoo chain, no extra subscription)
+
+| Signal | What it measures |
+|--------|-----------------|
+| UOA (unusual volume/OI) | Smart-money directional flow — call vs put pressure |
+| Term-structure slope | Front/back month IV ratio; backwardation = event stress |
+| Put-call skew | OTM put IV / OTM call IV; elevated = market hedging downside |
+
+Source: `app/analyst/options_flow.py` (5-min in-process chain cache).
+
+### Misleading-signal fixes (37 total across 5 audit rounds)
+
+**Scoring model fixes**
+- Stochastic + Bollinger %B added to core score (were computed but ignored).
+- `factors.py` RSI overbought direction corrected (+0.1 → −0.3).
+- MACD zero-line RSI filter: halves bonus when RSI is on the wrong side of midline.
+- MACD histogram deceleration: new `decelerating_bull`/`decelerating_bear` states.
+- MACD line vs zero: small ±0.03 momentum confirmation.
+- Chart patterns (double-top/bottom, support/resistance) added to score.
+- Distribution day (high volume + down bar) fixed — was asymmetric.
+- Triple mean-reversion override: RSI ≥70 + Stoch ≥80 + %B ≥0.90 → score forced near NEUTRAL.
+- RSI divergence detection in `indicators.py` using swing pivots.
+- Volume for index symbols (VIX) now correctly returns neutral stats.
+
+**Signal warnings surfaced in the UI**
+- Synthetic data, earnings proximity, earnings-vs-expiry alignment
+- ADX absent/weak (ranging market), ADX slope (declining strong trend)
+- Price extension >12% from 50d SMA, near-term pullback within uptrend
+- All-factors saturation (peak alignment = trend exhaustion)
+- Bollinger squeeze (direction undetermined)
+- Borderline score (within 0.12 of threshold)
+- Dual RSI + Stochastic overbought/oversold simultaneously
+- MACD cross quality (RSI midline check), MACD histogram deceleration
+- IV crush risk (backwardation + earnings proximity)
+- Overnight gap detection (≥3% open vs prior close)
+- VIX intraday spike (+4 pts in one session)
+- Extreme volume >5× (meme/squeeze/news indicator)
+- Low average daily volume (<500k/day)
+- Symbol-class guards: QUBT/QBTS/SMR/OKLO (speculative), COIN (crypto-correlated), BYDDY (ADR)
+- Sector ETF headwind/tailwind (SMH, XLK, XLF, XLE cross-checked)
+- Options chain OI and bid-ask spread at recommended strike
+- Short interest >20% of float on BEARISH signals (squeeze risk)
+- Weekend theta (Thu/Fri entry with short DTE)
+- Low DTE gamma explosion (DTE ≤14)
+- Options cost-effectiveness vs 1σ expected move
+
+**Trade ticket enhancements**
+- Black-Scholes Greeks: Δ, θ/day, ν/1%IV
+- P&L scenarios: BS-repriced estimates at target price / flat 14d / stop loss
+- Break-even shown as both $ price **and** % move needed
+- Theta shown as weekly % of premium consumed
+- Signal validity window: "valid while price > $X and RSI > 50"
+- Timeframe scope note and 1–2% position-sizing guidance
+- "Max loss / contract" label (was "Cost / contract")
+
+---
 
 ## Requirements
 
 - Python **3.10+**
-- `pip install -r requirements.txt` (FastAPI, Uvicorn, Pydantic v2)
+- `pip install -r requirements.txt` (FastAPI, Uvicorn, Pydantic v2, python-dotenv, yfinance, anthropic, playwright)
 
-The sibling `../square18_signals/src/` is added to `sys.path`
-automatically at startup — no install of the math package needed.
+The sibling `../square18_signals/src/` is added to `sys.path` automatically at startup.
+
+---
 
 ## Quick start
 
 ```bash
 cd square18_signals_web
 pip install -r requirements.txt
-./run.sh
+
+# Enable Claude features (optional)
+cp .env.example .env
+# Edit .env: ANTHROPIC_API_KEY=sk-ant-...
+
+./run.sh          # dev mode with auto-reload
+./run.sh prod     # no reload
+PORT=9000 ./run.sh
 ```
 
 Then open <http://127.0.0.1:8000/>.
 
-Auto-reload is enabled by default; pass `prod` to disable:
-`./run.sh prod`. Set `PORT=9000` to change the port.
+---
 
 ## Testing
 
-Run the API-level E2E suite (FastAPI `TestClient`):
-
 ```bash
+# API E2E (FastAPI TestClient)
 python -m pytest tests/test_e2e_app.py -q
-```
 
-Run real browser E2E (Playwright) for Dashboard / Ticker detail / Search / Analyst:
+# Deterministic unit tests
+python -m pytest tests/test_indicators.py tests/test_trade_plan_derived_math.py tests/test_market_news.py -q
 
-```bash
-# one-time browser install
+# Signal thresholds re-tune (needs network, ~30s)
+python -m tools.backtest_verdict --search-tau --out backtest_verdict.json
+
+# Browser E2E (Playwright)
 python -m playwright install chromium
-
-# run browser tests
 python -m pytest tests/test_e2e_ui_playwright.py -q
 ```
 
-Run both together:
-
-```bash
-python -m pytest tests/test_e2e_app.py tests/test_e2e_ui_playwright.py -q
-```
+---
 
 ## API endpoints
 
-| Method | Path                                 | Description                                     |
-| ------ | ------------------------------------ | ----------------------------------------------- |
-| GET    | `/api/health`                        | liveness probe                                  |
-| GET    | `/api/regime`                        | market-regime banner + universe counters        |
-| GET    | `/api/screen?filter=…`               | screener rows; `filter` ∈ all/buy/sell/hold     |
-| GET    | `/api/ticker/{symbol}`               | full detail payload + strategy recommendations  |
-| GET    | `/api/screener/movers?limit=…&quick=…` | jumps + dips in one body; `quick=1` = tracked list only; `quick=0` = full S&P 500 |
-| GET    | `/api/screener/jumps?limit=…`        | top gainers only (broad + curated fallback)                    |
-| GET    | `/api/screener/dips?limit=…`         | top losers only (broad + curated fallback)                   |
-| GET    | `/api/screener/earnings?window_days=…` | upcoming S&P 500 earnings (Nasdaq + curated fallback)        |
-| GET    | `/api/analyst/tickers`               | analyst universe (symbol/name/sector)           |
-| GET    | `/api/analyst/overview?timeframe=…`  | verdict + recommendation row per ticker         |
-| GET    | `/api/etf/signals?timeframe=…`       | same row shape, ETF watchlist only               |
-| GET    | `/api/copy-trade/creators`           | 13F + static theme list (id, name, type)         |
-| GET    | `/api/copy-trade/holdings/{id}`      | `?refresh=0` cached snapshot; `1` refetches SEC   |
-| GET    | `/api/copy-trade/signals?creator_id=…` | change signals vs prior snapshot                |
-| GET    | `/api/analyst/report/{symbol}`       | full technical report for a ticker              |
-| GET    | `/api/analyst/llm-config`            | `{enabled, model}` for the Claude layer         |
-| GET    | `/api/analyst/polish/{symbol}`       | Claude-polished narrative (requires API key)    |
-| GET    | `/api/analyst/brief?timeframe=…`     | Claude-synthesised daily desk brief             |
-| POST   | `/api/analyst/explain/{symbol}`      | Q&A grounded in the ticker's report             |
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET | `/api/health` | Liveness probe |
+| GET | `/api/regime` | Market-regime banner + universe counters |
+| GET | `/api/screen?filter=…` | Screener rows; filter ∈ all/buy/sell/hold |
+| GET | `/api/ticker/{symbol}` | Full detail payload + strategy recommendations |
+| GET | `/api/market/pulse?timeframe=…` | Top gainers/losers + sector heatmap |
+| GET | `/api/options/highlights?timeframe=…` | Top call/put recommendations |
+| GET | `/api/crypto/snapshot` | Crypto prices + 7-day spark |
+| GET | `/api/news?limit=…` | Dashboard news (CNBC/MarketWatch/snapshot) |
+| GET | `/api/screener/movers?quick=0\|1` | Jumps + dips in one body |
+| GET | `/api/screener/jumps` | Top S&P 500 gainers |
+| GET | `/api/screener/dips` | Top S&P 500 losers |
+| GET | `/api/screener/earnings?window_days=…` | Upcoming S&P 500 earnings |
+| GET | `/api/analyst/tickers` | Analyst universe (symbol/name/sector) |
+| GET | `/api/analyst/overview?timeframe=…` | Verdict + recommendation row per ticker |
+| GET | `/api/analyst/report/{symbol}?timeframe=…&fresh_quotes=0\|1` | Full enhanced technical report |
+| GET | `/api/etf/signals?timeframe=…` | ETF watchlist verdicts |
+| GET | `/api/analyst/llm-config` | Claude layer status |
+| GET | `/api/analyst/polish/{symbol}` | Claude narrative polish |
+| GET | `/api/analyst/brief?timeframe=…` | Claude daily desk brief |
+| POST | `/api/analyst/explain/{symbol}` | Claude Q&A on a specific report |
+| GET | `/api/report/signals?timeframe=…` | Full signal report (JSON) |
+| GET | `/api/report/signals.md` | Signal report (Markdown, downloadable) |
+| GET | `/api/report/signals.txt` | Signal report (plain text) |
 
-Browse the auto-generated Swagger UI at <http://127.0.0.1:8000/docs>.
+Browse Swagger UI at <http://127.0.0.1:8000/docs>.
+
+---
 
 ## Claude layer (optional)
 
-The analytical core is **fully deterministic** — Python math, rule-based
-signals, reproducible. Claude Sonnet 4.5 is layered on top for three
-narrow tasks, all fail-open:
+The analytical core is **fully deterministic** — rule-based, reproducible, no LLM in the signal path.
+Claude Sonnet 4.5 is layered on top for three narrow tasks, all fail-open:
 
-| Task              | Where              | Purpose                                            |
-| ----------------- | ------------------ | -------------------------------------------------- |
-| Narrative polish  | Analyst report     | Rewrites the deterministic narrative as fluent prose |
-| Daily desk brief  | Top of Analyst tab | Cross-ticker synthesis grouped by sector / bias    |
-| Ticket Q&A        | End of a report    | "Why this strike?", "What invalidates the thesis?" |
+| Task | Where | Purpose |
+| ---- | ----- | ------- |
+| Narrative polish | Analyst report | Rewrites deterministic narrative as fluent prose |
+| Daily desk brief | Top of Analyst tab | Cross-ticker synthesis by sector/bias |
+| Ticket Q&A | End of report | "Why this strike?", "What invalidates the thesis?" |
 
-Prompts wrap the structured report in `<facts>` tags and instruct
-Claude to **never introduce a number not present inside**. If Claude is
-unreachable or the API key is unset, the app still renders the full
-deterministic analysis — the Claude UI chips and brief card simply hide.
+Prompts wrap the structured report in `<facts>` tags. Claude is instructed never to introduce numbers not present in the payload.
 
-Enable (pick one):
-
-**Recommended:** copy [`square18_signals_web/.env.example`](.env.example) to `square18_signals_web/.env`,
-set `ANTHROPIC_API_KEY`, then run `./run.sh`. The launcher sources `.env`, and `app.main`
-also loads it on import (so `uvicorn` from your IDE picks it up after `pip install -r requirements.txt`).
-
-**Or** export in the shell:
+**Enable:**
 
 ```bash
+# Recommended: use .env (gitignored)
+cp .env.example .env
+# Set ANTHROPIC_API_KEY in .env, then:
+./run.sh
+
+# Or export directly:
 export ANTHROPIC_API_KEY=sk-ant-…
-# optional overrides:
-export ANTHROPIC_MODEL=claude-sonnet-4-5          # default
-export SQUARE18_LLM_CACHE_TTL=86400               # 1 day cache per prompt
+export ANTHROPIC_MODEL=claude-sonnet-4-5   # default
+export SQUARE18_LLM_CACHE_TTL=86400        # 24h disk cache per prompt
 ./run.sh prod
 ```
 
-Responses are cached on disk at `~/.cache/square18_signals/llm/` keyed
-by `sha256(input)` so re-opening the same ticker doesn't re-bill.
+Responses are cached at `~/.cache/square18_signals/llm/` keyed by `sha256(input)`.
 
-Cost ballpark (Sonnet 4.5 pricing): a polished narrative is ~1–2k input
-tokens / ~400 output tokens, the daily brief ~2–4k input / ~300 output.
-A day of heavy use per user is on the order of pennies.
+---
 
-## Architecture
+## Key files
 
-```
-┌──────────────────────────────┐      ┌────────────────────────────┐
-│   static/index.html          │      │   app/main.py (FastAPI)    │
-│   static/app.js (vanilla)    │ ───▶ │   app/services.py          │
-│   static/styles.css (dark)   │      │   app/data.py (mock)       │
-└──────────────────────────────┘      └──────────┬─────────────────┘
-                                                 │
-                                                 ▼
-                              ┌────────────────────────────────────┐
-                              │   square18_signals (math layer)    │
-                              │   pricing · greeks · IV · strategies│
-                              │   · recommender                    │
-                              └────────────────────────────────────┘
-```
-
-**Data flow** for the ticker-detail view:
-
-1. Browser calls `GET /api/ticker/NVDA`.
-2. `services.ticker_detail` loads the snapshot from `data.UNIVERSE`,
-   computes IV rank via `iv_rank(current_iv, iv_history)`, builds a
-   `MarketContext`, and calls `recommend_strategies(ctx)`.
-3. Each recommended strategy is priced via Black-Scholes for its
-   legs; payoffs, break-evens, and POP are computed by
-   `strategy_metrics()` inside the package.
-4. The response is serialized by Pydantic models, with `math.inf`
-   mapped to `null` so the UI can render `∞`.
-5. The frontend caches per-symbol responses in `state.details` to
-   avoid refetching.
-
-## Replacing the mock data
-
-Everything lives behind `app/data.py`. To plug in a live provider,
-implement a module that exposes the same `UNIVERSE`, `BY_SYMBOL`,
-`MARKET_REGIME`, and `counts()` interface — or just populate those
-variables from your source at startup. The rest of the stack is
-data-agnostic.
-
-## Frontend notes
-
-- No framework, no bundler. One HTML file, one CSS file, one JS file.
-- Charts are pure inline SVG — sparkline for price, horizontal bars
-  for factor contributions. Under ~200 lines combined.
-- Theme uses `color-mix()` and CSS custom properties; tweak the
-  `:root` block at the top of `styles.css` to re-skin.
-
-## What's deliberately not here
-
-- No authentication, no websockets, no real-time push.
-- No persistence — state is request-scoped.
-- No production deployment config (Dockerfile / systemd unit). The
-  backend is a standard ASGI app, so `gunicorn -k uvicorn.workers.UvicornWorker`
-  would work out of the box.
-- Live market data — see "Replacing the mock data" above.
+| File | Purpose |
+|------|---------|
+| `app/main.py` | FastAPI app + all routes |
+| `app/analyst/report.py` | Full signal pipeline: scoring, gates, warnings, trade ticket |
+| `app/analyst/signal_config.py` | Load/cache `signal_thresholds.json` (hot-reload, 60s TTL) |
+| `app/analyst/regime.py` | VIX + market breadth helpers (shared by report + services) |
+| `app/analyst/options_flow.py` | Tier-2: UOA, term structure, put-call skew from Yahoo chain |
+| `app/analyst/indicators.py` | RSI, MACD, ATR, ADX, Bollinger, Stochastic, RSI divergence |
+| `app/analyst/constants.py` | TICKERS, TICKER_MAP, DEFAULT_IV, anchor prices |
+| `app/analyst/market.py` | News aggregation, market pulse, options highlights |
+| `app/analyst/yahoo_quotes.py` | Spot price + option chain mid + short interest (cached) |
+| `signal_thresholds.json` | Tunable verdict thresholds (regenerate with `backtest_verdict --search-tau`) |
+| `backtest_verdict.json` | Walk-forward hit-rate + profit-factor per verdict/symbol |
+| `tools/backtest_verdict.py` | Walk-forward backtest + τ grid-search |
+| `static/app.js` | All UI logic (vanilla JS, no framework) |
+| `static/styles.css` | Dark theme, responsive |
+| `.env.example` | Template for local secrets (copy to `.env`, never commit) |
