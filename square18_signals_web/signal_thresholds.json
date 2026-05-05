@@ -4,15 +4,15 @@
   "generated_by": "backtest_verdict --search-tau",
   "thresholds": {
     "BULLISH": {
-      "min_score": 0.35,
-      "probability_pct": 57.12
+      "min_score": 0.4,
+      "probability_pct": 56.69
     },
     "BEARISH": {
       "max_score": -0.6,
-      "probability_pct": 52.91
+      "probability_pct": 53.85
     },
     "NEUTRAL": {
-      "probability_pct": 53.96
+      "probability_pct": 54.56
     }
   },
   "mtf": {

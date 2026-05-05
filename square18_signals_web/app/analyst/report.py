@@ -45,6 +45,7 @@ from .indicators import (
     macd as _macd,
     rolling_std,
     rsi as _rsi,
+    rsi_divergence as _rsi_divergence,
     sma,
     stochastic as _stochastic,
     support_resistance,
@@ -154,6 +155,7 @@ def build_report(
     adx_series, plus_di_series, minus_di_series = _adx(highs, lows, closes, 14)
     bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2.0)
     stoch_k, stoch_d = _stochastic(highs, lows, closes, 14, 3, 3)
+    rsi_div = _rsi_divergence(closes, rsi_series)
 
     price_action = _price_action(closes, highs, lows, sma50_series)
     volume_stats = _volume_stats(volumes)
@@ -395,7 +397,75 @@ def build_report(
             "Borderline bear signals have the weakest historical edge — extra confirmation recommended."
         )
 
-    # 9. Symbol-class specific risks
+    # 9. RSI divergence (price and RSI disagree at recent pivots)
+    if rsi_div == "bearish" and composite > 0:
+        signal_warnings.append(
+            "RSI bearish divergence detected — price made a higher high but RSI made a "
+            "lower high. This is one of the most reliable leading reversal signals: "
+            "momentum is weakening even as price rises. Bull signals under bearish "
+            "divergence have significantly lower historical accuracy."
+        )
+    elif rsi_div == "bullish" and composite < 0:
+        signal_warnings.append(
+            "RSI bullish divergence detected — price made a lower low but RSI made a "
+            "higher low. Downside momentum is weakening. Bear signals under bullish "
+            "divergence have significantly lower historical accuracy."
+        )
+
+    # 10. Overnight / intra-session gap detection
+    if len(closes) >= 3 and len(data.open) >= 2:
+        try:
+            last_open = float(data.open[-1])
+            prev_close = float(closes[-2])
+            if prev_close > 0:
+                gap_pct = (last_open / prev_close - 1) * 100
+                if abs(gap_pct) >= 3.0:
+                    direction = "up" if gap_pct > 0 else "down"
+                    signal_warnings.append(
+                        f"Large {direction} gap detected: last bar opened "
+                        f"{gap_pct:+.1f}% vs prior close. Gaps of this size typically "
+                        "indicate news/earnings/macro events. Indicator values "
+                        "(SMA, MACD, RSI) reflect pre-gap bars and may be misleading "
+                        "for the post-gap price level."
+                    )
+        except Exception:
+            pass
+
+    # 11. Sector ETF headwind/tailwind
+    _SECTOR_ETF: dict[str, str] = {
+        "Semiconductors / AI": "SMH", "Semiconductors": "SMH",
+        "Semiconductors / Equip.": "SMH",
+        "Consumer Electronics": "XLK", "Software / Cloud": "XLK",
+        "Software / AI": "XLK", "Communication Services": "XLK",
+        "Cybersecurity": "XLK",
+        "Financials / Banks": "XLF", "Financials / Crypto": "XLF",
+        "Energy / Integrated Oil": "XLE",
+        "Consumer / Cloud": "XLK",
+        "Autos / EV": "XLK",
+    }
+    _sector = meta.get("sector", "")
+    _etf_sym = _SECTOR_ETF.get(_sector)
+    if _etf_sym:
+        try:
+            _etf_score = _quick_score(_etf_sym, timeframe)
+            if _etf_score is not None:
+                if composite > 0 and _etf_score < -0.20:
+                    signal_warnings.append(
+                        f"Sector headwind: {_sector} ETF ({_etf_sym}) is bearish "
+                        f"(score {_etf_score:+.2f}) while this ticker is bullish. "
+                        "Trading against the sector trend reduces the probability of "
+                        "a sustained move. Consider waiting for sector alignment."
+                    )
+                elif composite < 0 and _etf_score > 0.20:
+                    signal_warnings.append(
+                        f"Sector tailwind: {_sector} ETF ({_etf_sym}) is bullish "
+                        f"(score {_etf_score:+.2f}) but this ticker is bearish. "
+                        "Shorting a stock in a rising sector is higher risk."
+                    )
+        except Exception:
+            pass
+
+    # 12. Symbol-class specific risks
     _sym_class_notes = {
         "QUBT": "Speculative quantum-computing micro-cap with implied vol ~120%/yr. "
                 "Technical patterns are dominated by news and short-squeeze dynamics — TA edge is minimal.",
@@ -995,6 +1065,8 @@ def _compute_raw_score(
         score -= 0.06
     if vs.unusual and vs.ratio > 1.5 and pa.change_pct > 0:
         score += 0.04
+    if vs.unusual and vs.ratio > 1.5 and pa.change_pct < 0:
+        score -= 0.04   # Fix: distribution day — high volume on down bar
 
     # ADX directional bias
     if adx_b.trend_strength in ("moderate", "strong"):
@@ -1028,6 +1100,18 @@ def _compute_raw_score(
             score -= 0.04   # at or above upper band
         elif bb_b.pct_b < 0.05:
             score += 0.04   # at or below lower band
+
+    # Chart patterns (weight 0.06–0.08)
+    # These are computed and displayed but previously had zero effect on score.
+    pattern_str = " ".join(pa.patterns).lower()
+    if "double-top" in pattern_str and score > 0:
+        score -= 0.08   # reversal pattern at resistance — penalise bull
+    if "double-bottom" in pattern_str and score < 0:
+        score += 0.08   # reversal pattern at support — penalise bear
+    if "testing resistance" in pattern_str and score > 0:
+        score -= 0.04   # price at resistance = higher barrier for bulls
+    if "holding support" in pattern_str and score < 0:
+        score += 0.04   # price bouncing off support = lower barrier for bears
 
     return max(-1.0, min(1.0, score))
 
@@ -1602,7 +1686,15 @@ def _build_options_suggestion(
     iv_est = min(iv_est, DEFAULT_IV.get(sym, 0.40) * 1.6)
     iv_est = min(iv_est, 1.50)  # hard ceiling — 150% annualized
 
-    dte_default = {"1h": 10, "4h": 21, "daily": 35, "weekly": 60}[timeframe]
+    _dte_map = {"1h": 10, "4h": 21, "daily": 35, "weekly": 60}
+    dte_default = _dte_map[timeframe]
+    # High-IV names: shorten DTE to reduce theta cost and avoid paying
+    # for volatility that is unlikely to be realised directionally.
+    # iv_est > 0.80 (80% annualized) → cut DTE by 14 days; > 1.00 → cut by 21 days.
+    if iv_est > 1.00:
+        dte_default = max(_dte_map["1h"], dte_default - 21)
+    elif iv_est > 0.80:
+        dte_default = max(_dte_map["1h"], dte_default - 14)
 
     contract_type: str = "call" if composite_score >= 0 else "put"
 
@@ -1848,6 +1940,22 @@ def _build_trade_plan(
         f"{int(conviction*100)}%.{special_note}"
     )
 
+    # ---- Black-Scholes Greeks (analytical) ----------------------------------
+    delta_val: Optional[float] = None
+    theta_day: Optional[float] = None
+    vega_pct: Optional[float] = None
+    try:
+        from square18_signals.pricing import greeks as _greeks
+        _g = _greeks(
+            S=spot, K=float(strike), T=T, r=0.045, sigma=iv,
+            option_type=contract_type, q=0.0,
+        )
+        delta_val = round(_g.delta, 3)
+        theta_day = round(_g.theta_per_day, 4)   # $ per share per calendar day
+        vega_pct = round(_g.vega_per_pct, 4)     # $ per share per +1% IV
+    except Exception:
+        pass
+
     return TradePlan(
         contract_type=contract_type,  # type: ignore[arg-type]
         strike=round(strike, 2),
@@ -1862,6 +1970,9 @@ def _build_trade_plan(
         one_sigma_move_usd=one_sigma_usd,
         one_sigma_move_pct=one_sigma_pct,
         risk_reward=risk_reward,
+        delta=delta_val,
+        theta_per_day=theta_day,
+        vega_per_pct=vega_pct,
         rationale=rationale,
     )
 

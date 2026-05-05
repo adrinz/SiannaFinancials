@@ -4148,6 +4148,47 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
     )
   );
 
+  // Greeks row (delta · theta · vega)
+  const hasGreeks = tp.delta != null || tp.theta_per_day != null || tp.vega_per_pct != null;
+  const greeksRow = hasGreeks
+    ? h(
+      'div',
+      { class: 'ticket-greeks' },
+      h('div', { class: 'tg-title muted' }, 'Option Greeks (Black-Scholes estimate)'),
+      h(
+        'div',
+        { class: 'tg-grid' },
+        tp.delta != null
+          ? h(
+            'div',
+            { class: 'tg-item' },
+            h('div', { class: 'tg-val mono' }, tp.delta.toFixed(2)),
+            h('div', { class: 'tg-label' }, 'Delta'),
+            h('div', { class: 'tg-hint muted' }, `$${(tp.delta * tp.spot_at_entry).toFixed(2)} exposure per $1 move`),
+          )
+          : null,
+        tp.theta_per_day != null
+          ? h(
+            'div',
+            { class: 'tg-item' },
+            h('div', { class: `tg-val mono ${tp.theta_per_day < 0 ? 'neg' : ''}` }, `$${tp.theta_per_day.toFixed(3)}/day`),
+            h('div', { class: 'tg-label' }, 'Theta (daily)'),
+            h('div', { class: 'tg-hint muted' }, 'Time decay per calendar day per share'),
+          )
+          : null,
+        tp.vega_per_pct != null
+          ? h(
+            'div',
+            { class: 'tg-item' },
+            h('div', { class: 'tg-val mono' }, `$${tp.vega_per_pct.toFixed(3)}/1%IV`),
+            h('div', { class: 'tg-label' }, 'Vega (per 1% IV)'),
+            h('div', { class: 'tg-hint muted' }, 'Change in value per +1% implied volatility'),
+          )
+          : null,
+      ),
+    )
+    : null;
+
   const rationale = h('div', { class: 'rationale ticket-rationale' }, tp.rationale);
 
   return h(
@@ -4158,6 +4199,7 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
     warningBanner,
     statRow,
     planRow,
+    greeksRow,
     rationale
   );
 }

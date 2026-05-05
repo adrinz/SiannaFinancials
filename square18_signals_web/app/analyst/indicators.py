@@ -22,7 +22,7 @@ from typing import Optional
 __all__ = [
     "sma", "ema", "rsi", "macd", "atr", "rolling_std",
     "adx", "bollinger", "stochastic",
-    "pivots", "support_resistance",
+    "pivots", "support_resistance", "rsi_divergence",
 ]
 
 
@@ -386,3 +386,67 @@ def support_resistance(
         return out
 
     return _dedupe(supports_raw), _dedupe(resistances_raw)
+
+
+def rsi_divergence(
+    closes: list[float],
+    rsi_series: list[Optional[float]],
+    pivot_lookback: int = 4,
+    scan_bars: int = 50,
+) -> Optional[str]:
+    """Detect RSI divergence using the last two price swing pivots.
+
+    Returns
+    -------
+    ``"bearish"``
+        Price recently made a higher high, but RSI made a lower high at the
+        same pivot — weakening momentum at a new price peak.
+    ``"bullish"``
+        Price recently made a lower low, but RSI made a higher low —
+        strengthening momentum at a new price trough.
+    ``None``
+        No divergence detected within ``scan_bars`` bars.
+
+    Algorithm
+    ---------
+    1. Detect swing highs/lows using ``pivots()`` within the last ``scan_bars``.
+    2. Find the two most recent swing high pivots and compare prices + RSI.
+    3. Same for swing low pivots.
+    4. Only report divergence when at least 5 bars separate the two pivots
+       (avoids noise from micro-wiggles).
+    """
+    n = len(closes)
+    if n < max(pivot_lookback * 2 + 1, 20):
+        return None
+    rsi_vals = rsi_series  # same-indexed list
+
+    # Use the last scan_bars bars only
+    start = max(0, n - scan_bars)
+    c_slice = closes[start:]
+    r_slice = rsi_vals[start:]
+    # We need highs/lows — approximate from closes (no separate highs array here)
+    # Use closes as a proxy: valid for detecting divergence without OHLC
+    sh_idx, sl_idx = pivots(c_slice, c_slice, lookback=pivot_lookback)
+
+    def _rsi_at(i: int) -> Optional[float]:
+        return r_slice[i] if i < len(r_slice) else None
+
+    # ----- Bearish divergence (price HH, RSI LH) ---
+    if len(sh_idx) >= 2:
+        i1, i2 = sh_idx[-2], sh_idx[-1]  # i2 is more recent
+        p1, p2 = c_slice[i1], c_slice[i2]
+        r1, r2 = _rsi_at(i1), _rsi_at(i2)
+        if (i2 - i1) >= 5 and r1 is not None and r2 is not None:
+            if p2 > p1 and r2 < r1 - 1.5:
+                return "bearish"
+
+    # ----- Bullish divergence (price LL, RSI HL) ---
+    if len(sl_idx) >= 2:
+        i1, i2 = sl_idx[-2], sl_idx[-1]
+        p1, p2 = c_slice[i1], c_slice[i2]
+        r1, r2 = _rsi_at(i1), _rsi_at(i2)
+        if (i2 - i1) >= 5 and r1 is not None and r2 is not None:
+            if p2 < p1 and r2 > r1 + 1.5:
+                return "bullish"
+
+    return None

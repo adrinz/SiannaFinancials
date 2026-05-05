@@ -120,6 +120,10 @@ class TradePlan(BaseModel):
     one_sigma_move_usd: Optional[float]       # expected move over DTE
     one_sigma_move_pct: Optional[float]
     risk_reward: Optional[float]  # underlying directional R:R — call: (Tgt−S)/(S−stop); put: (S−Tgt)/(stop−S); not option $P&L/max loss
+    # Black-Scholes Greeks (analytical; same IV estimate as premium)
+    delta: Optional[float] = None             # directional exposure per $1 move in underlying (0→1 for calls, -1→0 for puts)
+    theta_per_day: Optional[float] = None     # time decay per calendar day in $ per share (always negative for long options)
+    vega_per_pct: Optional[float] = None      # $ per share change per +1% IV move
     rationale: str                            # 1-2 sentence plain-English "why"
 
 
