@@ -4106,6 +4106,15 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
     h('span', { class: `verdict-badge ${verdict}` }, verdict)
   );
 
+  // Break-even as % move from spot
+  const beMovePct = tp.break_even != null && tp.spot_at_entry > 0
+    ? Math.abs((tp.break_even - tp.spot_at_entry) / tp.spot_at_entry * 100)
+    : null;
+  // Theta as % of premium per week
+  const thetaWeeklyPct = tp.theta_per_day != null && tp.estimated_premium != null && tp.estimated_premium > 0
+    ? Math.abs(tp.theta_per_day * 7 / tp.estimated_premium * 100)
+    : null;
+
   const statRow = h(
     'div',
     { class: 'ticket-stats' },
@@ -4115,17 +4124,25 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
     ),
     ticketStat(
       tp.cost_per_contract != null ? fmtUSD(tp.cost_per_contract) : '—',
-      'Cost / contract'
+      'Max loss / contract'
     ),
     ticketStat(
-      tp.break_even != null ? `$${tp.break_even.toFixed(2)}` : '—',
-      'Break-even'
+      tp.break_even != null
+        ? `$${tp.break_even.toFixed(2)}${beMovePct != null ? ` (+${beMovePct.toFixed(1)}%)` : ''}`
+        : '—',
+      'Break-even (% needed)'
     ),
     ticketStat(`$${tp.spot_at_entry.toFixed(2)}`, 'Spot at entry'),
     ticketStat(
       tp.one_sigma_move_usd != null ? `±$${tp.one_sigma_move_usd.toFixed(2)}` : '—',
       `1σ move (${tp.expiry_dte}D)`
-    )
+    ),
+    thetaWeeklyPct != null
+      ? ticketStat(
+        `${thetaWeeklyPct.toFixed(1)}%/week`,
+        'Theta decay / week',
+      )
+      : null,
   );
 
   const planRow = h(
@@ -4199,6 +4216,47 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
 
   const rationale = h('div', { class: 'rationale ticket-rationale' }, tp.rationale);
 
+  // P&L scenario table (BS re-pricing estimates)
+  const hasScenarios = tp.scenario_at_target != null || tp.scenario_flat_14d != null || tp.scenario_at_stop != null;
+  const scenarioRow = hasScenarios
+    ? h(
+      'div',
+      { class: 'ticket-scenarios' },
+      h('div', { class: 'ts-title muted' }, 'Approximate P&L scenarios per contract (Black-Scholes re-priced)'),
+      h(
+        'div',
+        { class: 'ts-grid' },
+        tp.scenario_at_target != null
+          ? h('div', { class: `ts-item ${tp.scenario_at_target >= 0 ? 'pos' : 'neg'}` },
+            h('div', { class: 'ts-val mono' },
+              `${tp.scenario_at_target >= 0 ? '+' : ''}${fmtUSD(tp.scenario_at_target)}`),
+            h('div', { class: 'ts-label' }, 'If stock hits target'),
+            h('div', { class: 'ts-hint muted' }, `~DTE/3 days elapsed, stock at $${tp.target_price?.toFixed(2)}`),
+          )
+          : null,
+        tp.scenario_flat_14d != null
+          ? h('div', { class: `ts-item ${tp.scenario_flat_14d >= 0 ? 'pos' : 'neg'}` },
+            h('div', { class: 'ts-val mono' },
+              `${tp.scenario_flat_14d >= 0 ? '+' : ''}${fmtUSD(tp.scenario_flat_14d)}`),
+            h('div', { class: 'ts-label' }, 'If flat after 14 days'),
+            h('div', { class: 'ts-hint muted' }, 'Pure theta drag, stock at same price'),
+          )
+          : null,
+        tp.scenario_at_stop != null
+          ? h('div', { class: `ts-item ${tp.scenario_at_stop >= 0 ? 'pos' : 'neg'}` },
+            h('div', { class: 'ts-val mono' },
+              `${tp.scenario_at_stop >= 0 ? '+' : ''}${fmtUSD(tp.scenario_at_stop)}`),
+            h('div', { class: 'ts-label' }, 'If stock hits stop'),
+            h('div', { class: 'ts-hint muted' }, `Stock at $${tp.stop_loss?.toFixed(2)} (thesis invalidated)`),
+          )
+          : null,
+      ),
+      h('p', { class: 'ts-disclaimer muted' },
+        'Estimates use Black-Scholes with constant IV — actual P&L will differ due to IV changes, slippage, and bid-ask spread. Cut losses before stop is hit if signal conditions change.'
+      ),
+    )
+    : null;
+
   return h(
     'div',
     { class: 'ticket-card ticket-card-concrete' },
@@ -4208,6 +4266,7 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
     statRow,
     planRow,
     greeksRow,
+    scenarioRow,
     rationale
   );
 }

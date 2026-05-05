@@ -23,9 +23,11 @@ from .constants import TICKER_MAP
 _YF_TIMEOUT = 12.0
 _SPOT_CACHE: dict[str, tuple[float, float]] = {}
 _OPT_CACHE: dict[str, tuple[float, float]] = {}
+_SI_CACHE: dict[str, tuple[float, float]] = {}   # short interest % of float
 # Tunable when not using bypass — lower defaults so Cost/contract is less stale.
 _SPOT_TTL_SEC = float(os.environ.get("SQUARE18_SPOT_QUOTE_TTL_SEC", "30"))
 _OPT_TTL_SEC = float(os.environ.get("SQUARE18_OPTIONS_QUOTE_TTL_SEC", "30"))
+_SI_TTL_SEC = 3600.0  # short interest refreshes slowly (FINRA data is biweekly)
 
 
 def _mapped_symbol(sym: str) -> str:
@@ -39,6 +41,42 @@ def _run_yf(fn, timeout: float = _YF_TIMEOUT) -> Any:
             return ex.submit(fn).result(timeout=timeout)
         except Exception:
             return None
+
+
+def yf_short_interest_pct(sym: str) -> Optional[float]:
+    """Return short interest as a fraction of float (0.20 = 20% of float shorted).
+
+    Sourced from Yahoo Finance `.info` via yfinance. Data is biweekly (FINRA)
+    so results are cached for 1 hour. Returns ``None`` when unavailable.
+    """
+    u = sym.upper()
+    now = time.time()
+    hit = _SI_CACHE.get(u)
+    if hit and (now - hit[0]) < _SI_TTL_SEC:
+        return hit[1]
+
+    def _pull() -> Optional[float]:
+        try:
+            import yfinance as yf  # type: ignore
+        except ImportError:
+            return None
+        try:
+            info = yf.Ticker(_mapped_symbol(u)).info
+            v = info.get("shortPercentOfFloat") or info.get("shortRatio")
+            if v is not None:
+                # shortPercentOfFloat is 0–1 fraction; shortRatio is days-to-cover
+                # Only use shortPercentOfFloat here
+                spof = info.get("shortPercentOfFloat")
+                return float(spof) if spof is not None else None
+        except Exception:
+            pass
+        return None
+
+    v = _run_yf(_pull, timeout=6.0)
+    if v is not None and 0 < v <= 1.0:
+        _SI_CACHE[u] = (now, v)
+        return v
+    return None
 
 
 def yf_last_price(sym: str, *, bypass_cache: bool = False) -> Optional[float]:

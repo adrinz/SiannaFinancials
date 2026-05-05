@@ -619,7 +619,7 @@ def build_report(
     except Exception:
         pass
 
-    # 16. Stale-bar warning for intraday timeframes
+    # 18. Stale-bar warning for intraday timeframes
     if timeframe in ("1h", "4h"):
         from datetime import datetime as _dt, timezone as _tz
         try:
@@ -636,7 +636,82 @@ def build_report(
         except Exception:
             pass
 
-    # 17. VIX intraday spike — regime may have changed since last OHLCV bar
+    # 17. Earnings vs option expiry alignment
+    try:
+        _tp_dte = options.trade_plan.expiry_dte
+        if earnings_soon is not None and earnings_soon.days_until > 0:
+            _earn_days = earnings_soon.days_until
+            if _earn_days > _tp_dte:
+                signal_warnings.append(
+                    f"Option expires BEFORE earnings: your {_tp_dte}D contract expires "
+                    f"before earnings in {_earn_days}d. You will miss the post-earnings "
+                    "catalyst entirely. Consider a longer DTE option that expires after "
+                    f"the earnings date ({earnings_soon.earnings_date})."
+                )
+            else:
+                signal_warnings.append(
+                    f"Earnings in {_earn_days}d fall within your option's {_tp_dte}D window. "
+                    "The option is priced to include event IV — expect a 30-40% IV collapse "
+                    "after the report even if direction is correct. Consider entering AFTER "
+                    "earnings for a pure technical play, or use a debit spread to reduce vega."
+                )
+    except Exception:
+        pass
+
+    # 17b. Short interest squeeze risk
+    try:
+        from .yahoo_quotes import yf_short_interest_pct as _yf_si
+        _si = _yf_si(sym)
+        if _si is not None:
+            if composite < 0 and _si >= 0.20:
+                signal_warnings.append(
+                    f"⚠ High short interest: {_si*100:.0f}% of float is sold short. "
+                    "Bearish signals on heavily shorted stocks are dangerous — a short squeeze "
+                    "(forced short covering) can cause violent upside moves of 20-100%+ in days, "
+                    "turning your bearish puts into large losses. Short interest >20% of float = "
+                    "elevated squeeze risk even with bearish technicals."
+                )
+            elif composite > 0 and _si >= 0.30:
+                signal_warnings.append(
+                    f"High short interest: {_si*100:.0f}% of float is sold short (>30%). "
+                    "While this creates potential squeeze upside, the heavy short book also "
+                    "means institutional traders hold a strong contrary view. Elevated volatility."
+                )
+    except Exception:
+        pass
+
+    # 17c. Weekend theta warning (Thu/Fri entry with short DTE)
+    try:
+        from datetime import datetime as _dt_now
+        _dow = _dt_now.now().weekday()   # 0=Mon … 4=Fri
+        _tp_dte2 = options.trade_plan.expiry_dte
+        if _dow in (3, 4) and _tp_dte2 <= 21 and options.trade_plan.theta_per_day is not None:
+            _weekend_cost = round(abs(options.trade_plan.theta_per_day) * 2 * 100, 2)
+            _day_name = "Thursday" if _dow == 3 else "Friday"
+            signal_warnings.append(
+                f"Weekend theta: entering on {_day_name} with {_tp_dte2} DTE means "
+                f"paying ~${_weekend_cost:.2f}/contract over Sat+Sun while the market "
+                "is closed — no price movement, pure time decay. Consider entering "
+                "Monday or Tuesday for better theta efficiency."
+            )
+    except Exception:
+        pass
+
+    # 17d. Low DTE gamma explosion warning
+    try:
+        _tp_dte3 = options.trade_plan.expiry_dte
+        if _tp_dte3 <= 14:
+            signal_warnings.append(
+                f"Very short DTE: {_tp_dte3} days to expiry. Gamma is very high — a $1 "
+                "underlying move can change the option value by $0.20–$0.50 per share "
+                "(vs $0.05 at 35 DTE). This cuts both ways: gains are amplified but so "
+                "are losses. Very short DTE options are extremely high risk and not "
+                "suitable for directional trend plays."
+            )
+    except Exception:
+        pass
+
+    # 17e. VIX intraday spike — regime may have changed since last OHLCV bar
     if vix_change_today >= 4.0 and composite > 0:
         signal_warnings.append(
             f"VIX spiked +{vix_change_today:.1f} points today (now {vix_val:.1f}). "
@@ -2209,6 +2284,28 @@ def _build_trade_plan(
     except Exception:
         pass
 
+    # ---- P&L scenario estimates (BS repricing at key price levels) ----------
+    scenario_target: Optional[float] = None
+    scenario_flat14: Optional[float] = None
+    scenario_stop: Optional[float] = None
+    if premium is not None and target_price is not None and stop_loss is not None:
+        try:
+            from square18_signals.pricing import black_scholes_price as _bsp
+            T_target = max(1 / 365.0, T - T / 3.0)      # assume target in 1/3 of DTE
+            T_flat = max(1 / 365.0, T - 14 / 365.0)     # 14 days elapsed, flat
+            T_stop = max(1 / 365.0, T - T / 6.0)        # assume stop hit quickly
+            p_at_tgt = _bsp(S=target_price, K=float(strike), T=T_target, r=0.045,
+                            sigma=iv, option_type=contract_type, q=0.0)
+            p_flat = _bsp(S=spot, K=float(strike), T=T_flat, r=0.045,
+                          sigma=iv, option_type=contract_type, q=0.0)
+            p_at_stop = _bsp(S=stop_loss, K=float(strike), T=T_stop, r=0.045,
+                             sigma=iv, option_type=contract_type, q=0.0)
+            scenario_target = round((p_at_tgt - premium) * 100, 0)
+            scenario_flat14 = round((p_flat - premium) * 100, 0)
+            scenario_stop = round((p_at_stop - premium) * 100, 0)
+        except Exception:
+            pass
+
     return TradePlan(
         contract_type=contract_type,  # type: ignore[arg-type]
         strike=round(strike, 2),
@@ -2226,6 +2323,9 @@ def _build_trade_plan(
         delta=delta_val,
         theta_per_day=theta_day,
         vega_per_pct=vega_pct,
+        scenario_at_target=scenario_target,
+        scenario_flat_14d=scenario_flat14,
+        scenario_at_stop=scenario_stop,
         rationale=rationale,
     )
 

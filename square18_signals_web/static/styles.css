@@ -1315,6 +1315,24 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
 .of-card-detail { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); opacity: 0.85; }
 .of-card-adj { font-size: 10px; margin-top: 6px; }
 
+/* Trade ticket P&L scenarios */
+.ticket-scenarios {
+  padding: 12px 0 0;
+  border-top: 1px solid var(--stroke);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ts-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.ts-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+.ts-item { display: flex; flex-direction: column; gap: 2px; min-width: 140px; flex: 1; padding: 8px 12px; border-radius: 8px; background: var(--bg-elev); border: 1px solid var(--stroke); }
+.ts-item.pos { border-color: color-mix(in srgb, var(--success) 35%, var(--stroke)); }
+.ts-item.neg { border-color: color-mix(in srgb, var(--danger) 35%, var(--stroke)); }
+.ts-val { font-size: 15px; font-weight: 700; }
+.ts-label { font-size: 11px; font-weight: 600; }
+.ts-hint { font-size: 10px; line-height: 1.3; }
+.ts-disclaimer { margin: 0; font-size: 10px; line-height: 1.4; }
+
 /* Trade ticket Greeks row */
 .ticket-greeks {
   padding: 12px 0 0;

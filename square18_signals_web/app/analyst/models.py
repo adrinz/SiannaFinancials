@@ -124,6 +124,10 @@ class TradePlan(BaseModel):
     delta: Optional[float] = None             # directional exposure per $1 move in underlying (0→1 for calls, -1→0 for puts)
     theta_per_day: Optional[float] = None     # time decay per calendar day in $ per share (always negative for long options)
     vega_per_pct: Optional[float] = None      # $ per share change per +1% IV move
+    # Approximate P&L scenarios per contract (100 shares) using BS repricing
+    scenario_at_target: Optional[float] = None   # $ P&L if stock reaches target_price in DTE/3 days
+    scenario_flat_14d: Optional[float] = None    # $ P&L if stock stays flat after 14 days (pure theta drag)
+    scenario_at_stop: Optional[float] = None     # $ P&L if stock hits stop_loss
     rationale: str                            # 1-2 sentence plain-English "why"
 
 
