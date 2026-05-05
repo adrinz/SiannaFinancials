@@ -29,6 +29,14 @@ from .constants import (
 )
 from .data import OHLCV, get_ohlcv
 from .factors import bull_bear_balance_percent, derive_factors_from_report
+from .options_flow import get_options_flow
+from .regime import breadth_above_50d, vix_quote
+from .signal_config import (
+    bearish_threshold,
+    bullish_threshold,
+    load_signal_config,
+    probability_for_verdict,
+)
 from .yahoo_quotes import yf_last_price, yf_option_mid_per_share
 from .indicators import (
     adx as _adx,
@@ -51,6 +59,7 @@ from .models import (
     IndicatorRSI,
     IndicatorSMA,
     IndicatorStochastic,
+    OptionsFlowOut,
     OptionsSuggestion,
     OverviewRow,
     PriceAction,
@@ -59,6 +68,13 @@ from .models import (
     VolumeStats,
 )
 
+
+# ---------------------------------------------------------------------------
+# MTF quick-score in-process cache
+# ---------------------------------------------------------------------------
+
+_mtf_cache: dict[str, tuple[float, float]] = {}  # "SYM|tf" -> (ts, score)
+_MTF_CACHE_TTL = 120.0  # seconds
 
 # In-process cache so concurrent screener calls (earnings + movers + enrich) do
 # not each fan out a full build_report for the whole universe.
@@ -149,16 +165,89 @@ def build_report(
     bb_block = _bollinger_block(closes, bb_mid, bb_upper, bb_lower)
     stoch_block = _stochastic_block(stoch_k, stoch_d)
 
-    composite, verdict, conviction, headline = _score_and_verdict(
-        sym,
-        timeframe,
-        price_action,
-        volume_stats,
-        sma_block,
-        rsi_block,
-        macd_block,
-        adx_block,
+    # --- Tier-1 enhanced scoring pipeline -----------------------------------
+    cfg = load_signal_config()
+
+    # Step 1: raw deterministic score
+    raw_score = _compute_raw_score(
+        price_action, volume_stats, sma_block, rsi_block, macd_block, adx_block
     )
+
+    # Step 2: multi-timeframe confluence bonus / veto
+    mtf_score, mtf_note = _apply_mtf(raw_score, sym, timeframe, cfg)
+
+    # Step 3: regime gate (VIX + market breadth)
+    try:
+        vix_val, _ = vix_quote()
+        breadth_val = breadth_above_50d(timeframe)
+    except Exception:
+        vix_val, breadth_val = 17.0, 50.0
+    final_score, regime_note = _apply_regime_gate(mtf_score, vix_val, breadth_val, cfg)
+
+    # Step 4: apply configurable thresholds → verdict + conviction
+    verdict, conviction = _score_to_verdict(final_score, cfg)
+    composite = round(max(-1.0, min(1.0, final_score)), 3)
+    headline = _headline(sym, timeframe, verdict, price_action, sma_block,
+                         macd_block, rsi_block, adx_block)
+
+    # Step 5: calibrated historical probability from backtest artifact
+    try:
+        _bt_path = __file__[:__file__.index("app" + __import__("os").sep)] if False else None
+        import json as _json
+        from pathlib import Path as _Path
+        _bt_file = _Path(__file__).resolve().parent.parent.parent / "backtest_verdict.json"
+        if _bt_file.exists():
+            _bt = _json.loads(_bt_file.read_text())
+        else:
+            _bt = None
+    except Exception:
+        _bt = None
+
+    signal_probability: Optional[float] = None
+    if _bt is not None:
+        for _row in _bt.get("per_symbol", []):
+            if _row.get("symbol") == sym:
+                _bkt = _row.get("buckets", {}).get(verdict, {})
+                if int(_bkt.get("n", 0)) >= 20:
+                    signal_probability = float(_bkt["hit_rate"])
+                break
+        if signal_probability is None:
+            _agg = _bt.get("aggregate", {}).get(verdict, {})
+            if _agg.get("n"):
+                signal_probability = float(_agg["hit_rate"])
+    if signal_probability is None:
+        signal_probability = probability_for_verdict(verdict)
+
+    # Step 6: Tier-2 options intelligence (UOA · term-structure · skew)
+    # Fetched after the verdict so UOA/skew adj is applied to the pre-verdict score
+    # and re-applied below, keeping the scoring pipeline transparent.
+    try:
+        flow = get_options_flow(sym, spot_for_options, verdict, bypass_cache=fresh_quotes)
+        flow_out = OptionsFlowOut(
+            uoa_bull=flow.uoa_bull,
+            uoa_bear=flow.uoa_bear,
+            uoa_note=flow.uoa_note,
+            term_slope=flow.term_slope,
+            front_iv=flow.front_iv,
+            back_iv=flow.back_iv,
+            term_note=flow.term_note,
+            skew=flow.skew,
+            skew_note=flow.skew_note,
+            flow_score_adj=flow.flow_score_adj,
+            source=flow.source,
+        )
+        # Apply flow adjustment and re-derive verdict if it tips over a threshold
+        if flow.flow_score_adj != 0.0:
+            adj_composite = max(-1.0, min(1.0, composite + flow.flow_score_adj))
+            new_verdict, new_conviction = _score_to_verdict(adj_composite, cfg)
+            composite = round(adj_composite, 3)
+            verdict = new_verdict
+            conviction = new_conviction
+            headline = _headline(sym, timeframe, verdict, price_action, sma_block,
+                                 macd_block, rsi_block, adx_block)
+    except Exception:
+        flow_out = OptionsFlowOut(source="unavailable")
+    # -------------------------------------------------------------------------
 
     narrative = _compose_narrative(
         meta=meta,
@@ -222,7 +311,7 @@ def build_report(
         source=data.source,
         verdict=verdict,
         conviction=round(conviction, 3),
-        composite_score=round(composite, 3),
+        composite_score=composite,
         bull_pct=bull_pct,
         bear_pct=bear_pct,
         verdict_factors=[],
@@ -241,6 +330,10 @@ def build_report(
         options=options,
         chart=chart,
         earnings_soon=earnings_soon,
+        signal_probability=round(signal_probability, 1) if signal_probability is not None else None,
+        mtf_confluence=mtf_note or None,
+        regime_gate=regime_note or None,
+        options_flow=flow_out,
     )
     return report.model_copy(
         update={"verdict_factors": derive_factors_from_report(report)}
@@ -690,25 +783,32 @@ def _stochastic_block(
 # Composite score + verdict
 # ---------------------------------------------------------------------------
 
+_TF_HIGHER: dict[str, str] = {"1h": "4h", "4h": "daily", "daily": "weekly"}
 
-def _score_and_verdict(
-    symbol: str,
-    timeframe: Timeframe,
+
+def _compute_raw_score(
     pa: PriceAction,
     vs: VolumeStats,
     sb: IndicatorSMA,
     rsi_b: IndicatorRSI,
     macd_b: IndicatorMACD,
     adx_b: IndicatorADX,
-) -> tuple[float, str, float, str]:
+) -> float:
+    """Pure scoring function — no side effects, no thresholds.
+
+    Called both from the live pipeline and from the backtest tool.
+    All Tier-1 enhancements (MTF, regime gate) are applied *after* this
+    in ``build_report`` so that the backtest remains self-consistent.
+    """
     score = 0.0
+
     # Trend (weight 0.35)
     if pa.trend == "uptrend":
         score += 0.35
     elif pa.trend == "downtrend":
         score -= 0.35
 
-    # SMA stack (weight 0.20)
+    # SMA stack (weight 0.20 + cross events)
     if sb.stacked_bullish:
         score += 0.20
     elif sb.stacked_bearish:
@@ -718,13 +818,13 @@ def _score_and_verdict(
     if sb.death_cross_recent:
         score -= 0.08
 
-    # RSI (weight 0.10)
+    # RSI (weight 0.10) — contrarian tilt on extremes
     if rsi_b.state == "bullish":
         score += 0.08
     elif rsi_b.state == "bearish":
         score -= 0.08
     elif rsi_b.state == "overbought":
-        score -= 0.05  # contrarian tilt — overbought rarely persists cleanly
+        score -= 0.05
     elif rsi_b.state == "oversold":
         score += 0.05
 
@@ -746,7 +846,7 @@ def _score_and_verdict(
     if vs.unusual and vs.ratio > 1.5 and pa.change_pct > 0:
         score += 0.04
 
-    # Trend strength (+DI vs −DI) complements SMA / MACD momentum.
+    # ADX directional bias
     if adx_b.trend_strength in ("moderate", "strong"):
         if pa.trend == "uptrend" and adx_b.directional_bias == "bullish":
             score += 0.04
@@ -757,26 +857,160 @@ def _score_and_verdict(
         elif pa.trend == "downtrend" and adx_b.directional_bias == "bullish":
             score -= 0.03
 
-    score = max(-1.0, min(1.0, score))
+    return max(-1.0, min(1.0, score))
 
-    if score >= 0.3:
+
+def _quick_score(sym: str, timeframe: Timeframe) -> Optional[float]:
+    """Lightweight score for a symbol+timeframe (used for MTF confluence).
+
+    Results are in-process cached for _MTF_CACHE_TTL seconds to avoid
+    doubling the yfinance fan-out when the higher TF is also in the universe.
+    Calls _compute_raw_score (not the full build_report) to avoid recursion.
+    """
+    key = f"{sym}|{timeframe}"
+    now = time.time()
+    cached = _mtf_cache.get(key)
+    if cached and (now - cached[0]) < _MTF_CACHE_TTL:
+        return cached[1]
+    try:
+        data = get_ohlcv(sym, timeframe)
+        if len(data) < 60:
+            return None
+        closes, highs, lows, volumes = data.close, data.high, data.low, data.volume
+        s50 = sma(closes, 50)
+        s200 = sma(closes, 200) if len(closes) >= 200 else [None] * len(closes)
+        pa = _price_action(closes, highs, lows, s50)
+        vs = _volume_stats(volumes)
+        sb = _sma_block(closes, s50, s200)
+        rb = _rsi_block(_rsi(closes, 14))
+        ml, sl_, hl = _macd(closes)
+        mb = _macd_block(ml, sl_, hl)
+        atr_s = _atr(highs, lows, closes, 14)
+        adx_s, pdi_s, mdi_s = _adx(highs, lows, closes, 14)
+        ab = _adx_block(adx_s, pdi_s, mdi_s)
+        score = _compute_raw_score(pa, vs, sb, rb, mb, ab)
+        _mtf_cache[key] = (now, score)
+        return score
+    except Exception:
+        return None
+
+
+def _apply_mtf(raw_score: float, sym: str, timeframe: Timeframe, cfg: dict) -> tuple[float, str]:
+    """Multi-timeframe confluence: bonus if higher TF agrees, veto if it strongly disagrees.
+
+    Returns (adjusted_score, human-readable note).
+    """
+    mtf_cfg = cfg.get("mtf", {})
+    if not mtf_cfg.get("enabled", True):
+        return raw_score, ""
+    higher_tf = _TF_HIGHER.get(timeframe)
+    if higher_tf is None:
+        return raw_score, ""  # weekly has no higher TF
+    htf_score = _quick_score(sym, higher_tf)  # type: ignore[arg-type]
+    if htf_score is None:
+        return raw_score, ""
+
+    bonus = float(mtf_cfg.get("confluence_bonus", 0.06))
+    penalty = float(mtf_cfg.get("conflict_penalty", 0.06))
+    veto_t = float(mtf_cfg.get("strong_veto_threshold", 0.20))
+    htf_dir = "↑" if htf_score > 0.05 else ("↓" if htf_score < -0.05 else "→")
+
+    # Strong veto: higher TF is decisively opposite
+    if raw_score > 0 and htf_score < -veto_t:
+        adj = min(raw_score * 0.5, bullish_threshold() - 0.01)
+        return adj, f"{higher_tf} strongly bearish ({htf_score:+.2f}) → bull vetoed"
+    if raw_score < 0 and htf_score > veto_t:
+        adj = max(raw_score * 0.5, bearish_threshold() + 0.01)
+        return adj, f"{higher_tf} strongly bullish ({htf_score:+.2f}) → bear vetoed"
+
+    # Confluence bonus: same direction
+    if raw_score > 0 and htf_score > 0:
+        return min(1.0, raw_score + bonus), f"{higher_tf} confirms {htf_dir} ({htf_score:+.2f})"
+    if raw_score < 0 and htf_score < 0:
+        return max(-1.0, raw_score - bonus), f"{higher_tf} confirms {htf_dir} ({htf_score:+.2f})"
+
+    # Mild conflict: dampen
+    if raw_score > 0 and htf_score <= 0:
+        return raw_score - penalty, f"{higher_tf} neutral/bear {htf_dir} ({htf_score:+.2f}) dampens bull"
+    if raw_score < 0 and htf_score >= 0:
+        return raw_score + penalty, f"{higher_tf} neutral/bull {htf_dir} ({htf_score:+.2f}) dampens bear"
+
+    return raw_score, ""
+
+
+def _apply_regime_gate(score: float, vix: float, breadth: float, cfg: dict) -> tuple[float, str]:
+    """Suppress signals in high-volatility or low-breadth regimes.
+
+    Returns (adjusted_score, human-readable note).
+    """
+    reg = cfg.get("regime", {})
+    if not reg.get("enabled", True):
+        return score, ""
+
+    vix_extreme = float(reg.get("vix_extreme_suppress_all", 35.0))
+    vix_high = float(reg.get("vix_high_suppress_bull", 28.0))
+    breadth_low = float(reg.get("breadth_low_suppress_bull", 35.0))
+
+    note_parts: list[str] = []
+
+    if vix >= vix_extreme:
+        if abs(score) < 0.55:
+            score = score * 0.40
+            note_parts.append(f"VIX {vix:.0f} (extreme) → signal dampened 60%")
+        else:
+            note_parts.append(f"VIX {vix:.0f} (extreme, strong signal retained)")
+    elif vix >= vix_high and score > 0:
+        if score < 0.50:
+            score = score * 0.60
+            note_parts.append(f"VIX {vix:.0f} elevated → bull dampened 40%")
+        else:
+            note_parts.append(f"VIX {vix:.0f} elevated (strong bull retained)")
+
+    if breadth < breadth_low and score > 0:
+        if score < 0.45:
+            score = score * 0.70
+            note_parts.append(f"Breadth {breadth:.0f}% < {breadth_low:.0f}% → bull dampened 30%")
+        else:
+            note_parts.append(f"Breadth {breadth:.0f}% weak (strong bull retained)")
+
+    return max(-1.0, min(1.0, score)), " · ".join(note_parts)
+
+
+def _score_to_verdict(score: float, cfg: dict) -> tuple[str, float]:
+    """Convert a composite score to (verdict, conviction) using config thresholds."""
+    bull_tau = float(cfg["thresholds"]["BULLISH"]["min_score"])
+    bear_tau = float(cfg["thresholds"]["BEARISH"]["max_score"])
+    score = max(-1.0, min(1.0, score))
+    if score >= bull_tau:
         verdict = "BULLISH"
-    elif score <= -0.3:
+    elif score <= bear_tau:
         verdict = "BEARISH"
     else:
         verdict = "NEUTRAL"
-
     conviction = min(1.0, abs(score) * 1.25 + 0.25)
-    headline = _headline(
-        symbol,
-        timeframe,
-        verdict,
-        pa,
-        sb,
-        macd_b,
-        rsi_b,
-        adx_b,
-    )
+    return verdict, conviction
+
+
+def _score_and_verdict(
+    symbol: str,
+    timeframe: Timeframe,
+    pa: PriceAction,
+    vs: VolumeStats,
+    sb: IndicatorSMA,
+    rsi_b: IndicatorRSI,
+    macd_b: IndicatorMACD,
+    adx_b: IndicatorADX,
+) -> tuple[float, str, float, str]:
+    """Used by the backtest tool and ETF/screener quick-paths.
+
+    MTF and regime enhancements are NOT applied here (they require external
+    network calls that would make the backtest loop impractically slow).
+    The full live pipeline via ``build_report`` applies all enhancements.
+    """
+    score = _compute_raw_score(pa, vs, sb, rsi_b, macd_b, adx_b)
+    cfg = load_signal_config()
+    verdict, conviction = _score_to_verdict(score, cfg)
+    headline = _headline(symbol, timeframe, verdict, pa, sb, macd_b, rsi_b, adx_b)
     return score, verdict, conviction, headline
 
 

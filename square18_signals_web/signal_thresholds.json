@@ -1,0 +1,30 @@
+{
+  "_comment": "Signal quality configuration. Regenerate with: cd square18_signals_web && python -m tools.backtest_verdict --search-tau --out backtest_verdict.json",
+  "version": 1,
+  "generated_by": "backtest_verdict --search-tau",
+  "thresholds": {
+    "BULLISH": {
+      "min_score": 0.4,
+      "probability_pct": 56.59
+    },
+    "BEARISH": {
+      "max_score": -0.6,
+      "probability_pct": 53.69
+    },
+    "NEUTRAL": {
+      "probability_pct": 54.57
+    }
+  },
+  "mtf": {
+    "enabled": true,
+    "confluence_bonus": 0.06,
+    "conflict_penalty": 0.06,
+    "strong_veto_threshold": 0.2
+  },
+  "regime": {
+    "enabled": true,
+    "vix_high_suppress_bull": 28.0,
+    "vix_extreme_suppress_all": 35.0,
+    "breadth_low_suppress_bull": 35.0
+  }
+}

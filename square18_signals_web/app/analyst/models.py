@@ -180,6 +180,29 @@ class ReportOut(BaseModel):
     chart: ChartPayload
     earnings_soon: Optional[EarningsSoonOut] = None
 
+    # Tier-1 signal-quality enhancements
+    signal_probability: Optional[float] = None   # historical hit-rate % for this verdict/symbol
+    mtf_confluence: Optional[str] = None         # e.g. "weekly confirms ↑ (+0.38)"
+    regime_gate: Optional[str] = None            # e.g. "VIX 31 elevated → bull dampened 40%"
+
+    # Tier-2 options intelligence (#8 UOA · #9 term structure · #10 skew)
+    options_flow: Optional["OptionsFlowOut"] = None
+
+
+class OptionsFlowOut(BaseModel):
+    """Serialisable wrapper around OptionsFlowBlock for the API."""
+    uoa_bull: float = 0.0
+    uoa_bear: float = 0.0
+    uoa_note: str = ""
+    term_slope: Optional[float] = None
+    front_iv: Optional[float] = None
+    back_iv: Optional[float] = None
+    term_note: str = ""
+    skew: Optional[float] = None
+    skew_note: str = ""
+    flow_score_adj: float = 0.0
+    source: str = "unavailable"
+
 
 class OverviewRow(BaseModel):
     symbol: str

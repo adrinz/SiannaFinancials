@@ -17,6 +17,14 @@ _SIGNALS_SRC = _REPO / "square18_signals" / "src"
 if str(_SIGNALS_SRC) not in sys.path:
     sys.path.insert(0, str(_SIGNALS_SRC))
 
+# Load local secrets from square18_signals_web/.env (gitignored).
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+if load_dotenv is not None:
+    load_dotenv(_HERE.parent / ".env")
+
 from .analyst import TICKERS as ANALYST_TICKERS  # noqa: E402
 from .analyst.constants import SCREENER_EARNINGS_WINDOW_DAYS  # noqa: E402
 from .analyst import build_report, overview_rows  # noqa: E402

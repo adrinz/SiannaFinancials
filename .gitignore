@@ -5,5 +5,9 @@
 *.pyc
 .DS_Store
 
+# Local secrets (never commit)
+**/.env
+.env
+
 # Copy trade local snapshots / signal log (optional; safe to regenerate)
 square18_signals_web/app/analyst/data/copy_trade_state.json

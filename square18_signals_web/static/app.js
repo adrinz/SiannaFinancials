@@ -3189,6 +3189,11 @@ async function loadAnalystReport(symbol) {
   renderOverviewList();
 
   const key = `${symbol}|${analyst.timeframe}`;
+  // Evict options-flow data after 5 min so chain data stays fresh between tickers
+  const _rptCached = analyst.reports[key];
+  if (_rptCached && _rptCached._cachedAt && (Date.now() - _rptCached._cachedAt) > 5 * 60_000) {
+    delete analyst.reports[key];
+  }
   let rpt = analyst.reports[key];
   if (!rpt) {
     $('#analyst-report').innerHTML =
@@ -3199,6 +3204,7 @@ async function loadAnalystReport(symbol) {
         `/api/analyst/report/${encodeURIComponent(symbol)}` +
         `?timeframe=${encodeURIComponent(analyst.timeframe)}`,
       );
+      rpt._cachedAt = Date.now();
       analyst.reports[key] = rpt;
     } catch (e) {
       $('#analyst-report').innerHTML =
@@ -3360,6 +3366,47 @@ function renderAnalystReport(r, tickerD) {
     )
   );
 
+  // Signal quality row (Tier-1 enhancements)
+  const hasQuality = r.signal_probability != null || r.mtf_confluence || r.regime_gate;
+  if (hasQuality) {
+    root.append(
+      h(
+        'div',
+        { class: 'signal-quality-row' },
+        r.signal_probability != null
+          ? h(
+            'div',
+            { class: 'sq-chip' },
+            h('span', { class: 'sq-label muted' }, 'Hist. hit rate'),
+            h(
+              'span',
+              {
+                class: `sq-value mono ${r.signal_probability >= 55 ? 'pos' : r.signal_probability < 50 ? 'neg' : ''}`,
+              },
+              `${r.signal_probability.toFixed(1)}%`,
+            ),
+          )
+          : null,
+        r.mtf_confluence
+          ? h(
+            'div',
+            { class: 'sq-chip' },
+            h('span', { class: 'sq-label muted' }, 'MTF'),
+            h('span', { class: 'sq-value mono' }, r.mtf_confluence),
+          )
+          : null,
+        r.regime_gate
+          ? h(
+            'div',
+            { class: `sq-chip ${r.regime_gate.includes('dampened') ? 'sq-chip--warn' : ''}` },
+            h('span', { class: 'sq-label muted' }, 'Regime'),
+            h('span', { class: 'sq-value mono' }, r.regime_gate),
+          )
+          : null,
+      ),
+    );
+  }
+
   // Indicator grid
   const rsi = r.rsi;
   const macd = r.macd;
@@ -3450,6 +3497,151 @@ function renderAnalystReport(r, tickerD) {
       levelCard('Resistance', r.price_action.resistances, 'resistance')
     )
   );
+
+  // Tier-2 options intelligence (UOA · term structure · skew) — plain-English cards
+  const of = r.options_flow;
+  if (of && of.source !== 'unavailable') {
+    const uoaNet = of.uoa_bull - of.uoa_bear;
+
+    // ---- UOA plain-English ------------------------------------------------
+    let uoaLabel, uoaDetail, uoaTone;
+    if (of.uoa_bull < 0.1 && of.uoa_bear < 0.1) {
+      uoaLabel = 'Normal activity';
+      uoaDetail = 'No unusual options flow detected. Trading looks routine.';
+      uoaTone = '';
+    } else if (uoaNet > 0.25) {
+      uoaLabel = 'Bullish flow';
+      uoaDetail = `Unusually heavy call buying vs puts — smart money leaning bullish. Call pressure ${(of.uoa_bull * 100).toFixed(0)}% vs Put ${(of.uoa_bear * 100).toFixed(0)}%.`;
+      uoaTone = 'pos';
+    } else if (uoaNet < -0.25) {
+      uoaLabel = 'Bearish flow';
+      uoaDetail = `Unusually heavy put buying vs calls — smart money leaning bearish. Put pressure ${(of.uoa_bear * 100).toFixed(0)}% vs Call ${(of.uoa_bull * 100).toFixed(0)}%.`;
+      uoaTone = 'neg';
+    } else {
+      uoaLabel = 'Mixed flow';
+      uoaDetail = `Both calls and puts have unusual volume — market is hedging both directions, no clear edge. Call ${(of.uoa_bull * 100).toFixed(0)}% · Put ${(of.uoa_bear * 100).toFixed(0)}%.`;
+      uoaTone = '';
+    }
+    if (of.flow_score_adj !== 0) {
+      uoaDetail += ` Signal ${of.flow_score_adj > 0 ? 'boosted' : 'dampened'} ${of.flow_score_adj > 0 ? '+' : ''}${(of.flow_score_adj * 100).toFixed(1)}%.`;
+    }
+
+    // ---- Term structure plain-English -------------------------------------
+    let termLabel, termDetail, termTone;
+    if (of.term_slope == null) {
+      termLabel = 'Unavailable';
+      termDetail = 'Not enough expiry data to compute term structure.';
+      termTone = '';
+    } else if (of.term_slope > 1.08) {
+      termLabel = 'Market stressed';
+      termDetail = `Near-term volatility (${of.front_iv != null ? (of.front_iv * 100).toFixed(0) + '%' : '—'}) is much higher than longer-term (${of.back_iv != null ? (of.back_iv * 100).toFixed(0) + '%' : '—'}). The market is pricing in a near-term event — be cautious with directional bets.`;
+      termTone = 'warning';
+    } else if (of.term_slope > 1.04) {
+      termLabel = 'Mildly stressed';
+      termDetail = `Near-term IV slightly elevated vs longer-term. Could be earnings, macro, or sector event approaching.`;
+      termTone = 'warning';
+    } else if (of.term_slope < 0.94) {
+      termLabel = 'Calm & normal';
+      termDetail = `Longer-term volatility is higher than near-term — this is the healthy "contango" state. Good environment for directional plays.`;
+      termTone = 'pos';
+    } else {
+      termLabel = 'Flat (normal)';
+      termDetail = `Volatility is similar across near and far expiries. No specific event risk priced in.`;
+      termTone = '';
+    }
+
+    // ---- Skew plain-English -----------------------------------------------
+    let skewLabel, skewDetail, skewTone;
+    if (of.skew == null) {
+      skewLabel = 'Unavailable';
+      skewDetail = 'Not enough chain data to compute skew.';
+      skewTone = '';
+    } else if (of.skew >= 1.25) {
+      skewLabel = 'Bearish hedging';
+      skewDetail = `Put options are significantly more expensive than calls (${of.skew.toFixed(2)}× ratio). The market is paying a big premium to hedge downside — a bearish sign.`;
+      skewTone = 'neg';
+    } else if (of.skew >= 1.10) {
+      skewLabel = 'Mild put skew';
+      skewDetail = `Puts slightly pricier than calls (${of.skew.toFixed(2)}×). Normal defensive positioning — not alarming, but market is cautious.`;
+      skewTone = '';
+    } else if (of.skew <= 0.85) {
+      skewLabel = 'Bullish lean';
+      skewDetail = `Calls are more expensive than puts (${of.skew.toFixed(2)}×). Market is paying up for upside — a bullish positioning signal.`;
+      skewTone = 'pos';
+    } else {
+      skewLabel = 'Balanced skew';
+      skewDetail = `Calls and puts are similarly priced (${of.skew.toFixed(2)}×). No strong directional bias from the options market.`;
+      skewTone = '';
+    }
+
+    // Ticker-specific numeric badges so users can see data differs between symbols
+    const uoaNum = `Calls ${(of.uoa_bull * 100).toFixed(0)}% · Puts ${(of.uoa_bear * 100).toFixed(0)}%`;
+    const termNum = of.term_slope != null ? `${of.term_slope.toFixed(2)}×` : '—';
+    const skewNum = of.skew != null ? `${of.skew.toFixed(2)}×` : '—';
+    const adjTxt = of.flow_score_adj !== 0
+      ? `Signal ${of.flow_score_adj > 0 ? 'boosted' : 'dampened'} ${of.flow_score_adj > 0 ? '+' : ''}${(of.flow_score_adj * 100).toFixed(1)}%`
+      : 'No signal adjustment';
+
+    root.append(
+      h(
+        'div',
+        { class: 'options-flow-section' },
+        h(
+          'div',
+          { class: 'of-header' },
+          h('h3', { class: 'of-title' }, `${r.symbol} — Options intelligence`),
+          h('span', { class: 'of-sub muted' }, 'Live options chain data (Yahoo Finance, ~15 min delayed) · refreshed per ticker'),
+        ),
+        h(
+          'div',
+          { class: 'of-cards' },
+          // Card 1: UOA flow
+          h(
+            'div',
+            { class: `of-card ${uoaTone ? 'of-card--' + uoaTone : ''}` },
+            h('div', { class: 'of-card-icon' }, uoaTone === 'pos' ? '↑' : uoaTone === 'neg' ? '↓' : '↔'),
+            h('div', { class: 'of-card-body' },
+              h('div', { class: 'of-card-head-row' },
+                h('div', { class: `of-card-label ${uoaTone}` }, uoaLabel),
+                h('div', { class: 'of-card-num mono' }, uoaNum),
+              ),
+              h('div', { class: 'of-card-cat muted' }, 'Smart money flow (unusual volume/OI)'),
+              h('p', { class: 'of-card-detail' }, uoaDetail),
+              h('div', { class: 'of-card-adj muted mono' }, adjTxt),
+            ),
+          ),
+          // Card 2: Term structure
+          h(
+            'div',
+            { class: `of-card ${termTone ? 'of-card--' + termTone : ''}` },
+            h('div', { class: 'of-card-icon' }, termTone === 'warning' ? '⚠' : termTone === 'pos' ? '✓' : '~'),
+            h('div', { class: 'of-card-body' },
+              h('div', { class: 'of-card-head-row' },
+                h('div', { class: `of-card-label ${termTone}` }, termLabel),
+                h('div', { class: `of-card-num mono ${termTone}` }, termNum),
+              ),
+              h('div', { class: 'of-card-cat muted' }, 'Near-term vs long-term volatility'),
+              h('p', { class: 'of-card-detail' }, termDetail),
+            ),
+          ),
+          // Card 3: Put-call skew
+          h(
+            'div',
+            { class: `of-card ${skewTone ? 'of-card--' + skewTone : ''}` },
+            h('div', { class: 'of-card-icon' }, skewTone === 'neg' ? '↓' : skewTone === 'pos' ? '↑' : '='),
+            h('div', { class: 'of-card-body' },
+              h('div', { class: 'of-card-head-row' },
+                h('div', { class: `of-card-label ${skewTone}` }, skewLabel),
+                h('div', { class: `of-card-num mono ${skewTone}` }, skewNum),
+              ),
+              h('div', { class: 'of-card-cat muted' }, 'Put vs call option pricing ratio'),
+              h('p', { class: 'of-card-detail' }, skewDetail),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   // Price chart (same Yahoo-style OHLC path as Ticker detail; /api/ticker bars)
   const rangePills = [

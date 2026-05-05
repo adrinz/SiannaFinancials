@@ -179,7 +179,13 @@ Claude to **never introduce a number not present inside**. If Claude is
 unreachable or the API key is unset, the app still renders the full
 deterministic analysis — the Claude UI chips and brief card simply hide.
 
-Enable:
+Enable (pick one):
+
+**Recommended:** copy [`square18_signals_web/.env.example`](.env.example) to `square18_signals_web/.env`,
+set `ANTHROPIC_API_KEY`, then run `./run.sh`. The launcher sources `.env`, and `app.main`
+also loads it on import (so `uvicorn` from your IDE picks it up after `pip install -r requirements.txt`).
+
+**Or** export in the shell:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-…

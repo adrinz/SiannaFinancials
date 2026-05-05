@@ -34,6 +34,7 @@ from .analyst.factors import derive_factors_from_report
 from .analyst.data import get_ohlcv, get_ohlcv_1d_intraday, OHLCV
 from .analyst.market import news_for_ticker
 from .analyst.models import OverviewRow, ReportOut
+from .analyst.regime import breadth_above_50d, vix_quote
 from .analyst.report import build_report, overview_rows
 from .models import (
     CountsOut,
@@ -209,72 +210,12 @@ def regime_envelope(last_scan_iso: str, timeframe: Timeframe = "daily") -> Regim
     )
 
 
-_breadth_lock = threading.Lock()
-_breadth_cache: dict[Timeframe, tuple[float, float]] = {}
-BREADTH_CACHE_TTL_SEC = 300.0
-
-
 def _vix_quote() -> tuple[float, float]:
-    """Return (vix_last, vix_1d_change). Falls back to a sensible default."""
-    try:
-        series = get_ohlcv("VIX", "daily")
-        if len(series) >= 2:
-            last = float(series.close[-1])
-            prev = float(series.close[-2])
-            chg = last - prev
-            return last, chg
-        if len(series) == 1:
-            return float(series.close[-1]), 0.0
-    except Exception:
-        pass
-    return 17.0, 0.0
-
-
-def _compute_breadth_pct_above_50d(timeframe: Timeframe) -> float:
-    """% of tracked equities trading above their 50-bar SMA (uncached)."""
-    from .analyst.indicators import sma
-
-    # Equities only — VIX above its own 50d means more fear, which
-    # inverts the usual "bullish" reading, so we exclude it.
-    symbols = [s for s in TICKER_MAP.keys() if s != "VIX"]
-    above = 0
-    total = 0
-    for sym in symbols:
-        try:
-            series = get_ohlcv(sym, timeframe)
-        except Exception:
-            continue
-        closes = series.close
-        if len(closes) < 50:
-            continue
-        s50 = sma(closes, 50)
-        if not s50 or s50[-1] is None:
-            continue
-        total += 1
-        if closes[-1] > s50[-1]:
-            above += 1
-    if total == 0:
-        return 50.0
-    return above / total * 100.0
+    return vix_quote()
 
 
 def _breadth_above_50d(timeframe: Timeframe) -> float:
-    """% above 50d SMA — one expensive yfinance pass per *timeframe*; TTL-cached."""
-    now = time.time()
-    with _breadth_lock:
-        hit = _breadth_cache.get(timeframe)
-        if hit and (now - hit[0]) < BREADTH_CACHE_TTL_SEC:
-            return hit[1]
-
-    pct = _compute_breadth_pct_above_50d(timeframe)
-
-    with _breadth_lock:
-        now2 = time.time()
-        hit2 = _breadth_cache.get(timeframe)
-        if hit2 and (now2 - hit2[0]) < BREADTH_CACHE_TTL_SEC:
-            return hit2[1]
-        _breadth_cache[timeframe] = (time.time(), pct)
-    return pct
+    return breadth_above_50d(str(timeframe))
 
 
 def _regime_label(vix: float, trend_score: float, breadth_pct: float) -> str:

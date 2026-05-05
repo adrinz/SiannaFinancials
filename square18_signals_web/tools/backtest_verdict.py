@@ -62,13 +62,14 @@ from app.analyst.indicators import sma  # noqa: E402
 from app.analyst.report import (  # noqa: E402
     _adx_block,
     _atr_block,
+    _compute_raw_score,
     _macd_block,
     _price_action,
     _rsi_block,
-    _score_and_verdict,
     _sma_block,
     _volume_stats,
 )
+from app.analyst.signal_config import load_signal_config  # noqa: E402
 
 
 @dataclass
@@ -115,8 +116,17 @@ class Bucket:
         )
 
 
-def _score_window(closes, highs, lows, volumes, sym, timeframe) -> tuple[str, float, float]:
-    """Rebuild indicator blocks for the given window and return (verdict, conviction, score)."""
+def _score_window(
+    closes, highs, lows, volumes,
+    bull_tau: float = 0.30, bear_tau: float = -0.40,
+) -> tuple[str, float, float]:
+    """Rebuild indicator blocks and return (verdict, conviction, score).
+
+    Uses ``_compute_raw_score`` (no MTF / regime side effects) so the
+    backtest loop stays reproducible and fast.  Thresholds are passed
+    explicitly so ``--search-tau`` can sweep values without touching
+    ``signal_thresholds.json``.
+    """
     sma50 = sma(closes, 50)
     sma200 = sma(closes, 200) if len(closes) >= 200 else [None] * len(closes)
     rsi_series = _rsi(closes, 14)
@@ -129,12 +139,17 @@ def _score_window(closes, highs, lows, volumes, sym, timeframe) -> tuple[str, fl
     sb = _sma_block(closes, sma50, sma200)
     rsi_b = _rsi_block(rsi_series)
     macd_b = _macd_block(macd_line, signal_line, hist_line)
-    _atr_block(atr_series, closes)  # not used directly in _score_and_verdict
+    _atr_block(atr_series, closes)
     adx_b = _adx_block(adx_series, plus_di_series, minus_di_series)
 
-    score, verdict, conviction, _headline = _score_and_verdict(
-        sym, timeframe, pa, vs, sb, rsi_b, macd_b, adx_b
-    )
+    score = _compute_raw_score(pa, vs, sb, rsi_b, macd_b, adx_b)
+    if score >= bull_tau:
+        verdict = "BULLISH"
+    elif score <= bear_tau:
+        verdict = "BEARISH"
+    else:
+        verdict = "NEUTRAL"
+    conviction = min(1.0, abs(score) * 1.25 + 0.25)
     return verdict, conviction, score
 
 
@@ -145,6 +160,8 @@ def backtest_symbol(
     min_bars: int,
     stride: int = 1,
     hc_filter: float = 0.0,
+    bull_tau: float = 0.30,
+    bear_tau: float = -0.40,
 ) -> tuple[dict, list[BarResult]]:
     data = get_ohlcv(symbol, timeframe)
     n = len(data.close)
@@ -160,7 +177,7 @@ def backtest_symbol(
         volumes = data.volume[: t + 1]
         try:
             verdict, conviction, score = _score_window(
-                closes, highs, lows, volumes, symbol, timeframe
+                closes, highs, lows, volumes, bull_tau=bull_tau, bear_tau=bear_tau,
             )
         except Exception:
             continue
@@ -206,6 +223,53 @@ def backtest_symbol(
     )
 
 
+def _tau_search(universe: list[str], timeframe: Timeframe, horizon: int,
+                min_bars: int, stride: int) -> tuple[float, float]:
+    """Grid-search BULLISH and BEARISH τ to maximise aggregate profit-factor.
+
+    Returns (best_bull_tau, best_bear_tau) rounded to 2 decimal places.
+    """
+    import itertools
+    bull_vals = [round(v, 2) for v in [x * 0.05 for x in range(5, 13)]]   # 0.25..0.60
+    bear_vals = [round(-v, 2) for v in [x * 0.05 for x in range(5, 13)]]  # -0.25..-0.60
+
+    # Collect raw bar results once per symbol (at τ=0 to get all scores)
+    all_rows: list[BarResult] = []
+    for sym in universe:
+        _, rows = backtest_symbol(
+            sym, timeframe, horizon, min_bars, stride=stride,
+            bull_tau=0.01, bear_tau=-0.01,  # include everything
+        )
+        all_rows.extend(rows)
+
+    if not all_rows:
+        return 0.30, -0.40
+
+    best_pf = -1.0
+    best_pair = (0.30, -0.40)
+    for bt, br in itertools.product(bull_vals, bear_vals):
+        bull_b, bear_b, neu_b = Bucket(), Bucket(), Bucket()
+        for r in all_rows:
+            if r.score >= bt:
+                bull_b.add(r.fwd_return_pct)
+            elif r.score <= br:
+                bear_b.add(-r.fwd_return_pct)
+            else:
+                neu_b.add(r.fwd_return_pct)
+        bs, brs = bull_b.summary(), bear_b.summary()
+        pf_bull = bs.get("profit_factor") or 0.0
+        pf_bear = brs.get("profit_factor") or 0.0
+        n_bull, n_bear = bs.get("n", 0), brs.get("n", 0)
+        # Require at least 50 bars in each directional bucket
+        if n_bull < 50 or n_bear < 50:
+            continue
+        combined_pf = (pf_bull * n_bull + pf_bear * n_bear) / (n_bull + n_bear)
+        if combined_pf > best_pf:
+            best_pf = combined_pf
+            best_pair = (bt, br)
+    return best_pair
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--timeframe", default="daily",
@@ -221,9 +285,24 @@ def main() -> int:
     ap.add_argument("--symbols", nargs="*", default=None,
                     help="override the curated ticker list")
     ap.add_argument("--out", default="backtest_verdict.json")
+    ap.add_argument("--search-tau", action="store_true",
+                    help="grid-search BULLISH/BEARISH thresholds for best PF and "
+                         "emit signal_thresholds.json alongside the backtest artifact")
+    ap.add_argument("--thresholds-out", default="signal_thresholds.json",
+                    help="output path for the tuned thresholds (--search-tau only)")
     args = ap.parse_args()
 
     universe = args.symbols or [m["symbol"] for m in TICKERS]
+
+    # Optional: tune thresholds first, then run backtest with the best τ.
+    bull_tau, bear_tau = 0.30, -0.40  # defaults
+    if args.search_tau:
+        print("Searching for best BULLISH / BEARISH τ …")
+        bull_tau, bear_tau = _tau_search(
+            universe, args.timeframe, args.horizon, args.min_bars, args.stride
+        )
+        print(f"  Best τ: BULL ≥ {bull_tau}  BEAR ≤ {bear_tau}")
+
     per_symbol: list[dict] = []
     global_buckets: dict[str, Bucket] = {
         "BULLISH": Bucket(),
@@ -235,6 +314,7 @@ def main() -> int:
         summary, rows = backtest_symbol(
             sym, args.timeframe, args.horizon, args.min_bars,
             stride=args.stride, hc_filter=args.min_conviction,
+            bull_tau=bull_tau, bear_tau=bear_tau,
         )
         per_symbol.append(summary)
         total_rows += len(rows)
@@ -262,7 +342,7 @@ def main() -> int:
     print("=" * 78)
     print(
         f"AGGREGATE (tf={args.timeframe} horizon={args.horizon}b "
-        f"min_conv={args.min_conviction}, total_rows={total_rows})"
+        f"τ_bull={bull_tau} τ_bear={bear_tau} total_rows={total_rows})"
     )
     for name in ("BULLISH", "BEARISH", "NEUTRAL"):
         s = agg[name]
@@ -283,11 +363,38 @@ def main() -> int:
         "min_bars": args.min_bars,
         "stride": args.stride,
         "min_conviction": args.min_conviction,
+        "bull_tau": bull_tau,
+        "bear_tau": bear_tau,
         "per_symbol": per_symbol,
         "aggregate": agg,
     }
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"\nwrote {args.out}")
+
+    if args.search_tau:
+        thr_path = Path(args.thresholds_out)
+        existing: dict = {}
+        if thr_path.exists():
+            try:
+                existing = json.loads(thr_path.read_text())
+            except Exception:
+                existing = {}
+        existing.setdefault("thresholds", {})
+        existing["thresholds"]["BULLISH"] = {
+            "min_score": bull_tau,
+            "probability_pct": agg.get("BULLISH", {}).get("hit_rate", 55.5),
+        }
+        existing["thresholds"]["BEARISH"] = {
+            "max_score": bear_tau,
+            "probability_pct": agg.get("BEARISH", {}).get("hit_rate", 52.5),
+        }
+        existing["thresholds"]["NEUTRAL"] = {
+            "probability_pct": agg.get("NEUTRAL", {}).get("hit_rate", 55.5),
+        }
+        existing["generated_by"] = "backtest_verdict --search-tau"
+        existing["version"] = existing.get("version", 1)
+        thr_path.write_text(json.dumps(existing, indent=2))
+        print(f"wrote tuned thresholds → {thr_path}")
     return 0
 
 

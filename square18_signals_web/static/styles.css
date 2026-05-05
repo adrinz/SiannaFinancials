@@ -1270,6 +1270,72 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
 
 .analyst-report { display: flex; flex-direction: column; gap: 16px; }
 
+/* Tier-2 options intelligence section */
+.options-flow-section { display: flex; flex-direction: column; gap: 12px; }
+.of-header { display: flex; flex-direction: column; gap: 2px; }
+.of-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  margin: 0;
+}
+.of-sub { font-size: 11px; }
+.of-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.of-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: var(--bg-elev);
+}
+.of-card--pos  { border-color: color-mix(in srgb, var(--success) 40%, var(--stroke)); }
+.of-card--neg  { border-color: color-mix(in srgb, var(--danger)  40%, var(--stroke)); }
+.of-card--warning { border-color: color-mix(in srgb, #f59e0b 40%, var(--stroke)); }
+.of-card-icon {
+  font-size: 18px;
+  line-height: 1;
+  padding-top: 2px;
+  flex-shrink: 0;
+  width: 22px;
+  text-align: center;
+  opacity: 0.85;
+}
+.of-card-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.of-card-head-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.of-card-label { font-size: 14px; font-weight: 700; line-height: 1.2; }
+.of-card-num { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.of-card-cat { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; margin: 2px 0 5px; }
+.of-card-detail { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); opacity: 0.85; }
+.of-card-adj { font-size: 10px; margin-top: 6px; }
+
+/* Tier-1 signal quality row (hit rate · MTF · regime) */
+.signal-quality-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+.sq-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  font-size: 11px;
+}
+.sq-chip--warn { border-color: color-mix(in srgb, var(--warning, #f59e0b) 50%, var(--stroke)); }
+.sq-label { text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.sq-value { font-size: 12px; }
+
 .report-hero {
   display: flex;
   justify-content: space-between;

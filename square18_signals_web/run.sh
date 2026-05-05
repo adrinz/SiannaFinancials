@@ -22,6 +22,13 @@ PY="${PYTHON:-python3}"
 
 echo ">> Sianna Financials web app"
 echo ">> mode=$MODE  host=$HOST  port=$PORT"
+if [[ -f .env ]]; then
+  echo ">> loading .env (API keys / local overrides)"
+  set -a
+  # shellcheck source=/dev/null
+  source .env
+  set +a
+fi
 echo ">> open http://$HOST:$PORT/  (Ctrl+C to stop)"
 echo
 

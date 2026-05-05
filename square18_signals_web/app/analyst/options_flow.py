@@ -1,0 +1,378 @@
+"""Tier-2 options intelligence: UOA (#8), term-structure slope (#9), put-call skew (#10).
+
+All data is sourced from the Yahoo Finance options chain — the same free,
+slightly delayed feed the rest of the app uses.  No new subscriptions are
+required.
+
+What each signal does
+---------------------
+#8 UOA-lite (volume/OI ratio)
+    For each OTM strike, volume / max(1, open_interest) > UOA_RATIO_THRESHOLD
+    flags "unusual" activity.  Net call UOA vs net put UOA contributes a
+    directional kicker (±MAX_UOA_ADJ) to the composite score.
+
+#9 Term-structure slope
+    front-month ATM IV / back-month (~90d) ATM IV.
+    Ratio > BACKWARDATION_THRESHOLD → market is stressed / event-driven.
+    Dampens a bull signal when we're in backwardation; adds a small bear kicker.
+
+#10 Put-call skew
+    Average OTM put IV / average OTM call IV in a ±SKEW_WINDOW_PCT band.
+    Elevated put skew (>SKEW_ELEVATED) dampens bull calls, reinforces bears.
+    Elevated call skew (<SKEW_CALL) confirms bulls, dampens bears.
+
+Score-adjustment cap
+    ``flow_score_adj`` is capped at ±MAX_FLOW_ADJ so options flow never
+    overrides a strong technical picture — it only tilts a borderline call.
+"""
+from __future__ import annotations
+
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+# ── Cache ────────────────────────────────────────────────────────────────────
+_CHAIN_LOCK = threading.Lock()
+_CHAIN_CACHE: dict[str, tuple[float, object]] = {}  # sym -> (ts, ChainSnapshot)
+_CHAIN_TTL = int(os.environ.get("SQUARE18_CHAIN_TTL_SEC", "300"))  # 5 min
+
+# ── Tuning constants ─────────────────────────────────────────────────────────
+UOA_RATIO_THRESHOLD = 3.0       # V/OI floor to classify a strike as "unusual"
+UOA_MIN_VOLUME = 50             # ignore trivially thin strikes
+UOA_OTM_BAND = 0.20             # only look at strikes within ±20% of spot for UOA
+MAX_UOA_ADJ = 0.08              # max score adjustment from UOA alone
+
+SKEW_WINDOW_PCT = 0.15          # OTM band for skew calc (±15% of spot)
+SKEW_ELEVATED = 1.20            # put/call IV ratio: above → elevated put skew
+SKEW_CALL = 0.85                # below → call skew (unusual, confirms bulls)
+MAX_SKEW_ADJ = 0.05             # max score adjustment from skew
+
+BACKWARDATION_THRESHOLD = 1.05  # front/back IV slope above → backwardation
+MAX_TERM_ADJ = 0.05             # max score adjustment from term structure
+
+MAX_FLOW_ADJ = 0.12             # hard cap on total flow_score_adj
+
+
+# ── Data shapes ──────────────────────────────────────────────────────────────
+
+@dataclass
+class ChainSnapshot:
+    """Minimal options chain extract for one symbol (≤3 nearest expiries)."""
+    sym: str
+    spot: float
+    expiries: list[str]          # ISO date strings, sorted ascending
+    calls: list[dict]            # rows: strike, volume, openInterest, impliedVolatility
+    puts: list[dict]
+    source: str                  # "yfinance" | "unavailable"
+
+
+@dataclass
+class OptionsFlowBlock:
+    """Options intelligence output — attached to ReportOut."""
+
+    # UOA
+    uoa_bull: float = 0.0        # 0..1 net unusual call intensity
+    uoa_bear: float = 0.0        # 0..1 net unusual put intensity
+    uoa_note: str = ""
+
+    # Term structure
+    term_slope: Optional[float] = None   # front/back ATM IV ratio
+    front_iv: Optional[float] = None
+    back_iv: Optional[float] = None
+    term_note: str = ""
+
+    # Skew
+    skew: Optional[float] = None         # OTM put IV / OTM call IV
+    skew_note: str = ""
+
+    # Net adjustment applied to composite score (±MAX_FLOW_ADJ)
+    flow_score_adj: float = 0.0
+
+    source: str = "unavailable"
+
+
+# ── Chain fetcher ─────────────────────────────────────────────────────────────
+
+def _fetch_chain(sym: str, spot: float, bypass_cache: bool = False) -> ChainSnapshot:
+    """Pull the nearest ≤3 expiries from Yahoo and return a ChainSnapshot."""
+    u = sym.upper()
+    now = time.time()
+    if not bypass_cache:
+        with _CHAIN_LOCK:
+            hit = _CHAIN_CACHE.get(u)
+        if hit and (now - hit[0]) < _CHAIN_TTL:
+            return hit[1]  # type: ignore[return-value]
+
+    def _pull() -> ChainSnapshot:
+        try:
+            import yfinance as yf  # type: ignore
+        except ImportError:
+            return ChainSnapshot(sym=u, spot=spot, expiries=[], calls=[], puts=[], source="unavailable")
+
+        from .constants import TICKER_MAP
+        yfs = TICKER_MAP.get(u, {}).get("yfinance_symbol", u)
+        try:
+            tk = yf.Ticker(yfs)
+            exps = list(getattr(tk, "options", None) or [])
+        except Exception:
+            return ChainSnapshot(sym=u, spot=spot, expiries=[], calls=[], puts=[], source="unavailable")
+
+        if not exps:
+            return ChainSnapshot(sym=u, spot=spot, expiries=[], calls=[], puts=[], source="unavailable")
+
+        selected = exps[:3]  # nearest 3 expiries
+        all_calls: list[dict] = []
+        all_puts: list[dict] = []
+        for exp in selected:
+            try:
+                ch = tk.option_chain(exp)
+                for row in (ch.calls.to_dict("records") if ch.calls is not None else []):
+                    all_calls.append({**row, "_expiry": exp})
+                for row in (ch.puts.to_dict("records") if ch.puts is not None else []):
+                    all_puts.append({**row, "_expiry": exp})
+            except Exception:
+                continue
+
+        return ChainSnapshot(
+            sym=u, spot=spot, expiries=selected,
+            calls=all_calls, puts=all_puts, source="yfinance",
+        )
+
+    from .yahoo_quotes import _run_yf
+    snap = _run_yf(_pull, timeout=15.0) or ChainSnapshot(
+        sym=u, spot=spot, expiries=[], calls=[], puts=[], source="unavailable"
+    )
+    with _CHAIN_LOCK:
+        _CHAIN_CACHE[u] = (time.time(), snap)
+    return snap
+
+
+# ── Signal calculators ────────────────────────────────────────────────────────
+
+def _uoa(snap: ChainSnapshot) -> tuple[float, float, str]:
+    """#8 — Volume/OI ratio analysis.  Returns (bull_score 0..1, bear_score 0..1, note)."""
+    spot = snap.spot
+    if not snap.calls and not snap.puts:
+        return 0.0, 0.0, ""
+
+    lo, hi = spot * (1 - UOA_OTM_BAND), spot * (1 + UOA_OTM_BAND)
+
+    def _score_legs(rows: list[dict], is_call: bool) -> float:
+        total_uoa = 0.0
+        n_unusual = 0
+        for r in rows:
+            k = float(r.get("strike") or 0)
+            vol = float(r.get("volume") or 0)
+            oi = float(r.get("openInterest") or 0)
+            if vol < UOA_MIN_VOLUME:
+                continue
+            # OTM only
+            if is_call and k <= spot:
+                continue
+            if not is_call and k >= spot:
+                continue
+            if not (lo <= k <= hi):
+                continue
+            ratio = vol / max(1.0, oi)
+            if ratio >= UOA_RATIO_THRESHOLD:
+                total_uoa += min(ratio / 10.0, 1.0)  # normalise
+                n_unusual += 1
+        return round(min(1.0, total_uoa / max(1, n_unusual)) if n_unusual else 0.0, 3)
+
+    bull = _score_legs(snap.calls, is_call=True)
+    bear = _score_legs(snap.puts, is_call=False)
+
+    parts: list[str] = []
+    if bull >= 0.3:
+        parts.append(f"unusual call OI/vol ({bull:.2f})")
+    if bear >= 0.3:
+        parts.append(f"unusual put OI/vol ({bear:.2f})")
+    note = " · ".join(parts) if parts else "no unusual flow"
+    return bull, bear, note
+
+
+def _term_structure(snap: ChainSnapshot) -> tuple[Optional[float], Optional[float], Optional[float], str]:
+    """#9 — Term-structure slope: front ATM IV / back ATM IV.
+
+    Returns (slope, front_iv, back_iv, note).
+    """
+    exps = snap.expiries
+    if len(exps) < 2:
+        return None, None, None, ""
+
+    spot = snap.spot
+
+    def _atm_iv(rows: list[dict], expiry: str) -> Optional[float]:
+        near = [r for r in rows if r.get("_expiry") == expiry]
+        if not near:
+            return None
+        best: Optional[dict] = None
+        best_dist = float("inf")
+        for r in near:
+            k = float(r.get("strike") or 0)
+            iv = float(r.get("impliedVolatility") or 0)
+            if iv <= 0:
+                continue
+            d = abs(k - spot)
+            if d < best_dist:
+                best_dist = d
+                best = r
+        if not best:
+            return None
+        iv = float(best.get("impliedVolatility") or 0)
+        return round(iv, 4) if iv > 0 else None
+
+    all_rows = snap.calls + snap.puts
+    front_iv = _atm_iv(all_rows, exps[0])
+    # Target the expiry closest to ~45-90 days for back IV
+    back_exp = exps[-1]
+    for exp in exps[1:]:
+        try:
+            d = (datetime.strptime(exp, "%Y-%m-%d") - datetime.utcnow()).days
+            if d >= 30:
+                back_exp = exp
+                break
+        except Exception:
+            pass
+    back_iv = _atm_iv(all_rows, back_exp)
+
+    if front_iv is None or back_iv is None or back_iv <= 0:
+        return None, front_iv, back_iv, ""
+
+    slope = round(front_iv / back_iv, 3)
+    if slope > BACKWARDATION_THRESHOLD:
+        note = f"backwardation {slope:.2f}× (front IV {front_iv:.0%} > back {back_iv:.0%}) — event/stress"
+    elif slope < 0.95:
+        note = f"contango {slope:.2f}× (front {front_iv:.0%} < back {back_iv:.0%}) — calm"
+    else:
+        note = f"flat structure {slope:.2f}× ({front_iv:.0%} / {back_iv:.0%})"
+    return slope, front_iv, back_iv, note
+
+
+def _skew(snap: ChainSnapshot) -> tuple[Optional[float], str]:
+    """#10 — OTM put IV / OTM call IV (in ±SKEW_WINDOW_PCT band from spot)."""
+    spot = snap.spot
+    lo_put = spot * (1 - SKEW_WINDOW_PCT)
+    hi_put = spot
+    lo_call = spot
+    hi_call = spot * (1 + SKEW_WINDOW_PCT)
+
+    def _avg_iv(rows: list[dict], lo: float, hi: float) -> Optional[float]:
+        ivs = []
+        for r in rows:
+            k = float(r.get("strike") or 0)
+            if not (lo < k <= hi):
+                continue
+            iv = float(r.get("impliedVolatility") or 0)
+            if iv > 0:
+                ivs.append(iv)
+        return round(sum(ivs) / len(ivs), 4) if ivs else None
+
+    put_iv = _avg_iv(snap.puts, lo_put, hi_put)
+    call_iv = _avg_iv(snap.calls, lo_call, hi_call)
+
+    if put_iv is None or call_iv is None or call_iv <= 0:
+        return None, ""
+
+    ratio = round(put_iv / call_iv, 3)
+    if ratio >= SKEW_ELEVATED:
+        note = f"put skew {ratio:.2f}× (puts {put_iv:.0%} > calls {call_iv:.0%}) — bearish hedging"
+    elif ratio <= SKEW_CALL:
+        note = f"call skew {ratio:.2f}× (calls {call_iv:.0%} > puts {put_iv:.0%}) — bullish lean"
+    else:
+        note = f"neutral skew {ratio:.2f}×"
+    return ratio, note
+
+
+# ── Score adjustment composer ─────────────────────────────────────────────────
+
+def _compute_adj(
+    verdict: str,
+    uoa_bull: float,
+    uoa_bear: float,
+    term_slope: Optional[float],
+    skew_ratio: Optional[float],
+) -> float:
+    """Combine UOA, term, skew into a single bounded score adjustment."""
+    adj = 0.0
+
+    # UOA: strong call flow boosts bull / bear signal; conflict dampens
+    net_uoa = uoa_bull - uoa_bear
+    if verdict == "BULLISH":
+        adj += net_uoa * MAX_UOA_ADJ
+    elif verdict == "BEARISH":
+        adj -= net_uoa * MAX_UOA_ADJ  # bear wins when puts dominate
+    else:
+        adj += net_uoa * MAX_UOA_ADJ * 0.4  # gentle nudge for NEUTRAL
+
+    # Term structure: backwardation stresses bull signals
+    if term_slope is not None:
+        if term_slope >= BACKWARDATION_THRESHOLD:
+            if verdict == "BULLISH":
+                adj -= MAX_TERM_ADJ * min(1.0, (term_slope - 1.0) * 5)
+            elif verdict == "BEARISH":
+                adj += MAX_TERM_ADJ * 0.4  # mild confirmation
+        elif term_slope < 0.95:
+            if verdict == "BULLISH":
+                adj += MAX_TERM_ADJ * 0.3  # calm structure is mildly supportive
+
+    # Skew: elevated put skew = market hedging downside
+    if skew_ratio is not None:
+        if skew_ratio >= SKEW_ELEVATED:
+            if verdict == "BULLISH":
+                adj -= MAX_SKEW_ADJ * min(1.0, (skew_ratio - 1.0) * 2)
+            elif verdict == "BEARISH":
+                adj += MAX_SKEW_ADJ * 0.5
+        elif skew_ratio <= SKEW_CALL:
+            if verdict == "BULLISH":
+                adj += MAX_SKEW_ADJ * 0.4
+            elif verdict == "BEARISH":
+                adj -= MAX_SKEW_ADJ * 0.3
+
+    return round(max(-MAX_FLOW_ADJ, min(MAX_FLOW_ADJ, adj)), 4)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def get_options_flow(
+    sym: str,
+    spot: float,
+    verdict: str,
+    *,
+    bypass_cache: bool = False,
+) -> OptionsFlowBlock:
+    """Fetch chain and compute all three options intelligence signals.
+
+    Returns an ``OptionsFlowBlock`` with ``flow_score_adj`` capped at
+    ±MAX_FLOW_ADJ.  Always returns a valid object; falls back gracefully
+    when Yahoo is unreachable.
+    """
+    try:
+        snap = _fetch_chain(sym, spot, bypass_cache=bypass_cache)
+        if snap.source == "unavailable" or (not snap.calls and not snap.puts):
+            return OptionsFlowBlock(source="unavailable")
+
+        uoa_bull, uoa_bear, uoa_note = _uoa(snap)
+        term_slope, front_iv, back_iv, term_note = _term_structure(snap)
+        skew_ratio, skew_note = _skew(snap)
+
+        adj = _compute_adj(verdict, uoa_bull, uoa_bear, term_slope, skew_ratio)
+
+        return OptionsFlowBlock(
+            uoa_bull=uoa_bull,
+            uoa_bear=uoa_bear,
+            uoa_note=uoa_note,
+            term_slope=term_slope,
+            front_iv=front_iv,
+            back_iv=back_iv,
+            term_note=term_note,
+            skew=skew_ratio,
+            skew_note=skew_note,
+            flow_score_adj=adj,
+            source="yfinance",
+        )
+    except Exception:
+        return OptionsFlowBlock(source="unavailable")
