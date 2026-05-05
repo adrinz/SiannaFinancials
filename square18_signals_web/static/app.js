@@ -3319,7 +3319,7 @@ function renderAnalystReport(r, tickerD) {
             h(
               'p',
               { class: 'verdict-balance-hint' },
-              'Composite score −1…+1 mapped to a single bull vs bear gauge.',
+              'Directional signal weight (composite score −1…+1). This is NOT the probability of being right — see Historical Hit Rate for that.',
             ),
           );
         })(),
@@ -4067,11 +4067,19 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
     'div',
     { class: 'ticket-scope-note' },
     h('span', { class: 'ticket-scope-icon' }, 'ℹ'),
-    h('span', {},
-      `This ${(timeframe || '').toUpperCase()} signal reflects the trend over ${horizonText}. ` +
-      'It is NOT a same-day trade recommendation. ' +
-      'Options should only be opened when the signal aligns with your intended holding window ' +
-      'AND no active warnings are shown above.'
+    h('div', { class: 'ticket-scope-body' },
+      h('span', {},
+        `This ${(timeframe || '').toUpperCase()} signal reflects the trend over ${horizonText}. ` +
+        'It is NOT a same-day trade recommendation. ' +
+        'Options should only be opened when the signal aligns with your intended holding window ' +
+        'AND no active warnings are shown above.',
+      ),
+      h(
+        'span',
+        { class: 'ticket-sizing-note' },
+        '⚡ Position sizing: risk only 1–2% of your total account on any single options trade. ' +
+        'Never risk more than you can afford to lose entirely on speculative options.',
+      ),
     ),
   );
 

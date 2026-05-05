@@ -34,7 +34,7 @@ class IndicatorMACD(BaseModel):
     histogram: Optional[float]
     bullish_cross_recent: bool
     bearish_cross_recent: bool
-    histogram_direction: Literal["rising", "falling", "flat", "unknown"]
+    histogram_direction: Literal["rising", "falling", "flat", "decelerating_bull", "decelerating_bear", "unknown"]
     state: str  # one-line synopsis: hist slope + crosses
 
 
