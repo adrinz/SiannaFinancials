@@ -376,3 +376,38 @@ def get_options_flow(
         )
     except Exception:
         return OptionsFlowBlock(source="unavailable")
+
+
+def option_liquidity_at_strike(
+    sym: str,
+    strike: float,
+    is_call: bool,
+) -> dict:
+    """Return OI and bid-ask spread for the nearest chain row to *strike*.
+
+    Uses the in-process chain cache populated by ``get_options_flow``;
+    returns an empty dict when no chain data is available.  Callers
+    should call ``get_options_flow`` first so the cache is warm.
+    """
+    u = sym.upper()
+    with _CHAIN_LOCK:
+        hit = _CHAIN_CACHE.get(u)
+    if not hit:
+        return {}
+    _, snap = hit[0], hit[1]
+    rows = snap.calls if is_call else snap.puts
+    if not rows:
+        return {}
+    nearest = min(
+        rows,
+        key=lambda r: abs(float(r.get("strike") or 0) - float(strike)),
+        default=None,
+    )
+    if nearest is None:
+        return {}
+    oi = int(nearest.get("openInterest") or 0)
+    bid = float(nearest.get("bid") or 0)
+    ask = float(nearest.get("ask") or 0)
+    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
+    spread_pct = round((ask - bid) / mid * 100, 1) if mid and mid > 0 else None
+    return {"oi": oi, "bid": bid, "ask": ask, "spread_pct": spread_pct}

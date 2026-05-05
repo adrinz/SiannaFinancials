@@ -29,7 +29,7 @@ from .constants import (
 )
 from .data import OHLCV, get_ohlcv
 from .factors import bull_bear_balance_percent, derive_factors_from_report
-from .options_flow import get_options_flow
+from .options_flow import get_options_flow, option_liquidity_at_strike
 from .regime import breadth_above_50d, vix_quote
 from .signal_config import (
     bearish_threshold,
@@ -170,8 +170,9 @@ def build_report(
                 "Conviction in trend continuation should be reduced."
             )
 
+    _is_index = meta.get("sector", "") in ("Volatility / Index", "Index / Broad Market", "Index / Tech-heavy")
     price_action = _price_action(closes, highs, lows, sma50_series)
-    volume_stats = _volume_stats(volumes)
+    volume_stats = _volume_stats(volumes, is_index=_is_index)
     sma_block = _sma_block(closes, sma50_series, sma200_series)
     rsi_block = _rsi_block(rsi_series)
     macd_block = _macd_block(macd_line, signal_line, hist_line)
@@ -192,18 +193,23 @@ def build_report(
     # Step 2: multi-timeframe confluence bonus / veto
     mtf_score, mtf_note = _apply_mtf(raw_score, sym, timeframe, cfg)
 
-    # Step 3a: mean-reversion gate (RSI overbought + Bollinger stretched)
-    mr_score, mr_note = _apply_mean_reversion_gate(mtf_score, rsi_block, bb_block)
+    # Step 3a: triple mean-reversion override (RSI + Stoch + Bollinger all extreme)
+    tri_score, tri_note = _apply_triple_mean_reversion_gate(mtf_score, rsi_block, stoch_block, bb_block)
 
-    # Step 3b: earnings proximity gate
+    # Step 3b: RSI + Bollinger dual mean-reversion gate
+    mr_score, mr_note = _apply_mean_reversion_gate(tri_score, rsi_block, bb_block)
+
+    # Step 3c: earnings proximity gate
     earnings_score, earnings_note, _ew = _apply_earnings_gate(mr_score, sym, meta)
 
-    # Step 3c: regime gate (VIX + market breadth)
+    # Step 3d: regime gate (VIX + market breadth — use vix_change for spike detection)
     try:
-        vix_val, _ = vix_quote()
+        vix_val, vix_change_today = vix_quote()
         breadth_val = breadth_above_50d(timeframe)
     except Exception:
-        vix_val, breadth_val = 17.0, 50.0
+        vix_val, vix_change_today, breadth_val = 17.0, 0.0, 50.0
+    if not isinstance(breadth_val, float):
+        breadth_val = 50.0
     final_score, regime_note = _apply_regime_gate(earnings_score, vix_val, breadth_val, cfg)
 
     # Step 4: apply configurable thresholds → verdict + conviction
@@ -320,6 +326,10 @@ def build_report(
 
     # ---- Collect all signal quality warnings --------------------------------
     signal_warnings: list[str] = []
+
+    # 0. Triple mean-reversion override note (from gate above)
+    if tri_note:
+        signal_warnings.append(tri_note)
 
     # 1. Synthetic data (critical)
     if data.source == "synthetic":
@@ -494,7 +504,33 @@ def build_report(
     if sym in _sym_class_notes:
         signal_warnings.append(_sym_class_notes[sym])
 
-    # 10. Options cost-effectiveness (only if trade plan is populated)
+    # 10. Options chain liquidity at recommended strike
+    try:
+        _tp = options.trade_plan
+        _liq = option_liquidity_at_strike(
+            sym, _tp.strike, _tp.contract_type == "call",
+        )
+        if _liq:
+            _oi = _liq.get("oi", 0)
+            _sp = _liq.get("spread_pct")
+            if _oi < 100:
+                signal_warnings.append(
+                    f"Low open interest at ${_tp.strike} {_tp.contract_type}: "
+                    f"OI = {_oi} contracts. Very thin liquidity — this option may be "
+                    "hard to fill at mid-price and difficult to exit. A market maker "
+                    "may not be willing to provide a fair price."
+                )
+            if _sp is not None and _sp > 15:
+                signal_warnings.append(
+                    f"Wide bid-ask spread at ${_tp.strike} {_tp.contract_type}: "
+                    f"{_sp:.0f}% of mid-price. You immediately lose ~{_sp/2:.0f}% "
+                    "of your premium on entry due to the spread. Prefer options with "
+                    "spreads under 5% of mid."
+                )
+    except Exception:
+        pass
+
+    # 10b. Options cost-effectiveness (only if trade plan is populated)
     try:
         _tp = options.trade_plan
         if (_tp.cost_per_contract is not None and _tp.one_sigma_move_usd is not None
@@ -599,6 +635,52 @@ def build_report(
                 )
         except Exception:
             pass
+
+    # 17. VIX intraday spike — regime may have changed since last OHLCV bar
+    if vix_change_today >= 4.0 and composite > 0:
+        signal_warnings.append(
+            f"VIX spiked +{vix_change_today:.1f} points today (now {vix_val:.1f}). "
+            "Market fear jumped sharply — risk-off conditions may be developing that "
+            "are not yet reflected in indicator values (which use yesterday's close). "
+            "Bull signals formed on prior-day data carry higher uncertainty today."
+        )
+    elif vix_change_today <= -4.0 and composite < 0:
+        signal_warnings.append(
+            f"VIX dropped {vix_change_today:.1f} points today (now {vix_val:.1f}). "
+            "Fear is rapidly leaving the market — bear signals may be premature as "
+            "risk appetite recovers."
+        )
+
+    # 18. Extreme volume spike (meme / squeeze / news event)
+    if not _is_index and volume_stats.ratio > 5.0:
+        signal_warnings.append(
+            f"Extreme volume: {volume_stats.ratio:.0f}× normal 20-day average. "
+            "Research defines Unusual Options Activity as 5x+ normal volume — this level "
+            "typically indicates news, short squeeze, earnings leak, or large institutional "
+            "block. Technical indicators are unreliable when driven by extraordinary volume. "
+            "Verify the underlying cause before acting on the signal."
+        )
+
+    # 19. Low average daily volume (thin liquidity)
+    if not _is_index and volume_stats.avg_20 > 0 and volume_stats.avg_20 < 500_000:
+        signal_warnings.append(
+            f"Low average daily volume: {volume_stats.avg_20/1e6:.2f}M shares/day (20-day avg). "
+            "Thin markets produce unreliable indicator readings — any single large trade "
+            "can move the price significantly. Options bid-ask spreads are likely very wide."
+        )
+
+    # 20. Near-term price deterioration within broader uptrend (poor entry timing)
+    if len(closes) >= 5 and price_action.trend == "uptrend" and composite > 0:
+        _recent_high = max(closes[-5:])
+        if _recent_high > 0:
+            _pullback_pct = (closes[-1] - _recent_high) / _recent_high * 100
+            if _pullback_pct < -4.0:
+                signal_warnings.append(
+                    f"Near-term weakness in uptrend: price is {abs(_pullback_pct):.1f}% below "
+                    f"its 5-bar high (${_recent_high:.2f}). Entering a call position while the "
+                    "stock is pulling back risks being the person who buys the dip — and the "
+                    f"dip continuing. Consider waiting for price to reclaim ${_recent_high:.2f}."
+                )
 
     bull_pct, bear_pct = bull_bear_balance_percent(composite)
     report = ReportOut(
@@ -778,7 +860,7 @@ def _price_action(
     )
 
 
-def _volume_stats(volumes: list[float]) -> VolumeStats:
+def _volume_stats(volumes: list[float], is_index: bool = False) -> VolumeStats:
     if not volumes:
         return VolumeStats(latest=0, avg_20=0, ratio=0, unusual=False, trending_up=False)
     latest = volumes[-1]
@@ -788,6 +870,9 @@ def _volume_stats(volumes: list[float]) -> VolumeStats:
     recent5 = sum(volumes[-5:]) / min(5, len(volumes))
     trending_up = recent5 > avg_20 * 1.05
     unusual = ratio > 1.5 or ratio < 0.6
+    # Indices (VIX, etc.) report zero volume — signals derived from volume are meaningless.
+    if is_index or avg_20 < 1:
+        return VolumeStats(latest=0, avg_20=0, ratio=1.0, unusual=False, trending_up=False)
     return VolumeStats(
         latest=round(latest, 0),
         avg_20=round(avg_20, 0),
@@ -1163,6 +1248,15 @@ def _compute_raw_score(
         # Histogram still negative but shrinking — early recovery signal
         score += 0.02
 
+    # MACD line vs zero — confirms overall momentum direction independently
+    # of the signal-line cross. Being above zero means net positive momentum
+    # over the 12/26 EMA window; below zero = net negative.
+    if macd_b.macd is not None:
+        if macd_b.macd > 0:
+            score += 0.03   # MACD above zero: net bullish momentum
+        elif macd_b.macd < 0:
+            score -= 0.03   # MACD below zero: net bearish momentum
+
     # Volume (weight 0.10)
     if vs.trending_up and pa.change_pct > 0:
         score += 0.06
@@ -1301,6 +1395,49 @@ def _apply_mtf(raw_score: float, sym: str, timeframe: Timeframe, cfg: dict) -> t
         return raw_score + penalty, f"{higher_tf} neutral/bull {htf_dir} ({htf_score:+.2f}) dampens bear"
 
     return raw_score, ""
+
+
+def _apply_triple_mean_reversion_gate(
+    score: float,
+    rsi_b: IndicatorRSI,
+    stoch_b: IndicatorStochastic,
+    bb_b: IndicatorBollinger,
+) -> tuple[float, str]:
+    """Hard cap when ALL THREE mean-reversion indicators are simultaneously extreme.
+
+    Research: when RSI >70 + Stochastic >80 + Bollinger %B >0.90 fire together,
+    multi-indicator systems show high-probability mean-reversion setups.
+    A single bullish trend bias cannot override triple confirmation of overextension.
+
+    Applies symmetrically to bearish extremes (oversold triple).
+    """
+    if score > 0:
+        rsi_extreme = rsi_b.state == "overbought" and (rsi_b.value or 0) >= 70
+        stoch_extreme = stoch_b.state == "overbought" and (stoch_b.pct_k or 0) >= 80
+        bb_extreme = bb_b.pct_b is not None and bb_b.pct_b >= 0.90
+        if rsi_extreme and stoch_extreme and bb_extreme:
+            old = score
+            adj = round(min(score * 0.30, 0.25), 3)  # push firmly below bull threshold
+            return adj, (
+                f"Triple mean-reversion extreme: RSI {rsi_b.value:.0f} + "
+                f"Stoch {stoch_b.pct_k:.0f} + Bollinger %B {bb_b.pct_b:.2f} — "
+                f"all three simultaneously overbought. Score dampened {old:+.2f}→{adj:+.2f}. "
+                "This pattern has high reversal probability; do not chase."
+            )
+    elif score < 0:
+        rsi_extreme = rsi_b.state == "oversold" and (rsi_b.value or 100) <= 30
+        stoch_extreme = stoch_b.state == "oversold" and (stoch_b.pct_k or 100) <= 20
+        bb_extreme = bb_b.pct_b is not None and bb_b.pct_b <= 0.10
+        if rsi_extreme and stoch_extreme and bb_extreme:
+            old = score
+            adj = round(max(score * 0.30, -0.25), 3)
+            return adj, (
+                f"Triple mean-reversion extreme: RSI {rsi_b.value:.0f} + "
+                f"Stoch {stoch_b.pct_k:.0f} + Bollinger %B {bb_b.pct_b:.2f} — "
+                f"all three simultaneously oversold. Score lifted {old:+.2f}→{adj:+.2f}. "
+                "Potential bounce; avoid new puts at this exhaustion level."
+            )
+    return score, ""
 
 
 def _apply_mean_reversion_gate(
