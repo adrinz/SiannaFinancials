@@ -56,17 +56,21 @@ from app.analyst.constants import TICKERS, Timeframe  # noqa: E402
 from app.analyst.data import get_ohlcv  # noqa: E402
 from app.analyst.indicators import adx as _adx  # noqa: E402
 from app.analyst.indicators import atr as _atr  # noqa: E402
+from app.analyst.indicators import bollinger as _bollinger  # noqa: E402
 from app.analyst.indicators import macd as _macd  # noqa: E402
 from app.analyst.indicators import rsi as _rsi  # noqa: E402
 from app.analyst.indicators import sma  # noqa: E402
+from app.analyst.indicators import stochastic as _stochastic  # noqa: E402
 from app.analyst.report import (  # noqa: E402
     _adx_block,
     _atr_block,
+    _bollinger_block,
     _compute_raw_score,
     _macd_block,
     _price_action,
     _rsi_block,
     _sma_block,
+    _stochastic_block,
     _volume_stats,
 )
 from app.analyst.signal_config import load_signal_config  # noqa: E402
@@ -141,8 +145,12 @@ def _score_window(
     macd_b = _macd_block(macd_line, signal_line, hist_line)
     _atr_block(atr_series, closes)
     adx_b = _adx_block(adx_series, plus_di_series, minus_di_series)
+    bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2.0)
+    stoch_k, stoch_d = _stochastic(highs, lows, closes, 14, 3, 3)
+    bbb = _bollinger_block(closes, bb_mid, bb_upper, bb_lower)
+    stb = _stochastic_block(stoch_k, stoch_d)
 
-    score = _compute_raw_score(pa, vs, sb, rsi_b, macd_b, adx_b)
+    score = _compute_raw_score(pa, vs, sb, rsi_b, macd_b, adx_b, stoch_b=stb, bb_b=bbb)
     if score >= bull_tau:
         verdict = "BULLISH"
     elif score <= bear_tau:

@@ -1315,6 +1315,58 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
 .of-card-detail { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); opacity: 0.85; }
 .of-card-adj { font-size: 10px; margin-top: 6px; }
 
+/* Trade ticket scope note + warning banner */
+.ticket-scope-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--info, #3b82f6) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--info, #3b82f6) 30%, transparent);
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.ticket-scope-icon { flex-shrink: 0; opacity: 0.7; }
+.ticket-warning-banner {
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--danger, #ef4444) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger, #ef4444) 40%, transparent);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: 6px;
+}
+.ticket-warning-banner ul { margin: 6px 0 0 18px; padding: 0; }
+.ticket-warning-banner li { margin-bottom: 2px; }
+
+/* Signal warnings (earnings · overbought+Bollinger · stale open bar) */
+.signal-warnings { display: flex; flex-direction: column; gap: 6px; }
+.signal-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid;
+}
+.signal-warning--danger {
+  background: color-mix(in srgb, var(--danger, #ef4444) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger, #ef4444) 40%, transparent);
+  color: var(--text);
+}
+.signal-warning--caution {
+  background: color-mix(in srgb, #f59e0b 8%, transparent);
+  border-color: color-mix(in srgb, #f59e0b 35%, transparent);
+  color: var(--text);
+}
+.sw-icon { font-size: 14px; flex-shrink: 0; padding-top: 1px; }
+.sw-text { flex: 1; }
+
 /* Tier-1 signal quality row (hit rate · MTF · regime) */
 .signal-quality-row {
   display: flex;

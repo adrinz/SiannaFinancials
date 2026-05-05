@@ -65,10 +65,10 @@ def derive_factors_from_report(report: "ReportOut") -> list[FactorOut]:  # noqa:
         mom -= 0.4
         mom_notes.append(f"RSI {rsi.value:.0f}")
     elif rsi.state == "overbought":
-        mom += 0.1
+        mom -= 0.3   # contrarian: overbought = mean-reversion risk, not momentum add
         mom_notes.append(f"RSI overbought ({rsi.value:.0f})")
     elif rsi.state == "oversold":
-        mom -= 0.1
+        mom += 0.3   # contrarian: oversold = bounce potential
         mom_notes.append(f"RSI oversold ({rsi.value:.0f})")
     if macd.histogram_direction == "rising":
         mom += 0.3

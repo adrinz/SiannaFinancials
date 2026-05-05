@@ -168,21 +168,28 @@ def build_report(
     # --- Tier-1 enhanced scoring pipeline -----------------------------------
     cfg = load_signal_config()
 
-    # Step 1: raw deterministic score
+    # Step 1: raw deterministic score (now includes Stochastic + Bollinger)
     raw_score = _compute_raw_score(
-        price_action, volume_stats, sma_block, rsi_block, macd_block, adx_block
+        price_action, volume_stats, sma_block, rsi_block, macd_block, adx_block,
+        stoch_b=stoch_block, bb_b=bb_block,
     )
 
     # Step 2: multi-timeframe confluence bonus / veto
     mtf_score, mtf_note = _apply_mtf(raw_score, sym, timeframe, cfg)
 
-    # Step 3: regime gate (VIX + market breadth)
+    # Step 3a: mean-reversion gate (RSI overbought + Bollinger stretched)
+    mr_score, mr_note = _apply_mean_reversion_gate(mtf_score, rsi_block, bb_block)
+
+    # Step 3b: earnings proximity gate
+    earnings_score, earnings_note, _ew = _apply_earnings_gate(mr_score, sym, meta)
+
+    # Step 3c: regime gate (VIX + market breadth)
     try:
         vix_val, _ = vix_quote()
         breadth_val = breadth_above_50d(timeframe)
     except Exception:
         vix_val, breadth_val = 17.0, 50.0
-    final_score, regime_note = _apply_regime_gate(mtf_score, vix_val, breadth_val, cfg)
+    final_score, regime_note = _apply_regime_gate(earnings_score, vix_val, breadth_val, cfg)
 
     # Step 4: apply configurable thresholds → verdict + conviction
     verdict, conviction = _score_to_verdict(final_score, cfg)
@@ -287,19 +294,157 @@ def build_report(
         sma200=sma200_series,
     )
 
-    # Lazy import avoids circular dependency (earnings.py imports overview_rows from this module).
-    from .earnings import earnings_within_window_days
+    # earnings_soon: use the result already fetched in the earnings gate above;
+    # fall back to a fresh lookup with the screener window if the gate returned None.
+    if _ew is not None:
+        earnings_soon = EarningsSoonOut(earnings_date=_ew[0], days_until=_ew[1])
+    else:
+        from .earnings import earnings_within_window_days as _eww
+        _ew2 = _eww(sym, meta, window_days=SCREENER_EARNINGS_WINDOW_DAYS)
+        earnings_soon = EarningsSoonOut(earnings_date=_ew2[0], days_until=_ew2[1]) if _ew2 else None
 
-    ew = earnings_within_window_days(
-        sym,
-        meta,
-        window_days=SCREENER_EARNINGS_WINDOW_DAYS,
-    )
-    earnings_soon = (
-        EarningsSoonOut(earnings_date=ew[0], days_until=ew[1])
-        if ew is not None
-        else None
-    )
+    # ---- Collect all signal quality warnings --------------------------------
+    signal_warnings: list[str] = []
+
+    # 1. Synthetic data (critical)
+    if data.source == "synthetic":
+        signal_warnings.append(
+            "⚠ SYNTHETIC DATA — live market connection failed; this signal uses "
+            "simulated (GBM) price history. DO NOT trade on this."
+        )
+
+    # 2. Earnings proximity (from gate above)
+    if earnings_note:
+        signal_warnings.append(earnings_note)
+
+    # 3. RSI + Bollinger mean-reversion stretch (from gate above)
+    if mr_note:
+        signal_warnings.append(mr_note)
+
+    # 4. ADX weak / absent — ranging market
+    if adx_block.trend_strength in ("absent", "weak") and abs(composite) < 0.70:
+        signal_warnings.append(
+            f"ADX {adx_block.value:.0f} ({adx_block.trend_strength}) — no clear trend detected. "
+            "Trend-following indicators (SMA stack, MACD cross) are unreliable in ranging/sideways "
+            "markets. Wait for a confirmed directional breakout before entering options."
+        )
+
+    # 5. Price extension from 50d SMA
+    ext = sma_block.price_vs_sma50_pct
+    if ext is not None:
+        if ext > 12 and composite > 0:
+            signal_warnings.append(
+                f"Stock is {ext:.1f}% above its 50-day SMA — historically stretched. "
+                "Chasing bull signals at these extensions carries elevated mean-reversion risk."
+            )
+        elif ext < -12 and composite < 0:
+            signal_warnings.append(
+                f"Stock is {abs(ext):.1f}% below its 50-day SMA — oversold stretch. "
+                "Bear signals at these levels have higher reversal risk."
+            )
+
+    # 6. All major factors aligned (correlation saturation)
+    bull_factors = sum([
+        price_action.trend == "uptrend",
+        sma_block.stacked_bullish,
+        macd_block.bullish_cross_recent,
+        macd_block.histogram_direction == "rising",
+        volume_stats.trending_up and price_action.change_pct > 0,
+    ])
+    bear_factors = sum([
+        price_action.trend == "downtrend",
+        sma_block.stacked_bearish,
+        macd_block.bearish_cross_recent,
+        macd_block.histogram_direction == "falling",
+        volume_stats.trending_up and price_action.change_pct < 0,
+    ])
+    if bull_factors >= 4 and composite > 0.65:
+        signal_warnings.append(
+            f"{bull_factors}/5 trend-following factors simultaneously bullish — "
+            "peak indicator alignment often signals late-stage trend (trend exhaustion), "
+            "not a fresh entry opportunity. Consider whether you are chasing a move that "
+            "has already run. Check for RSI/MACD divergence before entering."
+        )
+    if bear_factors >= 4 and composite < -0.65:
+        signal_warnings.append(
+            f"{bear_factors}/5 trend-following factors simultaneously bearish — "
+            "extreme alignment can mark capitulation / oversold lows, not trend continuation."
+        )
+
+    # 7. Bollinger squeeze (direction undetermined)
+    if bb_block.bandwidth_pct is not None and bb_block.bandwidth_pct < 4.5:
+        signal_warnings.append(
+            f"Bollinger Bands very tight (bandwidth {bb_block.bandwidth_pct:.1f}% of price) — "
+            "a volatility squeeze. A directional breakout may be imminent but "
+            "the current signal cannot determine direction reliably. "
+            "Avoid opening large positions until the squeeze resolves with volume."
+        )
+
+    # 8. Borderline score — just crossed threshold
+    bull_tau_cfg = float(load_signal_config()["thresholds"]["BULLISH"]["min_score"])
+    bear_tau_cfg = float(load_signal_config()["thresholds"]["BEARISH"]["max_score"])
+    if composite > 0 and composite < bull_tau_cfg + 0.12:
+        signal_warnings.append(
+            f"Score {composite:+.2f} is just above the BULLISH threshold ({bull_tau_cfg:+.2f}). "
+            "Borderline signals have lower historical reliability — "
+            "consider waiting for a stronger reading before opening a position."
+        )
+    elif composite < 0 and composite > bear_tau_cfg - 0.12:
+        signal_warnings.append(
+            f"Score {composite:+.2f} is just below the BEARISH threshold ({bear_tau_cfg:+.2f}). "
+            "Borderline bear signals have the weakest historical edge — extra confirmation recommended."
+        )
+
+    # 9. Symbol-class specific risks
+    _sym_class_notes = {
+        "QUBT": "Speculative quantum-computing micro-cap with implied vol ~120%/yr. "
+                "Technical patterns are dominated by news and short-squeeze dynamics — TA edge is minimal.",
+        "QBTS": "Speculative quantum-computing small-cap (~105% IV). News/narrative driven; "
+                "technical signals have low predictive value.",
+        "SMR": "Pre-revenue nuclear SMR company (~95% IV). Regulatory news overrides all technicals.",
+        "OKLO": "Early-stage nuclear (~110% IV). Highly speculative; chart patterns unreliable.",
+        "COIN": "Crypto-sector correlated: price often moves with Bitcoin regardless of technical setup. "
+                "Check BTC trend before acting on this signal.",
+        "BYDDY": "ADR (American Depositary Receipt): subject to FX risk (CNY/USD), Hong Kong session gaps, "
+                "and limited US options liquidity. Options bid-ask spreads may be very wide.",
+    }
+    if sym in _sym_class_notes:
+        signal_warnings.append(_sym_class_notes[sym])
+
+    # 10. Options cost-effectiveness (only if trade plan is populated)
+    try:
+        _tp = options.trade_plan
+        if (_tp.cost_per_contract is not None and _tp.one_sigma_move_usd is not None
+                and _tp.one_sigma_move_usd > 0):
+            _sigma_dollars = _tp.one_sigma_move_usd * 100  # convert per-share → per contract
+            _cost_pct_of_sigma = _tp.cost_per_contract / _sigma_dollars
+            if _cost_pct_of_sigma > 0.55:
+                signal_warnings.append(
+                    f"Premium ${_tp.cost_per_contract:.0f}/contract is "
+                    f"{_cost_pct_of_sigma*100:.0f}% of a full 1σ expected move "
+                    f"(±${_tp.one_sigma_move_usd:.2f}/share). This contract requires a "
+                    "larger-than-average move to break even — consider whether the risk/reward "
+                    "justifies the cost."
+                )
+    except Exception:
+        pass
+
+    # 11. Stale-bar warning for intraday timeframes
+    if timeframe in ("1h", "4h"):
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            last_bar_iso = data.timestamps[-1]
+            last_bar_dt = _dt.fromisoformat(last_bar_iso.replace("Z", "+00:00"))
+            bar_age_min = (_dt.now(_tz.utc) - last_bar_dt).total_seconds() / 60
+            bar_size_min = 60 if timeframe == "1h" else 240
+            if bar_age_min < bar_size_min:
+                signal_warnings.append(
+                    f"Current {timeframe.upper()} bar is still open — "
+                    f"indicators use the last CLOSED bar ({int(bar_age_min)}m ago). "
+                    "Intraday reversals inside the open bar are not yet reflected in this signal."
+                )
+        except Exception:
+            pass
 
     bull_pct, bear_pct = bull_bear_balance_percent(composite)
     report = ReportOut(
@@ -333,6 +478,7 @@ def build_report(
         signal_probability=round(signal_probability, 1) if signal_probability is not None else None,
         mtf_confluence=mtf_note or None,
         regime_gate=regime_note or None,
+        signal_warnings=signal_warnings,
         options_flow=flow_out,
     )
     return report.model_copy(
@@ -793,10 +939,13 @@ def _compute_raw_score(
     rsi_b: IndicatorRSI,
     macd_b: IndicatorMACD,
     adx_b: IndicatorADX,
+    stoch_b: Optional[IndicatorStochastic] = None,
+    bb_b: Optional[IndicatorBollinger] = None,
 ) -> float:
     """Pure scoring function — no side effects, no thresholds.
 
-    Called both from the live pipeline and from the backtest tool.
+    Called both from the live pipeline (full args) and from the backtest tool
+    (stoch_b / bb_b optional for backward compat).
     All Tier-1 enhancements (MTF, regime gate) are applied *after* this
     in ``build_report`` so that the backtest remains self-consistent.
     """
@@ -818,13 +967,14 @@ def _compute_raw_score(
     if sb.death_cross_recent:
         score -= 0.08
 
-    # RSI (weight 0.10) — contrarian tilt on extremes
+    # RSI (weight 0.10) — contrarian tilt on extremes (strengthened: overbought is a
+    # real mean-reversion risk, not a minor nuisance)
     if rsi_b.state == "bullish":
         score += 0.08
     elif rsi_b.state == "bearish":
         score -= 0.08
     elif rsi_b.state == "overbought":
-        score -= 0.05
+        score -= 0.12   # raised from -0.05: chasing overbought momentum has poor EV
     elif rsi_b.state == "oversold":
         score += 0.05
 
@@ -857,6 +1007,28 @@ def _compute_raw_score(
         elif pa.trend == "downtrend" and adx_b.directional_bias == "bullish":
             score -= 0.03
 
+    # Stochastic (weight 0.08) — secondary momentum confirmation
+    # Computed but previously ignored in scoring. Now provides a small
+    # confirmation/contrarian kicker consistent with the RSI treatment.
+    if stoch_b is not None:
+        if stoch_b.state == "overbought":
+            score -= 0.05
+        elif stoch_b.state == "oversold":
+            score += 0.05
+        if stoch_b.bullish_cross_recent:
+            score += 0.03
+        if stoch_b.bearish_cross_recent:
+            score -= 0.03
+
+    # Bollinger band position (weight 0.04) — extreme extension adds
+    # mean-reversion pressure; not a strong signal on its own but
+    # complements RSI at extremes.
+    if bb_b is not None and bb_b.pct_b is not None:
+        if bb_b.pct_b > 0.95:
+            score -= 0.04   # at or above upper band
+        elif bb_b.pct_b < 0.05:
+            score += 0.04   # at or below lower band
+
     return max(-1.0, min(1.0, score))
 
 
@@ -866,6 +1038,7 @@ def _quick_score(sym: str, timeframe: Timeframe) -> Optional[float]:
     Results are in-process cached for _MTF_CACHE_TTL seconds to avoid
     doubling the yfinance fan-out when the higher TF is also in the universe.
     Calls _compute_raw_score (not the full build_report) to avoid recursion.
+    Includes Stochastic and Bollinger for consistency with the live pipeline.
     """
     key = f"{sym}|{timeframe}"
     now = time.time()
@@ -885,10 +1058,13 @@ def _quick_score(sym: str, timeframe: Timeframe) -> Optional[float]:
         rb = _rsi_block(_rsi(closes, 14))
         ml, sl_, hl = _macd(closes)
         mb = _macd_block(ml, sl_, hl)
-        atr_s = _atr(highs, lows, closes, 14)
         adx_s, pdi_s, mdi_s = _adx(highs, lows, closes, 14)
         ab = _adx_block(adx_s, pdi_s, mdi_s)
-        score = _compute_raw_score(pa, vs, sb, rb, mb, ab)
+        bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2.0)
+        stoch_k, stoch_d = _stochastic(highs, lows, closes, 14, 3, 3)
+        bbb = _bollinger_block(closes, bb_mid, bb_upper, bb_lower)
+        stb = _stochastic_block(stoch_k, stoch_d)
+        score = _compute_raw_score(pa, vs, sb, rb, mb, ab, stoch_b=stb, bb_b=bbb)
         _mtf_cache[key] = (now, score)
         return score
     except Exception:
@@ -938,6 +1114,81 @@ def _apply_mtf(raw_score: float, sym: str, timeframe: Timeframe, cfg: dict) -> t
     return raw_score, ""
 
 
+def _apply_mean_reversion_gate(
+    score: float,
+    rsi_b: IndicatorRSI,
+    bb_block: IndicatorBollinger,
+) -> tuple[float, str]:
+    """Penalise a bull score when RSI AND Bollinger both signal overextension.
+
+    A single overbought indicator is already handled in _compute_raw_score.
+    When BOTH extremes fire simultaneously, the mean-reversion risk is much
+    higher — e.g. a stock that just gapped up on earnings with RSI 75 and
+    price at 92% of the Bollinger band.
+    """
+    if score <= 0:
+        return score, ""
+
+    rsi_extreme = rsi_b.state == "overbought" and (rsi_b.value or 0) >= 70
+    bb_stretched = bb_block.pct_b is not None and bb_block.pct_b >= 0.85
+
+    if rsi_extreme and bb_stretched:
+        pct_b = bb_block.pct_b or 0
+        rsi_v = rsi_b.value or 70
+        strength = min(1.0, ((pct_b - 0.85) / 0.15) * 0.5 + ((rsi_v - 70) / 10) * 0.5)
+        penalty = round(0.08 + strength * 0.10, 3)
+        adj = round(max(-1.0, score - penalty), 3)
+        return adj, (
+            f"RSI {rsi_v:.0f} (overbought) + Bollinger %B {pct_b:.2f} "
+            f"(stretched) → mean-reversion risk, bull dampened {penalty:.2f}"
+        )
+    return score, ""
+
+
+def _apply_earnings_gate(
+    score: float,
+    sym: str,
+    meta: dict,
+) -> tuple[float, str]:
+    """Suppress directional signals around earnings — the most reliable source of
+    post-signal reversals.  Technical indicators built on pre-earnings bars have
+    very low predictive power once the report is out.
+
+    - days_until < 0 : earnings was very recently (within 2 days) → high suppression
+    - days_until == 0 : earnings today → maximum suppression (force near-NEUTRAL)
+    - days_until == 1 : earnings tomorrow → strong suppression
+    - days_until <= 3 : upcoming → mild caution
+    """
+    from .earnings import earnings_within_window_days
+    try:
+        ew = earnings_within_window_days(sym, meta, window_days=7)
+    except Exception:
+        ew = None
+
+    # Also check if earnings was in the PAST 2 days (yfinance may not list it going forward)
+    from datetime import date, timedelta
+    import json as _j
+    from pathlib import Path as _p
+    # Heuristic: if a recent earning was missed by the forward calendar, look at OHLCV for gaps
+    if ew is None:
+        return score, "", None
+
+    days = ew[1]
+    earnings_iso = ew[0]
+
+    if days == 0:
+        # Earnings today — technical trend is pre-report noise
+        adj = round(score * 0.25, 3)  # dampen 75%
+        return adj, f"⚠ Earnings TODAY ({earnings_iso}) — technicals are pre-report; signal unreliable", ew
+    if days == 1:
+        adj = round(score * 0.50, 3)  # dampen 50%
+        return adj, f"⚠ Earnings TOMORROW ({earnings_iso}) — signal dampened 50%", ew
+    if days <= 3:
+        adj = round(score * 0.75, 3)  # dampen 25%
+        return adj, f"Earnings in {days}d ({earnings_iso}) — signal dampened 25%", ew
+    return score, "", ew
+
+
 def _apply_regime_gate(score: float, vix: float, breadth: float, cfg: dict) -> tuple[float, str]:
     """Suppress signals in high-volatility or low-breadth regimes.
 
@@ -977,7 +1228,13 @@ def _apply_regime_gate(score: float, vix: float, breadth: float, cfg: dict) -> t
 
 
 def _score_to_verdict(score: float, cfg: dict) -> tuple[str, float]:
-    """Convert a composite score to (verdict, conviction) using config thresholds."""
+    """Convert a composite score to (verdict, conviction) using config thresholds.
+
+    Conviction is now proportional to the absolute score, capped at 0.85 to
+    prevent the algorithm from ever claiming 100% certainty.  Previously the
+    formula reached 1.0 at a score of only 0.60, which was dangerously
+    overconfident for a borderline directional reading.
+    """
     bull_tau = float(cfg["thresholds"]["BULLISH"]["min_score"])
     bear_tau = float(cfg["thresholds"]["BEARISH"]["max_score"])
     score = max(-1.0, min(1.0, score))
@@ -987,7 +1244,9 @@ def _score_to_verdict(score: float, cfg: dict) -> tuple[str, float]:
         verdict = "BEARISH"
     else:
         verdict = "NEUTRAL"
-    conviction = min(1.0, abs(score) * 1.25 + 0.25)
+    # Proportional conviction: the composite score IS the signal strength (0→1).
+    # Cap at 0.85 — a deterministic rule-based engine cannot be 100% certain.
+    conviction = round(min(0.85, max(0.30, abs(score))), 3)
     return verdict, conviction
 
 

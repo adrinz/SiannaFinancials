@@ -184,6 +184,7 @@ class ReportOut(BaseModel):
     signal_probability: Optional[float] = None   # historical hit-rate % for this verdict/symbol
     mtf_confluence: Optional[str] = None         # e.g. "weekly confirms ↑ (+0.38)"
     regime_gate: Optional[str] = None            # e.g. "VIX 31 elevated → bull dampened 40%"
+    signal_warnings: list[str] = []              # high-priority caveats (earnings, overbought, stale bars)
 
     # Tier-2 options intelligence (#8 UOA · #9 term structure · #10 skew)
     options_flow: Optional["OptionsFlowOut"] = None

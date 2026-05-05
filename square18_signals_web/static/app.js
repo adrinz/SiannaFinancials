@@ -3366,6 +3366,25 @@ function renderAnalystReport(r, tickerD) {
     )
   );
 
+  // Signal warnings (earnings, overbought+Bollinger stretch, stale open bar)
+  const warnings = Array.isArray(r.signal_warnings) ? r.signal_warnings : [];
+  if (warnings.length) {
+    root.append(
+      h(
+        'div',
+        { class: 'signal-warnings' },
+        ...warnings.map((w) =>
+          h(
+            'div',
+            { class: `signal-warning ${w.startsWith('⚠') ? 'signal-warning--danger' : 'signal-warning--caution'}` },
+            h('span', { class: 'sw-icon' }, w.startsWith('⚠') ? '⚠' : 'ℹ'),
+            h('span', { class: 'sw-text' }, w.replace(/^[⚠ℹ]\s*/, '')),
+          ),
+        ),
+      ),
+    );
+  }
+
   // Signal quality row (Tier-1 enhancements)
   const hasQuality = r.signal_probability != null || r.mtf_confluence || r.regime_gate;
   if (hasQuality) {
@@ -3830,7 +3849,7 @@ function renderAnalystReport(r, tickerD) {
   );
 
   // Recommended option strategy (clean directional ticket — always populated)
-  root.append(tradeTicketCard(r.options.trade_plan, r.verdict, r.options.headline));
+  root.append(tradeTicketCard(r.options.trade_plan, r.verdict, r.options.headline, r.timeframe, r.signal_warnings || []));
 
   // Optional: ask Claude about this specific report.
   if (analyst.llm.enabled) {
@@ -4035,11 +4054,37 @@ async function submitExplain(report) {
 
 // ---------- Recommended Option Strategy ticket -----------------------------
 
-function tradeTicketCard(tp, verdict, headline) {
+function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
   const type = tp.contract_type; // always 'call' or 'put'
   const action = type === 'call' ? 'BUY CALL' : 'BUY PUT';
   const tone = type === 'call' ? 'pos' : 'neg';
   const expiryDate = fmtExpiry(tp.expiry_date, tp.expiry_dte);
+
+  // Plain-English explanation of what "Bullish" means for the chosen timeframe
+  const tfHorizon = { '1h': 'hours (intraday)', '4h': 'days (swing)', 'daily': 'days to weeks', 'weekly': 'weeks to months' };
+  const horizonText = tfHorizon[timeframe] || 'the medium term';
+  const signalScopeNote = h(
+    'div',
+    { class: 'ticket-scope-note' },
+    h('span', { class: 'ticket-scope-icon' }, 'ℹ'),
+    h('span', {},
+      `This ${(timeframe || '').toUpperCase()} signal reflects the trend over ${horizonText}. ` +
+      'It is NOT a same-day trade recommendation. ' +
+      'Options should only be opened when the signal aligns with your intended holding window ' +
+      'AND no active warnings are shown above.'
+    ),
+  );
+
+  // Warn if any active signal warnings exist
+  const hasWarnings = Array.isArray(warnings) && warnings.length > 0;
+  const warningBanner = hasWarnings
+    ? h(
+      'div',
+      { class: 'ticket-warning-banner' },
+      h('strong', {}, '⚠ Active signal cautions — review before trading:'),
+      h('ul', {}, ...warnings.map((w) => h('li', {}, w.replace(/^[⚠ℹ]\s*/, '')))),
+    )
+    : null;
 
   const hero = h(
     'div',
@@ -4109,6 +4154,8 @@ function tradeTicketCard(tp, verdict, headline) {
     'div',
     { class: 'ticket-card ticket-card-concrete' },
     hero,
+    signalScopeNote,
+    warningBanner,
     statRow,
     planRow,
     rationale
