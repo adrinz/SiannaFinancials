@@ -33,9 +33,23 @@ def client() -> TestClient:
 
 
 def test_tracked_list_includes_requested_symbols():
-    for sym in ("AVGO", "TSM", "AMD", "QCOM", "BYDDY", "JPM", "ORCL"):
+    for sym in (
+        "AVGO",
+        "TSM",
+        "AMD",
+        "QCOM",
+        "BYDDY",
+        "JPM",
+        "ORCL",
+        "ASML",
+        "MRVL",
+        "SNDK",
+        "HOOD",
+        "GME",
+        "BABA",
+    ):
         assert sym in TICKER_MAP
-    assert len(TICKERS) >= 28
+    assert len(TICKERS) >= 34
 
 
 # ---------------------------------------------------------------------------

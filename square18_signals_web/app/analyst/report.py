@@ -28,7 +28,12 @@ from .constants import (
     Timeframe,
 )
 from .data import OHLCV, get_ohlcv
-from .factors import bull_bear_balance_percent, derive_factors_from_report
+from .factors import (
+    bull_bear_balance_percent,
+    derive_factor_breakdown,
+    derive_factors_from_report,
+    equity_direction_reason,
+)
 from .options_flow import get_options_flow, option_liquidity_at_strike
 from .regime import breadth_above_50d, vix_quote
 from .signal_config import (
@@ -65,6 +70,8 @@ from .models import (
     OverviewRow,
     PriceAction,
     ReportOut,
+    StockEntryOut,
+    StockStrategyOut,
     TradePlan,
     VolumeStats,
 )
@@ -351,7 +358,7 @@ def build_report(
         signal_warnings.append(
             f"ADX {adx_block.value:.0f} ({adx_block.trend_strength}) — no clear trend detected. "
             "Trend-following indicators (SMA stack, MACD cross) are unreliable in ranging/sideways "
-            "markets. Wait for a confirmed directional breakout before entering options."
+            "markets. Wait for a confirmed directional breakout before committing new risk."
         )
 
     # 5. Price extension from 50d SMA
@@ -752,10 +759,37 @@ def build_report(
             if _pullback_pct < -4.0:
                 signal_warnings.append(
                     f"Near-term weakness in uptrend: price is {abs(_pullback_pct):.1f}% below "
-                    f"its 5-bar high (${_recent_high:.2f}). Entering a call position while the "
-                    "stock is pulling back risks being the person who buys the dip — and the "
-                    f"dip continuing. Consider waiting for price to reclaim ${_recent_high:.2f}."
+                    f"its 5-bar high (${_recent_high:.2f}). Adding long stock while the "
+                    "stock is pulling back risks buying a dip that keeps dipping — "
+                    f"consider waiting for price to reclaim ${_recent_high:.2f}."
                 )
+
+    _eq_factors = derive_factor_breakdown(
+        sma_block, price_action, adx_block, rsi_block, macd_block, volume_stats
+    )
+    _dir_sum, _dir_bullets = equity_direction_reason(
+        verdict, _eq_factors, headline, composite, conviction
+    )
+    stock_strategy = _build_stock_strategy(
+        sym=sym,
+        spot=spot_for_options,
+        closes=closes,
+        atr_block=atr_block,
+        price_action=price_action,
+        verdict=verdict,
+        conviction=conviction,
+        composite_score=composite,
+        timeframe=timeframe,
+        rsi_block=rsi_block,
+        direction_summary=_dir_sum,
+        direction_bullets=_dir_bullets,
+    )
+    equity_signal_warnings = _derive_equity_signal_warnings(
+        signal_warnings,
+        earnings_soon=earnings_soon,
+        stock_swing_days=_stock_swing_calendar_days(timeframe),
+        flow_out=flow_out,
+    )
 
     bull_pct, bear_pct = bull_bear_balance_percent(composite)
     report = ReportOut(
@@ -790,6 +824,8 @@ def build_report(
         mtf_confluence=mtf_note or None,
         regime_gate=regime_note or None,
         signal_warnings=signal_warnings,
+        equity_signal_warnings=equity_signal_warnings,
+        stock_strategy=stock_strategy,
         options_flow=flow_out,
     )
     return report.model_copy(
@@ -860,7 +896,7 @@ def overview_rows(
         ts = time.time()
         with _overview_lock:
             _overview_rows_cache[key] = (ts, rows)
-        return rows
+    return rows
 
 
 def etf_overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:
@@ -871,6 +907,89 @@ def etf_overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:
 # ---------------------------------------------------------------------------
 # Indicator → block helpers
 # ---------------------------------------------------------------------------
+
+
+def _swing_structure_patterns(
+    closes: list[float],
+    highs: list[float],
+    lows: list[float],
+    trend: str,
+    last: float,
+) -> list[str]:
+    """Lightweight chart-structure hints (heuristic; not formal pattern recognition)."""
+    out: list[str] = []
+    n = len(closes)
+    if n < 30:
+        return out
+    try:
+        prior_hi = max(highs[-30:-8])
+        recent_hi = max(highs[-8:])
+        if prior_hi > 0 and recent_hi > prior_hi * 1.002 and last < prior_hi * 0.999:
+            out.append(
+                "Possible bull trap — probe above prior swing highs, close back below (failed breakout)"
+            )
+    except (ValueError, IndexError):
+        pass
+    try:
+        prior_lo = min(lows[-30:-8])
+        recent_lo = min(lows[-8:])
+        if prior_lo > 0 and recent_lo < prior_lo * 0.998 and last > prior_lo * 1.001:
+            out.append(
+                "Possible bear trap — dip under prior swing low, reclaim (spring / false breakdown)"
+            )
+    except (ValueError, IndexError):
+        pass
+    third = max(n // 3, 8)
+    if n >= third * 3:
+        left_hi = max(highs[:third])
+        right_hi = max(highs[-third:])
+        rim = max(left_hi, right_hi)
+        if rim > 0 and abs(left_hi - right_hi) / rim < 0.03:
+            mid_lo = min(lows[third : n - third])
+            if (rim - mid_lo) / rim > 0.035 and last >= rim * 0.965 and last <= rim * 1.025:
+                out.append(
+                    "Possible cup-and-handle-style base (heuristic) — rounded dip between similar rim highs"
+                )
+    if n >= 25 and trend == "uptrend":
+        leg_hi = max(highs[-25:-10])
+        leg_lo = min(lows[-25:-10])
+        leg_range = leg_hi - leg_lo
+        if leg_range > 0 and leg_lo > 0 and (leg_hi / leg_lo - 1) > 0.05:
+            pullback_hi = max(highs[-10:])
+            pullback_lo = min(lows[-10:])
+            pb_range = pullback_hi - pullback_lo
+            if pb_range < leg_range * 0.45 and last > pullback_lo:
+                out.append("Possible bull flag — strong impulse leg, then shallow drift / pullback")
+    if n >= 25 and trend == "downtrend":
+        leg_hi = max(highs[-25:-10])
+        leg_lo = min(lows[-25:-10])
+        leg_range = leg_hi - leg_lo
+        if leg_range > 0 and leg_lo > 0 and (leg_hi / leg_lo - 1) > 0.05:
+            pullback_hi = max(highs[-10:])
+            pullback_lo = min(lows[-10:])
+            pb_range = pullback_hi - pullback_lo
+            if pb_range < leg_range * 0.45 and last < pullback_hi:
+                out.append("Possible bear flag — downside impulse, then shallow bounce")
+    hi15 = highs[-15:]
+    lo15 = lows[-15:]
+    if len(hi15) >= 15 and len(lo15) >= 15:
+        band_hi = max(hi15) - min(hi15)
+        band_lo = max(lo15) - min(lo15)
+        avg_hi = sum(hi15) / len(hi15)
+        avg_lo = sum(lo15) / len(lo15)
+        if avg_hi > 0 and band_hi < avg_hi * 0.012 and avg_lo > 0 and (avg_lo - min(lo15[:7]) > max(lo15[7:]) - avg_lo):
+            if trend in ("uptrend", "range"):
+                out.append("Ascending triangle bias (heuristic) — higher lows into tight resistance band")
+        if avg_lo > 0 and band_lo < avg_lo * 0.012 and avg_hi > 0 and (max(hi15[:7]) - avg_hi > avg_hi - min(hi15[7:])):
+            if trend in ("downtrend", "range"):
+                out.append("Descending triangle bias (heuristic) — lower highs into tight support band")
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
 
 
 def _price_action(
@@ -923,6 +1042,15 @@ def _price_action(
     if len(supports) >= 2 and abs(supports[0] - supports[1]) / supports[0] < 0.01:
         patterns.append("potential double-bottom near "
                        f"${supports[0]:.2f}")
+
+    patterns.extend(_swing_structure_patterns(closes, highs, lows, trend, last))
+    seen_p: set[str] = set()
+    deduped: list[str] = []
+    for p in patterns:
+        if p not in seen_p:
+            seen_p.add(p)
+            deduped.append(p)
+    patterns = deduped
 
     return PriceAction(
         last=round(last, 4),
@@ -2129,6 +2257,307 @@ def _fmt_strike(k: float) -> str:
     return f"{k:.2f}"
 
 
+def _stock_swing_calendar_days(timeframe: Timeframe) -> int:
+    """Calendar days for swing expected-move sizing (shorter than options DTE)."""
+    return {"1h": 5, "4h": 8, "daily": 12, "weekly": 15}[timeframe]
+
+
+def _hold_horizon_label(timeframe: Timeframe) -> str:
+    return {
+        "1h": "Hours to a few sessions (intraday chart)",
+        "4h": "Several sessions to about one week",
+        "daily": "Several days to a couple of weeks (swing trade)",
+        "weekly": "Multi-week swing — still tactical, not long-term allocation",
+    }[timeframe]
+
+
+def _underlying_target_stop_rr(
+    *,
+    spot: float,
+    atr_block: IndicatorATR,
+    price_action: PriceAction,
+    direction_long: bool,
+    one_sigma_usd: float,
+) -> tuple[float, float, Optional[float]]:
+    max_target_distance = 1.5 * one_sigma_usd
+    if direction_long:
+        above = [
+            lvl for lvl in price_action.resistances
+            if spot * 1.005 < lvl <= spot + max_target_distance
+        ]
+        target_price = above[0] if above else round(spot + one_sigma_usd, 2)
+    else:
+        below = [
+            lvl for lvl in price_action.supports
+            if spot - max_target_distance <= lvl < spot * 0.995
+        ]
+        target_price = below[0] if below else round(spot - one_sigma_usd, 2)
+    atr_val = atr_block.value or (spot * 0.02)
+    min_stop_distance = max(atr_val, spot * 0.015)
+    if direction_long:
+        atr_stop = spot - 2 * atr_val
+        structural = max(price_action.supports) if price_action.supports else None
+        raw_stop = max(atr_stop, structural) if structural is not None else atr_stop
+        stop_loss = round(min(raw_stop, spot - min_stop_distance), 2)
+    else:
+        atr_stop = spot + 2 * atr_val
+        structural = min(price_action.resistances) if price_action.resistances else None
+        raw_stop = min(atr_stop, structural) if structural is not None else atr_stop
+        stop_loss = round(max(raw_stop, spot + min_stop_distance), 2)
+    risk_reward: Optional[float] = None
+    if direction_long and spot > stop_loss and target_price > spot:
+        risk_reward = round((target_price - spot) / (spot - stop_loss), 2)
+    elif not direction_long and spot < stop_loss and target_price < spot:
+        risk_reward = round((spot - target_price) / (stop_loss - spot), 2)
+    return round(target_price, 2), stop_loss, risk_reward
+
+
+def _derive_equity_signal_warnings(
+    signal_warnings: list[str],
+    *,
+    earnings_soon: Optional[EarningsSoonOut],
+    stock_swing_days: int,
+    flow_out: Optional[OptionsFlowOut],
+) -> list[str]:
+    """Stock-tab warnings: drop options-only jargon; localize shared risks for cash equity."""
+    out: list[str] = []
+    skip_substrings = (
+        "Weekend theta:",
+        "Very short DTE:",
+        "expires BEFORE earnings",
+        "Option expires",
+        "within your option's",
+        "Low open interest at",
+        "hard to fill at mid-price",
+        "Wide bid-ask spread at $",
+        "Premium $",
+        "/contract is ",
+        "long option positions",
+        "debit spread",
+        "Use spreads to reduce vega",
+    )
+    for w in signal_warnings:
+        if any(s in w for s in skip_substrings):
+            continue
+        if "IV crush risk:" in w or ("backwardation" in w and "Long option premium" in w):
+            _term = flow_out.term_slope if flow_out else None
+            if earnings_soon and _term is not None and _term > 1.08:
+                out.append(
+                    f"⚠ Event risk: volatility term structure is stressed (~{_term:.2f}×) "
+                    f"and earnings are near. Stocks can gap through stops around the print — "
+                    "size accordingly."
+                )
+            elif _term is not None and _term > 1.08:
+                out.append(
+                    f"Near-term event risk: IV term slope {_term:.2f}× (backwardation). "
+                    "Cash equities can still gap sharply when the catalyst resolves — expect "
+                    "possible slippage versus your stop level."
+                )
+            continue
+        if "Term structure in backwardation" in w and "Long option premium" in w:
+            _term = flow_out.term_slope if flow_out else None
+            if _term is not None:
+                out.append(
+                    f"Term structure in backwardation ({_term:.2f}×): near-term uncertainty is elevated. "
+                    "Stock stops are not guaranteed fill prices if the name gaps on news."
+                )
+            continue
+        w2 = w.replace(
+            "Wait for a confirmed directional breakout before committing new risk.",
+            "Wait for a confirmed directional breakout before adding stock.",
+        )
+        w2 = w2.replace(
+            "Research defines Unusual Options Activity as 5x+ normal volume — this level ",
+            "Unusual equity volume (5×+ normal) often means ",
+        )
+        w2 = w2.replace("Options bid-ask spreads are likely very wide.", "Use limit orders; spreads may be wide.")
+        w2 = w2.replace("entering a directional stock trade.", "adding stock.")
+        w2 = w2.replace("before committing a new stock position", "before adding stock exposure")
+        out.append(w2)
+
+    # Dedupe preserving order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+
+    if (
+        earnings_soon is not None
+        and earnings_soon.days_until > 0
+        and earnings_soon.days_until <= stock_swing_days
+    ):
+        uniq.append(
+            f"Earnings in {earnings_soon.days_until}d falls inside this ~{stock_swing_days}d swing window — "
+            "the tape can reset overnight. Consider smaller size or waiting until after the report."
+        )
+    if stock_swing_days <= 15:
+        dow = datetime.now().weekday()
+        if dow in (3, 4):
+            dayn = "Thursday" if dow == 3 else "Friday"
+            uniq.append(
+                f"{dayn} entry: markets are closed Sat–Sun — headline and gap risk can move the stock "
+                "away from your levels. Stops do not guarantee execution prices."
+            )
+    return uniq
+
+
+def _build_stock_strategy(
+    *,
+    sym: str,
+    spot: float,
+    closes: list[float],
+    atr_block: IndicatorATR,
+    price_action: PriceAction,
+    verdict: str,
+    conviction: float,
+    composite_score: float,
+    timeframe: Timeframe,
+    rsi_block: IndicatorRSI,
+    direction_summary: str = "",
+    direction_bullets: Optional[list[str]] = None,
+) -> StockStrategyOut:
+    """Verdict-driven swing stock plan (not options contract selection)."""
+    dir_bullets = list(direction_bullets) if direction_bullets is not None else []
+    rv = _annualized_vol(closes)
+    atr_annual = (atr_block.pct_of_price or 0) / 100 * math.sqrt(252) if atr_block.pct_of_price else 0.0
+    iv_est = max(0.12, (rv + atr_annual) / 2) if atr_annual else max(0.15, rv)
+    iv_est = min(iv_est, DEFAULT_IV.get(sym, 0.40) * 1.6)
+    iv_est = min(iv_est, 1.50)
+    swing_d = _stock_swing_calendar_days(timeframe)
+    T = max(1, swing_d) / 365.0
+    one_sigma_usd = round(spot * iv_est * math.sqrt(T), 2)
+    hold_h = _hold_horizon_label(timeframe)
+    rsi_v = rsi_block.value
+
+    if verdict == "NEUTRAL":
+        sup = min(price_action.supports) if price_action.supports else None
+        res = max(price_action.resistances) if price_action.resistances else None
+        parts = []
+        if sup is not None:
+            parts.append(f"support near ${sup:.2f}")
+        if res is not None:
+            parts.append(f"resistance near ${res:.2f}")
+        range_note = " · ".join(parts) if parts else "Wait for a directional breakout with volume."
+        return StockStrategyOut(
+            action="hold_wait",
+            action_display="WAIT",
+            headline="No directional edge — stand aside or wait for breakout",
+            entry=StockEntryOut(
+                mode="market",
+                price=round(spot, 2),
+                note="Reference only; do not chase without a fresh setup.",
+            ),
+            take_profit=None,
+            stop_loss=None,
+            risk_reward=None,
+            buy_price=None,
+            short_entry_price=None,
+            sell_take_profit_price=None,
+            sell_stop_price=None,
+            chart_patterns=list(price_action.patterns),
+            direction_summary=direction_summary,
+            direction_bullets=dir_bullets,
+            hold_horizon=hold_h,
+            rationale=(
+                f"Composite {composite_score:+.2f} is NEUTRAL — no swing edge. "
+                f"Range: {range_note}"
+            ),
+            range_note=range_note,
+        )
+
+    direction_long = verdict == "BULLISH"
+    tgt, stp, rr = _underlying_target_stop_rr(
+        spot=spot,
+        atr_block=atr_block,
+        price_action=price_action,
+        direction_long=direction_long,
+        one_sigma_usd=one_sigma_usd,
+    )
+
+    if direction_long:
+        action = "buy"
+        limits = [s for s in price_action.supports if s < spot * 0.998 and s > stp]
+        limit_px = max(limits) if limits else round(spot, 2)
+        use_limit = limit_px < spot * 0.995
+        entry = StockEntryOut(
+            mode="limit" if use_limit else "market",
+            price=round(limit_px, 2),
+            note=(
+                f"Consider limit near ${limit_px:.2f} on a pullback; else reference ~${spot:.2f}."
+                if use_limit
+                else f"Stock near ${spot:.2f} — tactical swing long toward ${tgt:.2f}."
+            ),
+        )
+        headline = f"Swing long — book profits near ${tgt:.2f}, stop ${stp:.2f}"
+        rationale = (
+            f"Bullish swing: take-profit near ${tgt:.2f}; stop near ${stp:.2f} to protect capital."
+        )
+        if rsi_v is not None:
+            rationale += f" Thesis weakens on a close below ${stp:.2f} or if RSI loses 50."
+    else:
+        action = "sell_short"
+        limits = [r for r in price_action.resistances if r > spot * 1.002 and r < stp]
+        limit_px = min(limits) if limits else round(spot, 2)
+        use_limit = limit_px > spot * 1.005
+        entry = StockEntryOut(
+            mode="limit" if use_limit else "market",
+            price=round(limit_px, 2),
+            note=(
+                f"Consider limit near ${limit_px:.2f} on a relief rally; else reference ~${spot:.2f}."
+                if use_limit
+                else f"Stock near ${spot:.2f} — tactical short / trim / inverse-ETF swing toward ${tgt:.2f}."
+            ),
+        )
+        headline = f"Swing bearish — target ${tgt:.2f}, stop ${stp:.2f} (short / hedge / inverse ETF)"
+        rationale = (
+            f"Bearish swing: target lower near ${tgt:.2f}; stop near ${stp:.2f} if the breakdown fails."
+        )
+        if rsi_v is not None:
+            rationale += f" Thesis weakens on a close above ${stp:.2f} or if RSI regains 50."
+
+    rationale += f" Conviction {int(conviction * 100)}% (score {composite_score:+.2f})."
+    ch_pat = list(price_action.patterns)
+    if direction_long:
+        return StockStrategyOut(
+            action=action,
+            action_display="BUY",
+            headline=headline,
+            entry=entry,
+            take_profit=tgt,
+            stop_loss=stp,
+            risk_reward=rr,
+            buy_price=round(entry.price, 2),
+            short_entry_price=None,
+            sell_take_profit_price=tgt,
+            sell_stop_price=stp,
+            chart_patterns=ch_pat,
+            direction_summary=direction_summary,
+            direction_bullets=dir_bullets,
+            hold_horizon=hold_h,
+            rationale=rationale,
+        )
+    return StockStrategyOut(
+        action=action,
+        action_display="SHORT",
+        headline=headline,
+        entry=entry,
+        take_profit=tgt,
+        stop_loss=stp,
+        risk_reward=rr,
+        buy_price=None,
+        short_entry_price=round(entry.price, 2),
+        sell_take_profit_price=tgt,
+        sell_stop_price=stp,
+        chart_patterns=ch_pat,
+        direction_summary=direction_summary,
+        direction_bullets=dir_bullets,
+        hold_horizon=hold_h,
+        rationale=rationale,
+    )
+
+
 # ---------------------------------------------------------------------------
 # TradePlan — the concrete "buy this" trade ticket
 # ---------------------------------------------------------------------------
@@ -2194,48 +2623,14 @@ def _build_trade_plan(
             2,
         )
 
-    # ---- Target price ------------------------------------------------------
-    # Preferred: first structural level in the direction of the trade that's
-    # within ~1.5σ of spot (so we don't anchor to a distant resistance that
-    # would inflate RR). Otherwise: spot ± 1σ.
-    max_target_distance = 1.5 * one_sigma_usd
-    if contract_type == "call":
-        above = [
-            lvl for lvl in price_action.resistances
-            if spot * 1.005 < lvl <= spot + max_target_distance
-        ]
-        target_price = above[0] if above else round(spot + one_sigma_usd, 2)
-    else:
-        below = [
-            lvl for lvl in price_action.supports
-            if spot - max_target_distance <= lvl < spot * 0.995
-        ]
-        target_price = below[0] if below else round(spot - one_sigma_usd, 2)
-
-    # ---- Stop loss (thesis invalidation on the underlying) -----------------
-    # Enforce a minimum stop distance (max of 1×ATR or 1.5% of spot) so
-    # vanishingly-close structural levels don't produce absurd RR numbers.
-    atr_val = atr_block.value or (spot * 0.02)
-    min_stop_distance = max(atr_val, spot * 0.015)
-    if contract_type == "call":
-        atr_stop = spot - 2 * atr_val
-        structural = max(price_action.supports) if price_action.supports else None
-        raw_stop = max(atr_stop, structural) if structural is not None else atr_stop
-        # Push the stop at least min_stop_distance below spot.
-        stop_loss = round(min(raw_stop, spot - min_stop_distance), 2)
-    else:
-        atr_stop = spot + 2 * atr_val
-        structural = min(price_action.resistances) if price_action.resistances else None
-        raw_stop = min(atr_stop, structural) if structural is not None else atr_stop
-        # Push the stop at least min_stop_distance above spot.
-        stop_loss = round(max(raw_stop, spot + min_stop_distance), 2)
-
-    # ---- Risk / reward on the underlying ----------------------------------
-    risk_reward: Optional[float] = None
-    if contract_type == "call" and spot > stop_loss and target_price > spot:
-        risk_reward = round((target_price - spot) / (spot - stop_loss), 2)
-    elif contract_type == "put" and spot < stop_loss and target_price < spot:
-        risk_reward = round((spot - target_price) / (stop_loss - spot), 2)
+    # ---- Target / stop / R:R on underlying (shared with stock_strategy) ----
+    target_price, stop_loss, risk_reward = _underlying_target_stop_rr(
+        spot=spot,
+        atr_block=atr_block,
+        price_action=price_action,
+        direction_long=(contract_type == "call"),
+        one_sigma_usd=one_sigma_usd,
+    )
 
     # ---- Rationale ---------------------------------------------------------
     if premium is not None:

@@ -137,6 +137,8 @@ const state = {
   /** Analyst / Search embed charts use the same API + controls; session zoom is isolated per tab. */
   analystChart: { range: '1d', view: 'mountain' },
   analystChartSessionZoom: { start: 0, end: 1 },
+  stocksChart: { range: '1d', view: 'mountain' },
+  stocksChartSessionZoom: { start: 0, end: 1 },
   searchChart: { range: '1d', view: 'mountain' },
   searchChartSessionZoom: { start: 0, end: 1 },
   /** Which surface opened the enlarged chart modal (`openDetailChartModal`); drives View toolbar routing. */
@@ -158,6 +160,24 @@ function reapplySessionDetailChart() {
     const backdrop = $('#chart-enlarge-backdrop');
     if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'detail') {
       openDetailChartModal(d, 'detail');
+    }
+  }
+}
+
+function stocksTickerCacheKey(symbol) {
+  return `${String(symbol || '').toUpperCase()}|${state.stocksChart.range}`;
+}
+
+function reapplyStocksSessionChart() {
+  if (state.view !== 'stocks') return;
+  const sym = stocks.activeSymbol;
+  if (!sym) return;
+  const d = stocks.tickerDetails[stocksTickerCacheKey(sym)];
+  if (d) {
+    renderPriceChart(d, 'stocks');
+    const backdrop = $('#chart-enlarge-backdrop');
+    if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'stocks') {
+      openDetailChartModal(d, 'stocks');
     }
   }
 }
@@ -277,6 +297,9 @@ function initTabs() {
       } else if (target === 'analyst') {
         switchView('analyst');
         initAnalystOnce();
+      } else if (target === 'stocks') {
+        switchView('stocks');
+        initStocksOnce();
       } else if (target === 'search') {
         switchView('search');
         initSearchOnce();
@@ -842,6 +865,19 @@ function initDetailChartToolbar() {
         syncChartModalViewToolbar();
         return;
       }
+      if (src === 'stocks') {
+        if (nv === state.stocksChart.view) return;
+        state.stocksChart.view = nv;
+        const sym = stocks.activeSymbol;
+        const d = sym ? stocks.tickerDetails[stocksTickerCacheKey(sym)] : null;
+        if (d) {
+          renderPriceChart(d, 'stocks');
+          openDetailChartModal(d, 'stocks');
+        }
+        syncStocksChartToolbar();
+        syncChartModalViewToolbar();
+        return;
+      }
       if (src === 'detail') {
         if (nv === state.detailChart.view) return;
         state.detailChart.view = nv;
@@ -944,6 +980,74 @@ function initAnalystChartToolbar() {
       }
     }
   });
+}
+
+function initStocksChartToolbar() {
+  document.addEventListener('click', (e) => {
+    const tr = e.target.closest('#stocks-chart-toolbar [data-stocks-range]');
+    const tv = e.target.closest('#stocks-chart-toolbar [data-stocks-view]');
+    if (!tr && !tv) return;
+    const sym = stocks.activeSymbol;
+    if (!sym) return;
+    e.preventDefault();
+    if (tr) {
+      const nr = tr.getAttribute('data-stocks-range');
+      if (!nr || nr === state.stocksChart.range) return;
+      const oldR = state.stocksChart.range;
+      const oldKey = `${sym.toUpperCase()}|${oldR}`;
+      state.stocksChart.range = nr;
+      state.stocksChartSessionZoom = { start: 0, end: 1 };
+      delete stocks.tickerDetails[oldKey];
+      void (async () => {
+        try {
+          const d = await loadStocksTickerDetail(sym);
+          if (d && stocks.activeSymbol === sym) {
+            const r = stocks.reports[`${sym}|${stocks.timeframe}`];
+            if (r) renderStockReport(r, d);
+            else renderPriceChart(d, 'stocks');
+            syncStocksChartToolbar();
+          }
+        } catch (err) {
+          const el = $('#stocks-price-chart');
+          if (el) {
+            el.innerHTML = '';
+            el.append(h('div', { class: 'callout callout-warning' },
+              h('div', { class: 'callout-title' }, 'Price chart'),
+              `Could not load chart: ${err}`));
+          }
+        }
+      })();
+      return;
+    }
+    if (tv) {
+      const nv = tv.getAttribute('data-stocks-view');
+      if (nv && nv !== state.stocksChart.view) {
+        state.stocksChart.view = nv;
+        const d = stocks.tickerDetails[stocksTickerCacheKey(sym)];
+        if (d) {
+          renderPriceChart(d, 'stocks');
+          const backdrop = $('#chart-enlarge-backdrop');
+          if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'stocks') {
+            openDetailChartModal(d, 'stocks');
+          }
+        }
+        syncStocksChartToolbar();
+        syncChartModalViewToolbar();
+      }
+    }
+  });
+}
+
+async function loadStocksTickerDetail(symbol) {
+  const r = state.stocksChart.range;
+  const key = `${String(symbol).toUpperCase()}|${r}`;
+  const cached = stocks.tickerDetails[key];
+  if (cached) return cached;
+  const d = await api(
+    `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`
+  );
+  stocks.tickerDetails[key] = d;
+  return d;
 }
 
 function initSearchChartToolbar() {
@@ -1142,26 +1246,32 @@ function heroStat(value, label, opts = {}) {
 
 // ---------- Fancy price chart (SMA overlays, Bollinger, crosshair) --------
 
-/** @param {string} target "detail" | "analyst" | "search" */
+/** @param {string} target "detail" | "analyst" | "search" | "stocks" */
 function renderPriceChart(d, target = 'detail') {
   const host =
     target === 'analyst'
       ? $('#analyst-price-chart')
       : target === 'search'
         ? $('#search-price-chart')
-        : $('#price-chart');
+        : target === 'stocks'
+          ? $('#stocks-price-chart')
+          : $('#price-chart');
   const btn =
     target === 'analyst'
       ? $('#analyst-btn-enlarge-chart')
       : target === 'search'
         ? $('#search-btn-enlarge-chart')
-        : $('#btn-enlarge-chart');
+        : target === 'stocks'
+          ? $('#stocks-btn-enlarge-chart')
+          : $('#btn-enlarge-chart');
   const titleEl =
     target === 'analyst'
       ? $('#analyst-price-card-title')
       : target === 'search'
         ? $('#search-price-card-title')
-        : $('#price-chart-card-title');
+        : target === 'stocks'
+          ? $('#stocks-price-card-title')
+          : $('#price-chart-card-title');
   if (!host) return;
   host.innerHTML = '';
   const ch = d.chart;
@@ -1171,7 +1281,9 @@ function renderPriceChart(d, target = 'detail') {
       ? state.analystChart.view || 'mountain'
       : target === 'search'
         ? state.searchChart.view || 'mountain'
-        : state.detailChart.view || 'mountain';
+        : target === 'stocks'
+          ? state.stocksChart.view || 'mountain'
+          : state.detailChart.view || 'mountain';
   if (bars) {
     const vk = (ch.range_key || '1d').toUpperCase();
     const g =
@@ -1200,13 +1312,17 @@ function renderPriceChart(d, target = 'detail') {
           ? state.analystChartSessionZoom
           : target === 'search'
             ? state.searchChartSessionZoom
-            : state.detailChartSessionZoom;
+            : target === 'stocks'
+              ? state.stocksChartSessionZoom
+              : state.detailChartSessionZoom;
       o.onSessionReapply =
         target === 'analyst'
           ? reapplyAnalystSessionChart
           : target === 'search'
             ? reapplySearchSessionChart
-            : reapplySessionDetailChart;
+            : target === 'stocks'
+              ? reapplyStocksSessionChart
+              : reapplySessionDetailChart;
     }
     host.append(tickerOhlcChart(bars, view, d.row.direction, o));
     return;
@@ -1250,7 +1366,9 @@ function openDetailChartModal(d, source = 'detail') {
       ? state.analystChart.view || 'mountain'
       : source === 'search'
         ? state.searchChart.view || 'mountain'
-        : state.detailChart.view || 'mountain';
+        : source === 'stocks'
+          ? state.stocksChart.view || 'mountain'
+          : state.detailChart.view || 'mountain';
   if (bars) {
     const xg = ch.x_granularity || 'day';
     const o = {
@@ -1266,13 +1384,17 @@ function openDetailChartModal(d, source = 'detail') {
           ? state.analystChartSessionZoom
           : source === 'search'
             ? state.searchChartSessionZoom
-            : state.detailChartSessionZoom;
+            : source === 'stocks'
+              ? state.stocksChartSessionZoom
+              : state.detailChartSessionZoom;
       o.onSessionReapply =
         source === 'analyst'
           ? reapplyAnalystSessionChart
           : source === 'search'
             ? reapplySearchSessionChart
-            : reapplySessionDetailChart;
+            : source === 'stocks'
+              ? reapplyStocksSessionChart
+              : reapplySessionDetailChart;
     }
     host.append(tickerOhlcChart(bars, view, d.row.direction, o));
   } else {
@@ -1314,9 +1436,21 @@ function openDetailChartModal(d, source = 'detail') {
   if (source === 'detail') syncDetailChartToolbar();
   if (source === 'analyst') syncAnalystChartToolbar();
   if (source === 'search') syncSearchChartToolbar();
+  if (source === 'stocks') syncStocksChartToolbar();
   syncChartModalViewToolbar();
   backdrop.classList.remove('hidden');
   document.body.classList.add('chart-enlarge-open');
+}
+
+function syncStocksChartToolbar() {
+  const r = state.stocksChart.range;
+  const v = state.stocksChart.view;
+  document.querySelectorAll('#stocks-chart-toolbar [data-stocks-range]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-stocks-range') === r);
+  });
+  document.querySelectorAll('#stocks-chart-toolbar [data-stocks-view]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-stocks-view') === v);
+  });
 }
 
 function syncChartModalViewToolbar() {
@@ -1325,7 +1459,9 @@ function syncChartModalViewToolbar() {
       ? state.analystChart.view
       : state.chartModalSource === 'search'
         ? state.searchChart.view
-        : state.detailChart.view;
+        : state.chartModalSource === 'stocks'
+          ? state.stocksChart.view
+          : state.detailChart.view;
   document.querySelectorAll('#chart-modal-view-toolbar [data-detail-view]').forEach((b) => {
     b.classList.toggle('is-active', b.getAttribute('data-detail-view') === v);
   });
@@ -2893,6 +3029,17 @@ const analyst = {
   briefCache: {},  // key = tf -> brief text
 };
 
+const stocks = {
+  initialized: false,
+  tickers: [],
+  activeSymbol: null,
+  timeframe: 'daily',
+  overview: [],
+  reports: {},
+  tickerDetails: {},
+  _priceChartSymbol: null,
+};
+
 const etf = {
   initialized: false,
   timeframe: 'daily',
@@ -2947,6 +3094,41 @@ async function initAnalystOnce() {
 
   const first = analyst.tickers[0];
   if (first) loadAnalystReport(first.symbol);
+}
+
+async function initStocksOnce() {
+  if (stocks.initialized) return;
+  stocks.initialized = true;
+  initStocksChartToolbar();
+
+  $$('.stocks-timeframes .pill').forEach((p) => {
+    p.addEventListener('click', () => {
+      const tf = p.getAttribute('data-stocks-tf');
+      if (!tf || stocks.timeframe === tf) return;
+      stocks.timeframe = tf;
+      $$('.stocks-timeframes .pill').forEach((x) =>
+        x.classList.toggle('is-active', x === p)
+      );
+      const ot = $('#stocks-overview-timeframe');
+      if (ot) ot.textContent = tf;
+      stocks.overview = [];
+      stocks.reports = {};
+      loadStocksOverview();
+      if (stocks.activeSymbol) loadStocksReport(stocks.activeSymbol);
+    });
+  });
+
+  try {
+    stocks.tickers = await api('/api/analyst/tickers');
+  } catch (e) {
+    const ts = $('#stocks-ticker-strip');
+    if (ts) ts.innerHTML = `<span class="ticker-strip-loading muted">Failed to load tickers: ${e}</span>`;
+    return;
+  }
+  renderStocksTickerStrip();
+  loadStocksOverview();
+  const first = stocks.tickers[0];
+  if (first) loadStocksReport(first.symbol);
 }
 
 function renderTickerStrip() {
@@ -3222,6 +3404,139 @@ async function loadAnalystReport(symbol) {
   syncAnalystChartToolbar();
 }
 
+function renderStocksTickerStrip() {
+  const host = $('#stocks-ticker-strip');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const t of stocks.tickers) {
+    const ov = stocks.overview.find((r) => r.symbol === t.symbol);
+    const verdict = ov ? ov.verdict : null;
+    const cls =
+      verdict === 'BULLISH' ? 'verdict-bullish' :
+        verdict === 'BEARISH' ? 'verdict-bearish' :
+          verdict === 'NEUTRAL' ? 'verdict-neutral' : '';
+    host.append(
+      h(
+        'span',
+        {
+          class: 'ticker-chip ' + cls + (stocks.activeSymbol === t.symbol ? ' is-active' : ''),
+          onClick: () => loadStocksReport(t.symbol),
+          title: t.name,
+        },
+        h('span', { class: 'chip-sym' }, t.symbol),
+        verdict ? h('span', { class: 'chip-verdict' }, verdict.slice(0, 4)) : null,
+      ),
+    );
+  }
+}
+
+async function loadStocksOverview() {
+  const list = $('#stocks-overview-list');
+  if (!list) return;
+  list.innerHTML = '<div class="muted" style="padding:10px 12px;">Loading…</div>';
+  try {
+    const rows = await api(
+      `/api/analyst/overview?timeframe=${encodeURIComponent(stocks.timeframe)}`
+    );
+    stocks.overview = rows;
+    renderStocksOverviewList();
+    renderStocksTickerStrip();
+    const srcEl = $('#stocks-source');
+    if (srcEl) srcEl.textContent = rows.find((r) => r.source)?.source || '—';
+  } catch (e) {
+    list.innerHTML = `<div class="muted" style="padding:10px 12px;">Failed: ${e}</div>`;
+  }
+}
+
+function renderStocksOverviewList() {
+  const list = $('#stocks-overview-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const sorted = stocks.overview.slice().sort((a, b) => {
+    const vOrd = { BULLISH: 0, BEARISH: 1, NEUTRAL: 2 };
+    if (vOrd[a.verdict] !== vOrd[b.verdict]) return vOrd[a.verdict] - vOrd[b.verdict];
+    return b.conviction - a.conviction;
+  });
+  for (const r of sorted) {
+    const vcls =
+      r.verdict === 'BULLISH' ? 'v-bullish' :
+        r.verdict === 'BEARISH' ? 'v-bearish' : 'v-neutral';
+    const recCls = r.rec_contract_type === 'call' ? 'rec-call' : 'rec-put';
+    const recLabel = r.rec_contract_type === 'call' ? 'CALL' : 'PUT';
+    list.append(
+      h(
+        'div',
+        {
+          class: 'overview-row ' + vcls + (r.symbol === stocks.activeSymbol ? ' is-active' : ''),
+          onClick: () => loadStocksReport(r.symbol),
+        },
+        h(
+          'div',
+          { class: 'ov-top' },
+          h('span', { class: 'sym' }, h('span', { class: 'verdict-dot' }), r.symbol),
+          h('span', { class: `rec-pill ${recCls} mono` }, `${recLabel} ref`),
+          h('span', { class: 'rsi mono' }, r.rsi != null ? `rsi ${r.rsi.toFixed(0)}` : '—'),
+        ),
+        h(
+          'div',
+          { class: 'ov-bot mono muted' },
+          'TP ',
+          r.rec_target != null ? `$${r.rec_target.toFixed(2)}` : '—',
+          ' · ST ',
+          r.rec_stop != null ? `$${r.rec_stop.toFixed(2)}` : '—',
+        ),
+      ),
+    );
+  }
+}
+
+async function loadStocksReport(symbol) {
+  if (stocks._priceChartSymbol != null && stocks._priceChartSymbol !== symbol) {
+    state.stocksChartSessionZoom = { start: 0, end: 1 };
+  }
+  stocks._priceChartSymbol = symbol;
+  stocks.activeSymbol = symbol;
+  renderStocksTickerStrip();
+  renderStocksOverviewList();
+
+  const key = `${symbol}|${stocks.timeframe}`;
+  const _rptCached = stocks.reports[key];
+  if (_rptCached && _rptCached._cachedAt && (Date.now() - _rptCached._cachedAt) > 5 * 60_000) {
+    delete stocks.reports[key];
+  }
+  let rpt = stocks.reports[key];
+  const sr = $('#stocks-report');
+  if (!rpt) {
+    if (sr) {
+      sr.innerHTML =
+        `<div class="callout"><div class="callout-title">Loading ${symbol} · ${stocks.timeframe}</div>` +
+        `Computing indicators and swing plan…</div>`;
+    }
+    try {
+      rpt = await api(
+        `/api/analyst/report/${encodeURIComponent(symbol)}` +
+          `?timeframe=${encodeURIComponent(stocks.timeframe)}&fresh_quotes=1`,
+      );
+      rpt._cachedAt = Date.now();
+      stocks.reports[key] = rpt;
+    } catch (e) {
+      if (sr) {
+        sr.innerHTML =
+          `<div class="callout callout-warning"><div class="callout-title">Failed to load ${symbol}</div>${e}</div>`;
+      }
+      return;
+    }
+  }
+  let tickerD = null;
+  try {
+    tickerD = await loadStocksTickerDetail(symbol);
+  } catch (e) {
+    tickerD = null;
+  }
+  renderStockReport(rpt, tickerD);
+  syncStocksChartToolbar();
+}
+
 function factorTone(score) {
   if (score >= 0.25) return 'pos';
   if (score <= -0.25) return 'neg';
@@ -3251,9 +3566,13 @@ function renderVerdictFactors(factors) {
   );
 }
 
-function renderAnalystReport(r, tickerD) {
-  const root = $('#analyst-report');
+function renderAnalystSurface(r, tickerD, surface = 'analyst') {
+  const root = surface === 'stocks' ? $('#stocks-report') : $('#analyst-report');
   root.innerHTML = '';
+  const rangeKey = surface === 'stocks' ? 'data-stocks-range' : 'data-analyst-range';
+  const viewKey = surface === 'stocks' ? 'data-stocks-view' : 'data-analyst-view';
+  const chState = surface === 'stocks' ? state.stocksChart : state.analystChart;
+  const chartTarget = surface === 'stocks' ? 'stocks' : 'analyst';
 
   // Hero
   root.append(
@@ -3367,7 +3686,13 @@ function renderAnalystReport(r, tickerD) {
   );
 
   // Signal warnings (earnings, overbought+Bollinger stretch, stale open bar)
-  const warnings = Array.isArray(r.signal_warnings) ? r.signal_warnings : [];
+  const rawWarn =
+    surface === 'stocks'
+      ? (Array.isArray(r.equity_signal_warnings) && r.equity_signal_warnings.length
+          ? r.equity_signal_warnings
+          : r.signal_warnings)
+      : r.signal_warnings;
+  const warnings = Array.isArray(rawWarn) ? rawWarn : [];
   if (warnings.length) {
     root.append(
       h(
@@ -3519,7 +3844,7 @@ function renderAnalystReport(r, tickerD) {
 
   // Tier-2 options intelligence (UOA · term structure · skew) — plain-English cards
   const of = r.options_flow;
-  if (of && of.source !== 'unavailable') {
+  if (surface !== 'stocks' && of && of.source !== 'unavailable') {
     const uoaNet = of.uoa_bull - of.uoa_bear;
 
     // ---- UOA plain-English ------------------------------------------------
@@ -3663,6 +3988,11 @@ function renderAnalystReport(r, tickerD) {
   }
 
   // Price chart (same Yahoo-style OHLC path as Ticker detail; /api/ticker bars)
+  const priceCardTitleId = surface === 'stocks' ? 'stocks-price-card-title' : 'analyst-price-card-title';
+  const priceCardTrailId = surface === 'stocks' ? 'stocks-price-card-trail' : 'analyst-price-card-trail';
+  const enlargeBtnId = surface === 'stocks' ? 'stocks-btn-enlarge-chart' : 'analyst-btn-enlarge-chart';
+  const chartToolbarId = surface === 'stocks' ? 'stocks-chart-toolbar' : 'analyst-chart-toolbar';
+  const priceChartHostId = surface === 'stocks' ? 'stocks-price-chart' : 'analyst-price-chart';
   const rangePills = [
     ['1d', '1D'],
     ['5d', '5D'],
@@ -3687,10 +4017,10 @@ function renderAnalystReport(r, tickerD) {
         h(
           'div',
           { class: 'card-header-titles' },
-          h('span', { class: 'card-title', id: 'analyst-price-card-title' }, 'Price'),
+          h('span', { class: 'card-title', id: priceCardTitleId }, 'Price'),
           h(
             'span',
-            { class: 'card-trail mono', id: 'analyst-price-card-trail' },
+            { class: 'card-trail mono', id: priceCardTrailId },
             `${r.chart.close.length} bars · ${r.timeframe}`,
           ),
         ),
@@ -3699,7 +4029,7 @@ function renderAnalystReport(r, tickerD) {
           {
             type: 'button',
             class: 'btn-ghost btn-enlarge-chart',
-            id: 'analyst-btn-enlarge-chart',
+            id: enlargeBtnId,
             hidden: true,
           },
           'Enlarge chart',
@@ -3710,7 +4040,7 @@ function renderAnalystReport(r, tickerD) {
         { class: 'card-body card-body--ticker-chart' },
         h(
           'div',
-          { class: 'detail-chart-toolbar', id: 'analyst-chart-toolbar' },
+          { class: 'detail-chart-toolbar', id: chartToolbarId },
           h(
             'div',
             { class: 'detail-chart-toolbar__row', role: 'group', 'aria-label': 'Chart range' },
@@ -3718,18 +4048,14 @@ function renderAnalystReport(r, tickerD) {
             h(
               'div',
               { class: 'pill-row' },
-              ...rangePills.map(([rk, lab]) =>
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    class:
-                      'pill' + (state.analystChart.range === rk ? ' is-active' : ''),
-                    'data-analyst-range': rk,
-                  },
-                  lab,
-                ),
-              ),
+              ...rangePills.map(([rk, lab]) => {
+                const props = {
+                  type: 'button',
+                  class: 'pill' + (chState.range === rk ? ' is-active' : ''),
+                };
+                props[rangeKey] = rk;
+                return h('button', props, lab);
+              }),
             ),
           ),
           h(
@@ -3739,29 +4065,26 @@ function renderAnalystReport(r, tickerD) {
             h(
               'div',
               { class: 'pill-row' },
-              ...viewPills.map(([vk, lab]) =>
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    class: 'pill' + (state.analystChart.view === vk ? ' is-active' : ''),
-                    'data-analyst-view': vk,
-                  },
-                  lab,
-                ),
-              ),
+              ...viewPills.map(([vk, lab]) => {
+                const props = {
+                  type: 'button',
+                  class: 'pill' + (chState.view === vk ? ' is-active' : ''),
+                };
+                props[viewKey] = vk;
+                return h('button', props, lab);
+              }),
             ),
           ),
         ),
-        h('div', { id: 'analyst-price-chart' },
+        h('div', { id: priceChartHostId },
           h('div', { class: 'chart-placeholder' }, tickerD ? '…' : 'Loading…')),
       ),
     ),
   );
   if (tickerD) {
-    renderPriceChart(tickerD, 'analyst');
+    renderPriceChart(tickerD, chartTarget);
   } else {
-    const ph = $('#analyst-price-chart');
+    const ph = document.getElementById(priceChartHostId);
     if (ph) {
       ph.innerHTML = '';
       ph.append(
@@ -3777,11 +4100,15 @@ function renderAnalystReport(r, tickerD) {
   // Narrative — deterministic by default; optionally polished by Claude.
   const narrativeHost = h(
     'div',
-    { class: 'report-narrative', id: 'narrative-host' },
+    {
+      class: 'report-narrative',
+      id: surface === 'stocks' ? 'stocks-narrative-host' : 'narrative-host',
+    },
     ...r.narrative.split('\n\n').map((para) => h('p', {}, para))
   );
-  const polishBtn = analyst.llm.enabled
-    ? h(
+  const polishBtn =
+    surface === 'analyst' && analyst.llm.enabled
+      ? h(
         'button',
         {
           class: 'btn-ghost polish-btn',
@@ -3790,7 +4117,7 @@ function renderAnalystReport(r, tickerD) {
         },
         'Polish with Claude ✨'
       )
-    : null;
+      : null;
   root.append(
     h(
       'div',
@@ -3848,8 +4175,11 @@ function renderAnalystReport(r, tickerD) {
     )
   );
 
-  // Recommended option strategy (clean directional ticket — always populated)
-  root.append(tradeTicketCard(r.options.trade_plan, r.verdict, r.options.headline, r.timeframe, r.signal_warnings || []));
+  if (surface === 'stocks') {
+    root.append(stockStrategyCard(r.stock_strategy));
+  } else {
+    root.append(tradeTicketCard(r.options.trade_plan, r.verdict, r.options.headline, r.timeframe, r.signal_warnings || []));
+  }
 
   // Optional: ask Claude about this specific report.
   if (analyst.llm.enabled) {
@@ -3857,7 +4187,198 @@ function renderAnalystReport(r, tickerD) {
   }
 }
 
-// ---------- Claude LLM: narrative polish, brief, explain ------------------
+function stockStrategyCard(ss) {
+  if (!ss) {
+    return h(
+      'div',
+      { class: 'callout' },
+      h('div', { class: 'callout-title' }, 'Stock strategy'),
+      'Unavailable for this response.',
+    );
+  }
+  const ad = ss.action_display || 'WAIT';
+  const actTone =
+    ad === 'BUY' ? 'ssc-bull' :
+      ad === 'SHORT' ? 'ssc-bear' : 'ssc-neutral';
+  const heroPrice =
+    ad === 'BUY' && ss.buy_price != null ? ss.buy_price :
+      ad === 'SHORT' && ss.short_entry_price != null ? ss.short_entry_price :
+        ss.entry.price;
+  const heroLabel =
+    ad === 'BUY' ? 'Buy zone' :
+      ad === 'SHORT' ? 'Short (sell) zone' :
+        'Reference — no directional buy/sell';
+
+  const heroTone =
+    ad === 'BUY' ? 'ssc-hero-bull' :
+      ad === 'SHORT' ? 'ssc-hero-bear' : 'ssc-hero-wait';
+
+  const dirWhy =
+    ad === 'BUY' ? 'Why bullish' :
+      ad === 'SHORT' ? 'Why bearish' : 'Why neutral / wait';
+
+  const reasonHighlight =
+    ss.direction_summary
+      ? h(
+        'div',
+        {
+          class: `ssc-direction-reason ${
+            ad === 'BUY' ? 'ssc-dir-bull' : ad === 'SHORT' ? 'ssc-dir-bear' : 'ssc-dir-neutral'
+          }`,
+        },
+        h('div', { class: 'ssc-dir-ribbon' }, dirWhy),
+        h('p', { class: 'ssc-dir-summary' }, ss.direction_summary),
+        ss.direction_bullets && ss.direction_bullets.length
+          ? h(
+            'ul',
+            { class: 'ssc-dir-bullets' },
+            ...ss.direction_bullets.map((t) => h('li', {}, t)),
+          )
+          : null,
+      )
+      : null;
+
+  const hero = h(
+    'div',
+    { class: `ssc-action-hero ${heroTone}` },
+    h('div', { class: 'ssc-hero-top' },
+      h('span', { class: 'ssc-action-badge' }, ad),
+      h('span', { class: 'ssc-hero-label muted small' }, heroLabel)),
+    h('div', { class: 'ssc-hero-price mono' }, fmtUSD(heroPrice)),
+    ss.entry && ss.entry.note
+      ? h('div', { class: 'ssc-hero-note muted small' }, ss.entry.note)
+      : null,
+  );
+
+  const rows = [];
+  if (ad === 'BUY' && ss.buy_price != null) {
+    rows.push(
+      h(
+        'div',
+        { class: 'ssc-row ssc-row-highlight ssc-hl-buy' },
+        h('div', { class: 'ssc-label' }, 'Buy recommendation'),
+        h('div', { class: 'ssc-val mono ssc-price-em' }, fmtUSD(ss.buy_price)),
+        h('div', { class: 'ssc-hint muted' },
+          ss.entry.mode === 'limit'
+            ? 'Limit near this level (pullback / structure).'
+            : 'Size near spot / reference; consider limits on a dip.'),
+      ),
+    );
+  } else if (ad === 'SHORT' && ss.short_entry_price != null) {
+    rows.push(
+      h(
+        'div',
+        { class: 'ssc-row ssc-row-highlight ssc-hl-short' },
+        h('div', { class: 'ssc-label' }, 'Sell / short entry'),
+        h('div', { class: 'ssc-val mono ssc-price-em' }, fmtUSD(ss.short_entry_price)),
+        h('div', { class: 'ssc-hint muted' },
+          ss.entry.mode === 'limit' ? 'Initiate short on strength / rally.' : 'Reference entry for bearish swing.'),
+      ),
+    );
+  } else {
+    rows.push(
+      h(
+        'div',
+        { class: 'ssc-row' },
+        h('div', { class: 'ssc-label muted' }, `Reference (${ss.entry.mode})`),
+        h('div', { class: 'ssc-val mono' }, fmtUSD(ss.entry.price)),
+        h('div', { class: 'ssc-hint muted' }, ss.entry.note || ''),
+      ),
+    );
+  }
+
+  if (ss.sell_take_profit_price != null) {
+    const lab = ad === 'SHORT' ? 'Cover for profit (buy)' : 'Take profit (sell)';
+    rows.push(
+      h(
+        'div',
+        { class: 'ssc-row ssc-row-highlight ssc-hl-profit' },
+        h('div', { class: 'ssc-label' }, lab),
+        h('div', { class: 'ssc-val mono ssc-price-em' }, fmtUSD(ss.sell_take_profit_price)),
+        h('div', { class: 'ssc-hint muted' },
+          ad === 'SHORT'
+            ? 'Buy to cover lower — book swing profit.'
+            : 'Sell shares here to realize gains (scale per plan).'),
+      ),
+    );
+  }
+  if (ss.sell_stop_price != null) {
+    const lab2 = ad === 'SHORT' ? 'Stop — buy to cover' : 'Stop loss (sell)';
+    rows.push(
+      h(
+        'div',
+        { class: 'ssc-row ssc-row-highlight ssc-hl-stop' },
+        h('div', { class: 'ssc-label' }, lab2),
+        h('div', { class: 'ssc-val mono ssc-price-em' }, fmtUSD(ss.sell_stop_price)),
+        h('div', { class: 'ssc-hint muted' },
+          'Thesis protection — gaps can slip fills.'),
+      ),
+    );
+  }
+
+  if (ss.risk_reward != null) {
+    rows.push(
+      h(
+        'div',
+        { class: 'ssc-row' },
+        h('div', { class: 'ssc-label muted' }, 'Risk / reward'),
+        h('div', { class: 'ssc-val mono' }, `${ss.risk_reward.toFixed(2)}×`),
+        h('div', { class: 'ssc-hint muted' }, 'Underlying swing geometry'),
+      ),
+    );
+  }
+
+  const patList = ss.chart_patterns && ss.chart_patterns.length
+    ? h(
+      'div',
+      { class: 'ssc-patterns' },
+      h('div', { class: 'ssc-patterns-title muted small' }, 'Structure / pattern cues'),
+      h(
+        'div',
+        { class: 'ssc-pattern-chips' },
+        ...ss.chart_patterns.map((txt) => {
+          const low = String(txt).toLowerCase();
+          let chipTone = 'ssc-chip-neutral';
+          if (/\bbear\b|bear trap|bear flag|descending triangle|lower lows/.test(low)) {
+            chipTone = 'ssc-chip-bear';
+          } else if (
+            /\bbull\b|bull trap|bull flag|ascending triangle|cup-and-handle|cup-with-handle|higher highs/.test(low)
+          ) {
+            chipTone = 'ssc-chip-bull';
+          }
+          return h('span', { class: `ssc-chip ${chipTone}`, title: txt }, txt);
+        }),
+      ),
+    )
+    : null;
+
+  return h(
+    'div',
+    { class: `stock-strategy-card ${actTone}` },
+    h(
+      'div',
+      { class: 'ssc-head' },
+      h('h3', { class: 'ssc-title' }, 'Swing stock plan'),
+      h('div', { class: 'ssc-headline' }, ss.headline),
+    ),
+    reasonHighlight,
+    hero,
+    h('div', { class: 'ssc-horizon muted' }, ss.hold_horizon),
+    h('div', { class: 'ssc-grid' }, ...rows),
+    patList,
+    ss.range_note ? h('div', { class: 'ssc-range muted' }, ss.range_note) : null,
+    h('p', { class: 'ssc-rationale' }, ss.rationale),
+    h('p', { class: 'ssc-disclaimer muted small' }, ss.disclaimer),
+  );
+}
+
+function renderAnalystReport(r, tickerD) {
+  renderAnalystSurface(r, tickerD, 'analyst');
+}
+
+function renderStockReport(r, tickerD) {
+  renderAnalystSurface(r, tickerD, 'stocks');
+}
 
 async function togglePolishNarrative(report) {
   const host = $('#narrative-host');

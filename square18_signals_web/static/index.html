@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=sianna-options-pnl-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=sianna-stocks-tab-4" />
   </head>
   <body>
     <div
@@ -44,6 +44,9 @@
         </button>
         <button class="tab" data-view="etf" role="tab" aria-selected="false">
           ETFs
+        </button>
+        <button class="tab" data-view="stocks" role="tab" aria-selected="false">
+          Stocks
         </button>
         <button class="tab" data-view="analyst" role="tab" aria-selected="false">
           Analyst
@@ -675,6 +678,51 @@
         </div>
       </section>
 
+      <!-- Stocks — short-term swing (cash equity playbook) -->
+      <section class="view view-stocks hidden" data-view="stocks">
+        <div class="analyst-header">
+          <div>
+            <h1 class="analyst-title">Stock swing planner</h1>
+            <div class="analyst-sub">
+              Short-term <strong>cash stock</strong> playbook: entry reference, take-profit, and stop loss
+              for booking profits — same technical engine as Analyst, without the options ticket.
+              Data source: <span id="stocks-source" class="mono">—</span>.
+            </div>
+          </div>
+          <div class="analyst-header-right">
+            <div class="stocks-timeframes analyst-timeframes" role="tablist" aria-label="Stocks timeframe">
+              <button class="pill" data-stocks-tf="1h">1H</button>
+              <button class="pill" data-stocks-tf="4h">4H</button>
+              <button class="pill is-active" data-stocks-tf="daily">Daily</button>
+              <button class="pill" data-stocks-tf="weekly">Weekly</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="ticker-strip" id="stocks-ticker-strip">
+          <span class="ticker-strip-loading muted">Loading tickers…</span>
+        </div>
+
+        <div class="analyst-layout">
+          <aside class="overview-panel">
+            <div class="overview-panel-head">
+              <h3>Universe verdict</h3>
+              <span class="muted" id="stocks-overview-timeframe">daily</span>
+            </div>
+            <div class="overview-list" id="stocks-overview-list">
+              <div class="muted" style="padding:10px 12px;">Loading…</div>
+            </div>
+          </aside>
+
+          <div class="analyst-report" id="stocks-report">
+            <div class="callout">
+              <div class="callout-title">Select a ticker</div>
+              Pick a symbol to see the swing stock plan (entry, take-profit, stop) for this timeframe.
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Analyst view -->
       <section class="view view-analyst hidden" data-view="analyst">
         <div class="analyst-header">
@@ -866,6 +914,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=sianna-options-pnl-1" defer></script>
+    <script src="/static/app.js?v=sianna-stocks-tab-4" defer></script>
   </body>
 </html>

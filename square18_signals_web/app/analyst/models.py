@@ -143,6 +143,45 @@ class OptionsSuggestion(BaseModel):
     recommendations: list[RecommendationOut] = []
 
 
+class StockEntryOut(BaseModel):
+    mode: Literal["market", "limit"]
+    price: float
+    note: str
+
+
+StockAction = Literal["buy", "sell_short", "hold_wait", "reduce_trim"]
+
+
+StockActionDisplay = Literal["BUY", "SHORT", "WAIT"]
+
+
+class StockStrategyOut(BaseModel):
+    """Short-term equity playbook (cash stock / swing), verdict-driven — not options.
+
+    ``buy_price`` / ``short_entry_price`` / ``sell_*`` mirror ``entry`` and TP/stop for
+    clear buy vs sell semantics in UI and API clients.
+    """
+
+    action: StockAction
+    action_display: StockActionDisplay = "WAIT"
+    headline: str
+    entry: StockEntryOut
+    take_profit: Optional[float] = None
+    stop_loss: Optional[float] = None
+    risk_reward: Optional[float] = None
+    buy_price: Optional[float] = None
+    short_entry_price: Optional[float] = None
+    sell_take_profit_price: Optional[float] = None
+    sell_stop_price: Optional[float] = None
+    chart_patterns: list[str] = []
+    direction_summary: str = ""
+    direction_bullets: list[str] = []
+    hold_horizon: str
+    rationale: str
+    range_note: Optional[str] = None  # NEUTRAL: bracket / wait-for-break
+    disclaimer: str = "For education only; not investment advice."
+
+
 class ChartPayload(BaseModel):
     timestamps: list[str]
     close: list[float]
@@ -193,6 +232,10 @@ class ReportOut(BaseModel):
     mtf_confluence: Optional[str] = None         # e.g. "weekly confirms ↑ (+0.38)"
     regime_gate: Optional[str] = None            # e.g. "VIX 31 elevated → bull dampened 40%"
     signal_warnings: list[str] = []              # high-priority caveats (earnings, overbought, stale bars)
+    equity_signal_warnings: list[str] = []         # stock-tab copy (no options-only jargon)
+
+    # Short-term stock levels + playbook (verdict-driven; swing horizon)
+    stock_strategy: Optional[StockStrategyOut] = None
 
     # Tier-2 options intelligence (#8 UOA · #9 term structure · #10 skew)
     options_flow: Optional["OptionsFlowOut"] = None

@@ -397,8 +397,17 @@ def test_analyst_tickers_overview_report_flow(client: TestClient):
         "market_context",
         "options",
         "chart",
+        "stock_strategy",
+        "equity_signal_warnings",
     ):
         assert k in report
+    ss = report["stock_strategy"]
+    assert ss is not None
+    assert ss["action"] in {"buy", "sell_short", "hold_wait", "reduce_trim"}
+    assert ss.get("action_display") in {"BUY", "SHORT", "WAIT"}
+    assert isinstance(ss.get("direction_bullets"), list)
+    assert isinstance(ss.get("direction_summary"), str) and len(ss["direction_summary"]) > 0
+    assert isinstance(report["equity_signal_warnings"], list)
     assert report["options"]["contract_type"] in {"call", "put"}
 
 
