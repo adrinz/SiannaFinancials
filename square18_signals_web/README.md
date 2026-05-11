@@ -95,7 +95,8 @@ Source: `app/analyst/options_flow.py` (5-min in-process chain cache).
 - Options cost-effectiveness vs 1σ expected move
 
 **Trade ticket enhancements**
-- Black-Scholes Greeks: Δ, θ/day, ν/1%IV
+- Live Exchange Greeks: Δ, γ, θ, ν directly from Tradier (with BS fallback)
+- Bid/Ask Spread Penalty: Spreads >10% of mid-price penalize conviction by 15%
 - P&L scenarios: BS-repriced estimates at target price / flat 14d / stop loss
 - Break-even shown as both $ price **and** % move needed
 - Theta shown as weekly % of premium consumed
@@ -108,7 +109,7 @@ Source: `app/analyst/options_flow.py` (5-min in-process chain cache).
 ## Requirements
 
 - Python **3.10+**
-- `pip install -r requirements.txt` (FastAPI, Uvicorn, Pydantic v2, python-dotenv, yfinance, anthropic, playwright)
+- `pip install -r requirements.txt` (FastAPI, Uvicorn, Pydantic v2, python-dotenv, requests, yfinance, anthropic, playwright)
 
 The sibling `../square18_signals/src/` is added to `sys.path` automatically at startup.
 
@@ -228,7 +229,8 @@ Responses are cached at `~/.cache/square18_signals/llm/` keyed by `sha256(input)
 | `app/analyst/indicators.py` | RSI, MACD, ATR, ADX, Bollinger, Stochastic, RSI divergence |
 | `app/analyst/constants.py` | TICKERS, TICKER_MAP, DEFAULT_IV, anchor prices |
 | `app/analyst/market.py` | News aggregation, market pulse, options highlights |
-| `app/analyst/yahoo_quotes.py` | Spot price + option chain mid + short interest (cached) |
+| `app/analyst/tradier_client.py` | Tradier API integration (real-time OHLCV, options chains, Greeks) |
+| `app/analyst/yahoo_quotes.py` | Spot price + option chain mid + short interest (fallback) |
 | `signal_thresholds.json` | Tunable verdict thresholds (regenerate with `backtest_verdict --search-tau`) |
 | `backtest_verdict.json` | Walk-forward hit-rate + profit-factor per verdict/symbol |
 | `tools/backtest_verdict.py` | Walk-forward backtest + τ grid-search |

@@ -48,7 +48,7 @@ Top-level layout:
 - FastAPI + Uvicorn
 - Pydantic v2
 - `python-dotenv` (loads `square18_signals_web/.env` at startup)
-- Optional `yfinance` for live market/news data
+- Optional `tradier` and `yfinance` for live market/news data (Tradier is primary for real-time OHLCV and Options, yfinance is fallback)
 - Optional `anthropic` for LLM enrichment
 - `pytest` for tests
 - `playwright` for browser E2E
@@ -143,7 +143,7 @@ Report exports:
 The Analyst tab runs a multi-step enhanced pipeline for each ticker:
 
 ```
-OHLCV (yfinance, disk-cached)
+OHLCV (Tradier / yfinance, disk-cached)
     ↓
 _compute_raw_score(pa, vs, sma, rsi, macd, adx, stoch, bollinger)
     ↓
@@ -180,6 +180,7 @@ Conviction: proportional to `abs(score)`, capped at 0.85 (never 100%).
 
 Environment variables (set in `square18_signals_web/.env` or shell export):
 
+- `TRADIER_API_KEY` and `TRADIER_ENV` (enables real-time Tradier data)
 - `ANTHROPIC_API_KEY` (enables LLM endpoints/features)
 - `ANTHROPIC_MODEL` (optional override; default `claude-sonnet-4-5`)
 - `SQUARE18_LLM_CACHE_TTL` (optional cache TTL in seconds)
@@ -206,11 +207,12 @@ If ANTHROPIC_API_KEY is unset:
 
 ## 10) Known Operational Realities
 
-- Network/provider instability can affect `yfinance` calls; fallbacks throughout.
-- Yahoo Finance data is delayed ~15–20 min during US market hours.
+- The app uses Tradier for real-time OHLCV and Options data. If Tradier is unconfigured or unreachable, it falls back to `yfinance`.
+- Network/provider instability can affect `yfinance` calls; a circuit breaker prevents 403 bans.
+- Yahoo Finance data is delayed ~15–20 min during US market hours. Tradier data is real-time (or 15m delayed in sandbox).
 - Short interest data (`yf_short_interest_pct`) is FINRA biweekly — cached 1h.
-- `fresh_quotes=1` on the analyst report bypasses in-process caches but not Yahoo's delay.
-- 4H bars are resampled from 1H yfinance data (calendar 4H buckets, not US session-aligned).
+- `fresh_quotes=1` on the analyst report bypasses in-process caches.
+- 4H bars are resampled from 15m/1H data (calendar 4H buckets, not US session-aligned).
 - UI E2E tests require Playwright + Chromium availability.
 
 ## 11) Recommended Workflow for Changes

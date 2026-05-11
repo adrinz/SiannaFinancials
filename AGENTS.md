@@ -62,7 +62,8 @@ cd square18_signals_web && PYTHONPATH="../square18_signals/src:$PWD" python3 -m 
 | `app/analyst/options_flow.py` | Tier-2 UOA/term-structure/skew from Yahoo chain |
 | `app/analyst/indicators.py` | All indicator series + `rsi_divergence()` |
 | `app/analyst/constants.py` | TICKERS, TICKER_MAP, DEFAULT_IV |
-| `app/analyst/yahoo_quotes.py` | Spot price, option mid, short interest (all cached) |
+| `app/analyst/tradier_client.py` | Tradier API client (real-time OHLCV, options, spot) |
+| `app/analyst/yahoo_quotes.py` | Spot price, option mid, short interest (fallback) |
 | `signal_thresholds.json` | Tunable BULL/BEAR thresholds + MTF/regime config |
 | `backtest_verdict.json` | Walk-forward stats (per-symbol hit-rate, PF, calibrated probability) |
 | `tools/backtest_verdict.py` | Walk-forward backtest + `--search-tau` τ grid-search |
@@ -90,6 +91,8 @@ Conviction: proportional to `abs(score)`, capped at 0.85.
 
 | Variable | Purpose |
 |----------|---------|
+| `TRADIER_API_KEY` | Tradier API key for real-time data |
+| `TRADIER_ENV` | `sandbox` or `live` |
 | `ANTHROPIC_API_KEY` | Enables Claude LLM endpoints |
 | `ANTHROPIC_MODEL` | Model override (default `claude-sonnet-4-5`) |
 | `SQUARE18_LLM_CACHE_TTL` | LLM disk-cache TTL in seconds |
