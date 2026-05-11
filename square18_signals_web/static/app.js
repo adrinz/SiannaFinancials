@@ -3405,6 +3405,9 @@ async function loadAnalystReport(symbol) {
   } catch (e) {
     tickerD = null;
   }
+  
+  if (analyst.activeSymbol !== symbol) return; // Prevent race conditions
+  
   renderAnalystReport(rpt, tickerD);
   syncAnalystChartToolbar();
 }
@@ -3538,6 +3541,9 @@ async function loadStocksReport(symbol) {
   } catch (e) {
     tickerD = null;
   }
+  
+  if (stocks.activeSymbol !== symbol) return; // Prevent race conditions
+  
   renderStockReport(rpt, tickerD);
   syncStocksChartToolbar();
 }
@@ -5136,6 +5142,13 @@ async function refreshAll({ reason = 'manual' } = {}) {
       await openTicker(state.activeSymbol);
     }
     if (state.view === 'analyst' || analyst.initialized) {
+      if (reason === 'manual') {
+        analyst.activeSymbol = null;
+        analyst._priceChartSymbol = null;
+        const rpt = $('#analyst-report');
+        if (rpt) rpt.innerHTML = '';
+        renderTickerStrip();
+      }
       loadAnalystOverview();
       if (analyst.activeSymbol) loadAnalystReport(analyst.activeSymbol);
       if (analyst.llm.enabled) loadDailyBrief({ force: reason === 'manual' });
@@ -5148,6 +5161,17 @@ async function refreshAll({ reason = 'manual' } = {}) {
     }
     if (state.view === 'etf') {
       loadEtfOverview();
+    }
+    if (state.view === 'stocks' || stocks.initialized) {
+      if (reason === 'manual') {
+        stocks.activeSymbol = null;
+        stocks._priceChartSymbol = null;
+        const rpt = $('#stocks-report');
+        if (rpt) rpt.innerHTML = '';
+        renderStocksTickerStrip();
+      }
+      loadStocksOverview();
+      if (stocks.activeSymbol) loadStocksReport(stocks.activeSymbol);
     }
     // Re-check LLM health on every refresh so the badge recovers from
     // transient errors (e.g. right after the user adds credits).
