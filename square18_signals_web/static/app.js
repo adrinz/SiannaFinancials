@@ -3375,7 +3375,8 @@ async function loadAnalystReport(symbol) {
   renderTickerStrip();
   renderOverviewList();
 
-  const key = `${symbol}|${analyst.timeframe}`;
+  const requestedTimeframe = analyst.timeframe;
+  const key = `${symbol}|${requestedTimeframe}`;
   // Evict options-flow data after 5 min so chain data stays fresh between tickers
   const _rptCached = analyst.reports[key];
   if (_rptCached && _rptCached._cachedAt && (Date.now() - _rptCached._cachedAt) > 5 * 60_000) {
@@ -3384,18 +3385,20 @@ async function loadAnalystReport(symbol) {
   let rpt = analyst.reports[key];
   if (!rpt) {
     $('#analyst-report').innerHTML =
-      `<div class="callout"><div class="callout-title">Loading ${symbol} · ${analyst.timeframe}</div>` +
+      `<div class="callout"><div class="callout-title">Loading ${symbol} · ${requestedTimeframe}</div>` +
       `Computing indicators and composing forecast…</div>`;
     try {
       rpt = await api(
         `/api/analyst/report/${encodeURIComponent(symbol)}` +
-        `?timeframe=${encodeURIComponent(analyst.timeframe)}`,
+        `?timeframe=${encodeURIComponent(requestedTimeframe)}`,
       );
       rpt._cachedAt = Date.now();
       analyst.reports[key] = rpt;
     } catch (e) {
-      $('#analyst-report').innerHTML =
-        `<div class="callout callout-warning"><div class="callout-title">Failed to load ${symbol}</div>${e}</div>`;
+      if (analyst.activeSymbol === symbol && analyst.timeframe === requestedTimeframe) {
+        $('#analyst-report').innerHTML =
+          `<div class="callout callout-warning"><div class="callout-title">Failed to load ${symbol}</div>${e}</div>`;
+      }
       return;
     }
   }
@@ -3406,7 +3409,7 @@ async function loadAnalystReport(symbol) {
     tickerD = null;
   }
   
-  if (analyst.activeSymbol !== symbol) return; // Prevent race conditions
+  if (analyst.activeSymbol !== symbol || analyst.timeframe !== requestedTimeframe) return; // Prevent race conditions
   
   renderAnalystReport(rpt, tickerD);
   syncAnalystChartToolbar();
@@ -3507,7 +3510,8 @@ async function loadStocksReport(symbol) {
   renderStocksTickerStrip();
   renderStocksOverviewList();
 
-  const key = `${symbol}|${stocks.timeframe}`;
+  const requestedTimeframe = stocks.timeframe;
+  const key = `${symbol}|${requestedTimeframe}`;
   const _rptCached = stocks.reports[key];
   if (_rptCached && _rptCached._cachedAt && (Date.now() - _rptCached._cachedAt) > 5 * 60_000) {
     delete stocks.reports[key];
@@ -3517,18 +3521,18 @@ async function loadStocksReport(symbol) {
   if (!rpt) {
     if (sr) {
       sr.innerHTML =
-        `<div class="callout"><div class="callout-title">Loading ${symbol} · ${stocks.timeframe}</div>` +
+        `<div class="callout"><div class="callout-title">Loading ${symbol} · ${requestedTimeframe}</div>` +
         `Computing indicators and swing plan…</div>`;
     }
     try {
       rpt = await api(
         `/api/analyst/report/${encodeURIComponent(symbol)}` +
-          `?timeframe=${encodeURIComponent(stocks.timeframe)}&fresh_quotes=1`,
+          `?timeframe=${encodeURIComponent(requestedTimeframe)}&fresh_quotes=1`,
       );
       rpt._cachedAt = Date.now();
       stocks.reports[key] = rpt;
     } catch (e) {
-      if (sr) {
+      if (sr && stocks.activeSymbol === symbol && stocks.timeframe === requestedTimeframe) {
         sr.innerHTML =
           `<div class="callout callout-warning"><div class="callout-title">Failed to load ${symbol}</div>${e}</div>`;
       }
@@ -3542,7 +3546,7 @@ async function loadStocksReport(symbol) {
     tickerD = null;
   }
   
-  if (stocks.activeSymbol !== symbol) return; // Prevent race conditions
+  if (stocks.activeSymbol !== symbol || stocks.timeframe !== requestedTimeframe) return; // Prevent race conditions
   
   renderStockReport(rpt, tickerD);
   syncStocksChartToolbar();
