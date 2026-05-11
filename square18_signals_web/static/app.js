@@ -3051,11 +3051,16 @@ async function initAnalystOnce() {
   analyst.initialized = true;
   initAnalystChartToolbar();
 
-  $$('.analyst-timeframes .pill').forEach((p) => {
+  const analystTfHost = document.querySelector('.view-analyst .analyst-timeframes');
+  const analystTfPills = analystTfHost
+    ? [...analystTfHost.querySelectorAll('.pill[data-tf]')]
+    : [];
+
+  analystTfPills.forEach((p) => {
     p.addEventListener('click', () => {
       if (analyst.timeframe === p.dataset.tf) return;
       analyst.timeframe = p.dataset.tf;
-      $$('.analyst-timeframes .pill').forEach((x) =>
+      analystTfPills.forEach((x) =>
         x.classList.toggle('is-active', x === p)
       );
       $('#overview-timeframe').textContent = p.dataset.tf;
@@ -3703,7 +3708,13 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
             'div',
             { class: `signal-warning ${w.startsWith('⚠') ? 'signal-warning--danger' : 'signal-warning--caution'}` },
             h('span', { class: 'sw-icon' }, w.startsWith('⚠') ? '⚠' : 'ℹ'),
-            h('span', { class: 'sw-text' }, w.replace(/^[⚠ℹ]\s*/, '')),
+            h(
+              'span',
+              { class: 'sw-text' },
+              h('span', { class: 'sw-kicker' }, 'Risk:'),
+              ' ',
+              w.replace(/^[⚠ℹ]\s*/, ''),
+            ),
           ),
         ),
       ),
@@ -3713,6 +3724,16 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
   // Signal quality row (Tier-1 enhancements)
   const hasQuality = r.signal_probability != null || r.mtf_confluence || r.regime_gate;
   if (hasQuality) {
+    const scopeMap = {
+      symbol: 'symbol sample',
+      aggregate: 'market aggregate',
+      config: 'config baseline',
+    };
+    const scopeTxt = scopeMap[r.signal_probability_scope] || 'historical sample';
+    const probLabel = r.verdict === 'NEUTRAL' ? 'Pos. periods (context)' : 'Hist. hit rate';
+    const probHint = r.verdict === 'NEUTRAL'
+      ? `For neutral signals this shows share of positive next-window moves from ${scopeTxt}, not hold accuracy.`
+      : `Historical hit rate from ${scopeTxt}.`;
     root.append(
       h(
         'div',
@@ -3720,8 +3741,8 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
         r.signal_probability != null
           ? h(
             'div',
-            { class: 'sq-chip' },
-            h('span', { class: 'sq-label muted' }, 'Hist. hit rate'),
+            { class: 'sq-chip', title: probHint },
+            h('span', { class: 'sq-label muted' }, probLabel),
             h(
               'span',
               {
@@ -3729,6 +3750,7 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
               },
               `${r.signal_probability.toFixed(1)}%`,
             ),
+            h('span', { class: 'sq-sub muted' }, scopeTxt),
           )
           : null,
         r.mtf_confluence
@@ -3851,19 +3873,19 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     let uoaLabel, uoaDetail, uoaTone;
     if (of.uoa_bull < 0.1 && of.uoa_bear < 0.1) {
       uoaLabel = 'Normal activity';
-      uoaDetail = 'No unusual options flow detected. Trading looks routine.';
+      uoaDetail = 'No unusual options volume right now. Activity looks normal.';
       uoaTone = '';
     } else if (uoaNet > 0.25) {
       uoaLabel = 'Bullish flow';
-      uoaDetail = `Unusually heavy call buying vs puts — smart money leaning bullish. Call pressure ${(of.uoa_bull * 100).toFixed(0)}% vs Put ${(of.uoa_bear * 100).toFixed(0)}%.`;
+      uoaDetail = `More unusual call buying than put buying. This often means traders are leaning bullish. Calls ${(of.uoa_bull * 100).toFixed(0)}% vs puts ${(of.uoa_bear * 100).toFixed(0)}%.`;
       uoaTone = 'pos';
     } else if (uoaNet < -0.25) {
       uoaLabel = 'Bearish flow';
-      uoaDetail = `Unusually heavy put buying vs calls — smart money leaning bearish. Put pressure ${(of.uoa_bear * 100).toFixed(0)}% vs Call ${(of.uoa_bull * 100).toFixed(0)}%.`;
+      uoaDetail = `More unusual put buying than call buying. This often means traders are leaning bearish. Puts ${(of.uoa_bear * 100).toFixed(0)}% vs calls ${(of.uoa_bull * 100).toFixed(0)}%.`;
       uoaTone = 'neg';
     } else {
       uoaLabel = 'Mixed flow';
-      uoaDetail = `Both calls and puts have unusual volume — market is hedging both directions, no clear edge. Call ${(of.uoa_bull * 100).toFixed(0)}% · Put ${(of.uoa_bear * 100).toFixed(0)}%.`;
+      uoaDetail = `Both calls and puts have unusual volume, so direction is less clear. Calls ${(of.uoa_bull * 100).toFixed(0)}% and puts ${(of.uoa_bear * 100).toFixed(0)}%.`;
       uoaTone = '';
     }
     if (of.flow_score_adj !== 0) {
@@ -3874,23 +3896,23 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     let termLabel, termDetail, termTone;
     if (of.term_slope == null) {
       termLabel = 'Unavailable';
-      termDetail = 'Not enough expiry data to compute term structure.';
+      termDetail = 'Not enough expiry data to judge near-term vs longer-term volatility.';
       termTone = '';
     } else if (of.term_slope > 1.08) {
       termLabel = 'Market stressed';
-      termDetail = `Near-term volatility (${of.front_iv != null ? (of.front_iv * 100).toFixed(0) + '%' : '—'}) is much higher than longer-term (${of.back_iv != null ? (of.back_iv * 100).toFixed(0) + '%' : '—'}). The market is pricing in a near-term event — be cautious with directional bets.`;
+      termDetail = `Near-term volatility (${of.front_iv != null ? (of.front_iv * 100).toFixed(0) + '%' : '—'}) is much higher than longer-term (${of.back_iv != null ? (of.back_iv * 100).toFixed(0) + '%' : '—'}). This usually means event risk is high, so expect bigger swings.`;
       termTone = 'warning';
     } else if (of.term_slope > 1.04) {
       termLabel = 'Mildly stressed';
-      termDetail = `Near-term IV slightly elevated vs longer-term. Could be earnings, macro, or sector event approaching.`;
+      termDetail = 'Near-term volatility is a bit higher than usual. There may be event risk coming up.';
       termTone = 'warning';
     } else if (of.term_slope < 0.94) {
       termLabel = 'Calm & normal';
-      termDetail = `Longer-term volatility is higher than near-term — this is the healthy "contango" state. Good environment for directional plays.`;
+      termDetail = 'Near-term volatility is lower than longer-term. This is usually a calmer setup.';
       termTone = 'pos';
     } else {
       termLabel = 'Flat (normal)';
-      termDetail = `Volatility is similar across near and far expiries. No specific event risk priced in.`;
+      termDetail = 'Volatility is similar across expiries. No strong event signal from options pricing.';
       termTone = '';
     }
 
@@ -3898,23 +3920,23 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     let skewLabel, skewDetail, skewTone;
     if (of.skew == null) {
       skewLabel = 'Unavailable';
-      skewDetail = 'Not enough chain data to compute skew.';
+      skewDetail = 'Not enough options data to compare put vs call pricing.';
       skewTone = '';
     } else if (of.skew >= 1.25) {
       skewLabel = 'Bearish hedging';
-      skewDetail = `Put options are significantly more expensive than calls (${of.skew.toFixed(2)}× ratio). The market is paying a big premium to hedge downside — a bearish sign.`;
+      skewDetail = `Puts are much more expensive than calls (${of.skew.toFixed(2)}×). Traders are paying up for downside protection, which is usually a bearish sign.`;
       skewTone = 'neg';
     } else if (of.skew >= 1.10) {
       skewLabel = 'Mild put skew';
-      skewDetail = `Puts slightly pricier than calls (${of.skew.toFixed(2)}×). Normal defensive positioning — not alarming, but market is cautious.`;
+      skewDetail = `Puts are a bit more expensive than calls (${of.skew.toFixed(2)}×). This is mild caution, not extreme fear.`;
       skewTone = '';
     } else if (of.skew <= 0.85) {
       skewLabel = 'Bullish lean';
-      skewDetail = `Calls are more expensive than puts (${of.skew.toFixed(2)}×). Market is paying up for upside — a bullish positioning signal.`;
+      skewDetail = `Calls are more expensive than puts (${of.skew.toFixed(2)}×). Traders are paying for upside, which leans bullish.`;
       skewTone = 'pos';
     } else {
       skewLabel = 'Balanced skew';
-      skewDetail = `Calls and puts are similarly priced (${of.skew.toFixed(2)}×). No strong directional bias from the options market.`;
+      skewDetail = `Calls and puts are priced similarly (${of.skew.toFixed(2)}×). No clear directional signal from skew.`;
       skewTone = '';
     }
 
@@ -3922,9 +3944,29 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     const uoaNum = `Calls ${(of.uoa_bull * 100).toFixed(0)}% · Puts ${(of.uoa_bear * 100).toFixed(0)}%`;
     const termNum = of.term_slope != null ? `${of.term_slope.toFixed(2)}×` : '—';
     const skewNum = of.skew != null ? `${of.skew.toFixed(2)}×` : '—';
+    const ivNum = of.atm_iv != null ? `${(of.atm_iv * 100).toFixed(1)}%` : '—';
     const adjTxt = of.flow_score_adj !== 0
       ? `Signal ${of.flow_score_adj > 0 ? 'boosted' : 'dampened'} ${of.flow_score_adj > 0 ? '+' : ''}${(of.flow_score_adj * 100).toFixed(1)}%`
       : 'No signal adjustment';
+
+    let ivLabel, ivDetail, ivTone;
+    if (of.atm_iv == null) {
+      ivLabel = 'IV context unavailable';
+      ivDetail = 'We could not get enough options data to judge volatility right now.';
+      ivTone = '';
+    } else if ((of.iv_baseline_ratio ?? 1) >= 1.45) {
+      ivLabel = 'Expensive premium regime';
+      ivDetail = `Options are priced high vs normal (${(of.iv_baseline_ratio ?? 1).toFixed(2)}× usual), and the market expects about ±${of.implied_move_30d_pct != null ? of.implied_move_30d_pct.toFixed(1) : '—'}% move in 30 days. Direction can be right but option value can still drop if volatility cools.`;
+      ivTone = 'warning';
+    } else if ((of.iv_baseline_ratio ?? 1) <= 0.85) {
+      ivLabel = 'Relatively cheap IV';
+      ivDetail = `Options are cheaper than normal for this symbol (${(of.iv_baseline_ratio ?? 1).toFixed(2)}× usual).`;
+      ivTone = 'pos';
+    } else {
+      ivLabel = 'Neutral IV regime';
+      ivDetail = `Option pricing looks normal (${(of.iv_baseline_ratio ?? 1).toFixed(2)}× usual), with an expected ±${of.implied_move_30d_pct != null ? of.implied_move_30d_pct.toFixed(1) : '—'}% move over 30 days.`;
+      ivTone = '';
+    }
 
     root.append(
       h(
@@ -3980,6 +4022,20 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
               ),
               h('div', { class: 'of-card-cat muted' }, 'Put vs call option pricing ratio'),
               h('p', { class: 'of-card-detail' }, skewDetail),
+            ),
+          ),
+          // Card 4: IV context
+          h(
+            'div',
+            { class: `of-card ${ivTone ? 'of-card--' + ivTone : ''}` },
+            h('div', { class: 'of-card-icon' }, ivTone === 'warning' ? '⚡' : ivTone === 'pos' ? '✓' : '•'),
+            h('div', { class: 'of-card-body' },
+              h('div', { class: 'of-card-head-row' },
+                h('div', { class: `of-card-label ${ivTone}` }, ivLabel),
+                h('div', { class: `of-card-num mono ${ivTone}` }, ivNum),
+              ),
+              h('div', { class: 'of-card-cat muted' }, 'ATM IV vs baseline + implied move'),
+              h('p', { class: 'of-card-detail' }, ivDetail),
             ),
           ),
         ),
@@ -4178,7 +4234,16 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
   if (surface === 'stocks') {
     root.append(stockStrategyCard(r.stock_strategy));
   } else {
-    root.append(tradeTicketCard(r.options.trade_plan, r.verdict, r.options.headline, r.timeframe, r.signal_warnings || []));
+    root.append(
+      tradeTicketCard(
+        r.options.trade_plan,
+        r.verdict,
+        r.options.headline,
+        r.timeframe,
+        r.signal_warnings || [],
+        r.source,
+      ),
+    );
   }
 
   // Optional: ask Claude about this specific report.
@@ -4575,7 +4640,30 @@ async function submitExplain(report) {
 
 // ---------- Recommended Option Strategy ticket -----------------------------
 
-function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
+function tradeTicketCard(tp, verdict, headline, timeframe, warnings, source = 'yfinance') {
+  const noTrade = verdict === 'NEUTRAL' || /^NO TRADE/i.test(String(headline || '')) || source === 'synthetic';
+  if (noTrade) {
+    const why =
+      source === 'synthetic'
+        ? 'Live market data is unavailable, so this report uses simulated prices. Do not place a real options trade from this signal.'
+        : 'This setup does not have enough directional edge yet. Wait for stronger confirmation before opening a call or put.';
+    const simp = (msg) => String(msg || '').replace(/^[⚠ℹ]\s*/, '');
+    return h(
+      'div',
+      { class: 'callout callout-warning' },
+      h('div', { class: 'callout-title' }, 'No directional options trade right now'),
+      h('div', {}, why),
+      Array.isArray(warnings) && warnings.length
+        ? h(
+          'ul',
+          {},
+          ...warnings.slice(0, 3).map((w) =>
+            h('li', {}, h('span', { class: 'sw-kicker' }, 'Risk:'), ' ', simp(w))
+          ),
+        )
+        : null,
+    );
+  }
   const type = tp.contract_type; // always 'call' or 'put'
   const action = type === 'call' ? 'BUY CALL' : 'BUY PUT';
   const tone = type === 'call' ? 'pos' : 'neg';
@@ -4605,13 +4693,30 @@ function tradeTicketCard(tp, verdict, headline, timeframe, warnings) {
   );
 
   // Warn if any active signal warnings exist
+  const simplifyWarningText = (msg) => {
+    let out = String(msg || '').replace(/^[⚠ℹ]\s*/, '');
+    out = out.replaceAll('DTE', 'days to expiry');
+    out = out.replaceAll('IV', 'implied volatility');
+    out = out.replaceAll('ATM', 'at-the-money');
+    out = out.replaceAll('OI', 'open interest');
+    out = out.replaceAll('R:R', 'risk/reward');
+    out = out.replaceAll('theta', 'time decay');
+    return out;
+  };
+
   const hasWarnings = Array.isArray(warnings) && warnings.length > 0;
   const warningBanner = hasWarnings
     ? h(
       'div',
       { class: 'ticket-warning-banner' },
-      h('strong', {}, '⚠ Active signal cautions — review before trading:'),
-      h('ul', {}, ...warnings.map((w) => h('li', {}, w.replace(/^[⚠ℹ]\s*/, '')))),
+      h('strong', {}, '⚠ Important risks to review first:'),
+      h(
+        'ul',
+        {},
+        ...warnings.map((w) =>
+          h('li', {}, h('span', { class: 'sw-kicker' }, 'Risk:'), ' ', simplifyWarningText(w))
+        ),
+      ),
     )
     : null;
 
@@ -5869,7 +5974,8 @@ function initSignalReportMenu() {
   if (!host) return;
 
   function currentTimeframe() {
-    const active = document.querySelector('.analyst-timeframes .pill.is-active');
+    if (analyst.timeframe) return analyst.timeframe;
+    const active = document.querySelector('.view-analyst .analyst-timeframes .pill.is-active[data-tf]');
     return (active && active.dataset.tf) || 'daily';
   }
 

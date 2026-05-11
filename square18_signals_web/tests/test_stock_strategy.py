@@ -9,6 +9,7 @@ from app.analyst.models import (
 )
 from app.analyst.factors import equity_direction_reason
 from app.analyst.report import (
+    _build_options_suggestion,
     _build_stock_strategy,
     _derive_equity_signal_warnings,
     _stock_swing_calendar_days,
@@ -131,6 +132,21 @@ def test_equity_warnings_skip_options_jargon():
     assert any("adding stock" in x for x in eq)
 
 
+def test_equity_warnings_include_iv_regime_context():
+    eq = _derive_equity_signal_warnings(
+        [],
+        earnings_soon=None,
+        stock_swing_days=20,
+        flow_out=OptionsFlowOut(
+            source="yfinance",
+            iv_baseline_ratio=1.62,
+            implied_move_30d_pct=13.4,
+        ),
+    )
+    assert any("Elevated volatility regime" in x for x in eq)
+    assert any("High implied move context" in x for x in eq)
+
+
 def test_swing_days_map():
     assert _stock_swing_calendar_days("1h") < _stock_swing_calendar_days("weekly")
 
@@ -164,3 +180,30 @@ def test_equity_direction_reason_bull_lists_drivers():
     assert "FOO" in summary
     assert len(bullets) >= 2
     assert any(b.startswith("Trend") for b in bullets)
+
+
+def test_options_suggestion_neutral_returns_no_trade_headline():
+    pa = PriceAction(
+        last=100.0,
+        change_pct=0.1,
+        change_pct_period=0.2,
+        supports=[98.0],
+        resistances=[102.0],
+        trend="range",
+        patterns=[],
+    )
+    atr = IndicatorATR(value=1.2, pct_of_price=1.2, regime="normal")
+    closes = [100.0 + (i % 3 - 1) * 0.3 for i in range(120)]
+    out = _build_options_suggestion(
+        sym="AAPL",
+        spot=100.0,
+        closes=closes,
+        atr_block=atr,
+        price_action=pa,
+        verdict="NEUTRAL",
+        conviction=0.33,
+        composite_score=0.08,
+        timeframe="daily",
+        allow_directional_trade=True,
+    )
+    assert out.headline.startswith("NO TRADE")

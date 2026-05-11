@@ -160,7 +160,10 @@ def _next_earnings_date(yf, symbol: str) -> Optional[date]:
         return None
 
     candidates: list[date] = []
-    cal = getattr(tk, "calendar", None)
+    try:
+        cal = getattr(tk, "calendar", None)
+    except Exception:
+        cal = None
     if cal is not None:
         if isinstance(cal, dict):
             for key in ("Earnings Date", "earnings_date", "EarningsDate"):
@@ -275,10 +278,16 @@ def upcoming_earnings_with_source(
     if cached_rows and now - float(_cache.get("ts") or 0) < _CACHE_TTL_SECONDS:
         return _filter_window(list(cached_rows), window_days), str(cached_src)  # type: ignore[arg-type]
 
-    rows = _broad_earnings(window_days)
+    try:
+        rows = _broad_earnings(window_days)
+    except Exception:
+        rows = []
     source = "sp500"
     if not rows:
-        rows = _curated_earnings(window_days)
+        try:
+            rows = _curated_earnings(window_days)
+        except Exception:
+            rows = []
         source = "curated" if rows else "unavailable"
 
     _cache["rows"] = rows

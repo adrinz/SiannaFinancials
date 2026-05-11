@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import math
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timedelta, timezone
@@ -35,6 +37,7 @@ from .constants import (
 )
 
 _CACHE_DIR = Path.home() / ".cache" / "square18_signals" / "ohlcv"
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # Per-timeframe cache freshness, tuned for a "near-live" dashboard:
 #   * 1h/4h: default 5 min (shared intraday file cache)
@@ -50,16 +53,25 @@ _CACHE_TTL_DAILY    = int(os.environ.get("SQUARE18_OHLCV_TTL_DAILY",    15 * 60)
 _CACHE_TTL_WEEKLY   = int(os.environ.get("SQUARE18_OHLCV_TTL_WEEKLY",   24 * 60 * 60))
 
 # yfinance can hang indefinitely on a stuck socket; run each pull in a worker with a hard cap.
-_YF_REQUEST_TIMEOUT = float(os.environ.get("SQUARE18_YF_TIMEOUT", "60"))
+_YF_REQUEST_TIMEOUT = float(os.environ.get("SQUARE18_YF_TIMEOUT", "6"))
+_YF_FAIL_STREAK_THRESHOLD = int(os.environ.get("SQUARE18_YF_FAIL_STREAK_THRESHOLD", "1"))
+_YF_CIRCUIT_COOLDOWN_SEC = int(os.environ.get("SQUARE18_YF_CIRCUIT_COOLDOWN_SEC", "300"))
+_YF_CIRCUIT_UNTIL = 0.0
+_YF_FAIL_STREAK = 0
+_YF_CIRCUIT_LOCK = threading.Lock()
 
 
 def _threaded_with_timeout(fn, timeout_sec: float):
     """Run *fn* in a one-off thread; on timeout or any error, return None."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        try:
-            return ex.submit(fn).result(timeout=timeout_sec)
-        except (concurrent.futures.TimeoutError, Exception):
-            return None
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fn)
+    try:
+        return fut.result(timeout=timeout_sec)
+    except (concurrent.futures.TimeoutError, Exception):
+        fut.cancel()
+        return None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def _ttl_for(timeframe: Timeframe) -> int:
@@ -166,6 +178,12 @@ _YFINANCE_PARAMS: dict[Timeframe, dict] = {
 
 
 def _fetch_yfinance(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
+    global _YF_FAIL_STREAK, _YF_CIRCUIT_UNTIL  # noqa: PLW0603
+    now = time.time()
+    with _YF_CIRCUIT_LOCK:
+        if now < _YF_CIRCUIT_UNTIL:
+            return None
+
     def _pull() -> Optional[OHLCV]:
         try:
             import yfinance as yf  # type: ignore
@@ -219,7 +237,17 @@ def _fetch_yfinance(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
             source="yfinance",
         )
 
-    return _threaded_with_timeout(_pull, _YF_REQUEST_TIMEOUT)  # type: ignore[return-value]
+    out = _threaded_with_timeout(_pull, _YF_REQUEST_TIMEOUT)  # type: ignore[return-value]
+    now2 = time.time()
+    with _YF_CIRCUIT_LOCK:
+        if out is None:
+            _YF_FAIL_STREAK += 1
+            if _YF_FAIL_STREAK >= _YF_FAIL_STREAK_THRESHOLD:
+                _YF_CIRCUIT_UNTIL = now2 + _YF_CIRCUIT_COOLDOWN_SEC
+        else:
+            _YF_FAIL_STREAK = 0
+            _YF_CIRCUIT_UNTIL = 0.0
+    return out
 
 
 def _resample_intraday_to_4h(df):

@@ -229,6 +229,7 @@ class ReportOut(BaseModel):
 
     # Tier-1 signal-quality enhancements
     signal_probability: Optional[float] = None   # historical hit-rate % for this verdict/symbol
+    signal_probability_scope: Optional[Literal["symbol", "aggregate", "config"]] = None
     mtf_confluence: Optional[str] = None         # e.g. "weekly confirms ↑ (+0.38)"
     regime_gate: Optional[str] = None            # e.g. "VIX 31 elevated → bull dampened 40%"
     signal_warnings: list[str] = []              # high-priority caveats (earnings, overbought, stale bars)
@@ -252,6 +253,9 @@ class OptionsFlowOut(BaseModel):
     term_note: str = ""
     skew: Optional[float] = None
     skew_note: str = ""
+    atm_iv: Optional[float] = None
+    iv_baseline_ratio: Optional[float] = None
+    implied_move_30d_pct: Optional[float] = None
     flow_score_adj: float = 0.0
     source: str = "unavailable"
 

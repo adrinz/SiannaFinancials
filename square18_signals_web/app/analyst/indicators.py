@@ -77,7 +77,7 @@ def rsi(closes: list[float], period: int = 14) -> list[Optional[float]]:
 
     def _rsi_from(avg_g: float, avg_l: float) -> float:
         if avg_l == 0:
-            return 100.0
+            return 100.0 if avg_g > 0 else 50.0
         rs = avg_g / avg_l
         return 100.0 - 100.0 / (1.0 + rs)
 

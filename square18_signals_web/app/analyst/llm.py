@@ -24,6 +24,7 @@ Environment
 """
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -36,6 +37,19 @@ _DEFAULT_MODEL = "claude-sonnet-4-5"
 _CACHE_DIR = Path.home() / ".cache" / "square18_signals" / "llm"
 _CACHE_TTL = int(os.environ.get("SQUARE18_LLM_CACHE_TTL", 86400))  # 1 day
 _MAX_QUESTION_LEN = 800  # reject absurdly long explain-prompts
+_LLM_REQUEST_TIMEOUT_SEC = float(os.environ.get("SQUARE18_LLM_TIMEOUT_SEC", "8"))
+
+
+def _run_with_timeout(fn, timeout_sec: float):
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fn)
+    try:
+        return fut.result(timeout=timeout_sec)
+    except (concurrent.futures.TimeoutError, Exception):
+        fut.cancel()
+        raise
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 class LLMUnavailable(RuntimeError):
@@ -151,13 +165,16 @@ def _call(
 
     global _LAST_ERROR  # noqa: PLW0603
     try:
-        msg = client.messages.create(
-            model=cfg.model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        def _do_call():
+            return client.messages.create(
+                model=cfg.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+
+        msg = _run_with_timeout(_do_call, _LLM_REQUEST_TIMEOUT_SEC)
         parts = [
             b.text for b in msg.content
             if getattr(b, "type", None) == "text" and getattr(b, "text", None)
@@ -170,6 +187,9 @@ def _call(
     except Exception as e:
         # Keep the short human-readable reason (e.g. "insufficient credits")
         # around so the API/UI can display it without exposing internals.
+        if isinstance(e, concurrent.futures.TimeoutError):
+            _LAST_ERROR = "LLM request timed out"
+            return None
         _LAST_ERROR = _summarize_anthropic_error(e)
         return None
 

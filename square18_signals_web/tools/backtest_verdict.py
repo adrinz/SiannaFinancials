@@ -72,6 +72,7 @@ from app.analyst.report import (  # noqa: E402
     _sma_block,
     _stochastic_block,
     _volume_stats,
+    _score_to_verdict,
 )
 from app.analyst.signal_config import load_signal_config  # noqa: E402
 
@@ -82,6 +83,7 @@ class BarResult:
     conviction: float
     score: float
     fwd_return_pct: float
+    option_proxy_return_pct: float
 
 
 @dataclass
@@ -151,14 +153,35 @@ def _score_window(
     stb = _stochastic_block(stoch_k, stoch_d)
 
     score = _compute_raw_score(pa, vs, sb, rsi_b, macd_b, adx_b, stoch_b=stb, bb_b=bbb)
-    if score >= bull_tau:
-        verdict = "BULLISH"
-    elif score <= bear_tau:
-        verdict = "BEARISH"
-    else:
-        verdict = "NEUTRAL"
-    conviction = min(1.0, abs(score) * 1.25 + 0.25)
+    cfg = {
+        "thresholds": {
+            "BULLISH": {"min_score": bull_tau},
+            "BEARISH": {"max_score": bear_tau},
+        }
+    }
+    verdict, conviction = _score_to_verdict(score, cfg)
     return verdict, conviction, score
+
+
+def _signed_directional_return(verdict: str, fwd_return_pct: float) -> float:
+    """Return a positive value when the verdict direction is correct."""
+    if verdict == "BEARISH":
+        return -fwd_return_pct
+    return fwd_return_pct
+
+
+def _option_proxy_return_pct(
+    verdict: str,
+    conviction: float,
+    fwd_return_pct: float,
+    horizon: int,
+) -> float:
+    """Simple options-edge proxy from directional move, leverage, and theta drag."""
+    directional = _signed_directional_return(verdict, fwd_return_pct)
+    leverage = 1.2 + max(0.0, min(1.0, conviction))
+    theta_drag = 0.35 * max(1, horizon) / 5.0
+    proxy = directional * leverage - theta_drag
+    return round(max(-100.0, min(300.0, proxy)), 3)
 
 
 def backtest_symbol(
@@ -194,12 +217,19 @@ def backtest_symbol(
         spot = closes[-1]
         fwd = data.close[t + horizon]
         fwd_ret = (fwd / spot - 1) * 100
+        option_proxy_ret = _option_proxy_return_pct(
+            verdict=verdict,
+            conviction=conviction,
+            fwd_return_pct=fwd_ret,
+            horizon=horizon,
+        )
         rows.append(
             BarResult(
                 verdict=verdict,
                 conviction=round(conviction, 3),
                 score=round(score, 3),
                 fwd_return_pct=round(fwd_ret, 3),
+                option_proxy_return_pct=option_proxy_ret,
             )
         )
 
@@ -209,13 +239,7 @@ def backtest_symbol(
         "NEUTRAL": Bucket(),
     }
     for r in rows:
-        # For BEARISH we invert the sign — a correct BEARISH call means the
-        # realised return should be *negative*, which is a "win" for the
-        # downside trade.
-        if r.verdict == "BEARISH":
-            buckets["BEARISH"].add(-r.fwd_return_pct)
-        else:
-            buckets[r.verdict].add(r.fwd_return_pct)
+        buckets[r.verdict].add(_signed_directional_return(r.verdict, r.fwd_return_pct))
 
     return (
         {
@@ -229,6 +253,52 @@ def backtest_symbol(
         },
         rows,
     )
+
+
+def _option_proxy_summary(rows: list[BarResult]) -> dict:
+    vals = [r.option_proxy_return_pct for r in rows]
+    if not vals:
+        return {"n": 0}
+    wins = [v for v in vals if v > 0]
+    losses = [v for v in vals if v < 0]
+    wins_sum = sum(wins)
+    losses_sum = -sum(losses)
+    return {
+        "n": len(vals),
+        "hit_rate": round(len(wins) / len(vals) * 100, 2),
+        "avg_return_pct": round(statistics.mean(vals), 3),
+        "median_return_pct": round(statistics.median(vals), 3),
+        "stdev_pct": round(statistics.pstdev(vals), 3) if len(vals) > 1 else 0.0,
+        "profit_factor": round(wins_sum / losses_sum, 2) if losses_sum > 0 else None,
+        "best_pct": round(max(vals), 3),
+        "worst_pct": round(min(vals), 3),
+    }
+
+
+def _calibration_bins(rows: list[BarResult], verdict: str) -> list[dict]:
+    """Calibrate hit-rate by abs(score) bins for a verdict."""
+    bins = [(0.00, 0.20), (0.20, 0.35), (0.35, 0.50), (0.50, 0.70), (0.70, 1.01)]
+    out: list[dict] = []
+    for lo, hi in bins:
+        sub = [
+            r for r in rows
+            if r.verdict == verdict and lo <= abs(r.score) < hi
+        ]
+        if not sub:
+            continue
+        signed = [_signed_directional_return(r.verdict, r.fwd_return_pct) for r in sub]
+        wins = [v for v in signed if v > 0]
+        out.append({
+            "min_score": round(lo, 2),
+            "max_score": round(min(1.0, hi), 2),
+            "n": len(sub),
+            "hit_rate": round(len(wins) / len(sub) * 100, 2),
+            "avg_return_pct": round(statistics.mean(signed), 3),
+            "avg_option_proxy_return_pct": round(
+                statistics.mean([r.option_proxy_return_pct for r in sub]), 3
+            ),
+        })
+    return out
 
 
 def _tau_search(universe: list[str], timeframe: Timeframe, horizon: int,
@@ -259,11 +329,11 @@ def _tau_search(universe: list[str], timeframe: Timeframe, horizon: int,
         bull_b, bear_b, neu_b = Bucket(), Bucket(), Bucket()
         for r in all_rows:
             if r.score >= bt:
-                bull_b.add(r.fwd_return_pct)
+                bull_b.add(_signed_directional_return("BULLISH", r.fwd_return_pct))
             elif r.score <= br:
-                bear_b.add(-r.fwd_return_pct)
+                bear_b.add(_signed_directional_return("BEARISH", r.fwd_return_pct))
             else:
-                neu_b.add(r.fwd_return_pct)
+                neu_b.add(_signed_directional_return("NEUTRAL", r.fwd_return_pct))
         bs, brs = bull_b.summary(), bear_b.summary()
         pf_bull = bs.get("profit_factor") or 0.0
         pf_bear = brs.get("profit_factor") or 0.0
@@ -317,6 +387,7 @@ def main() -> int:
         "BEARISH": Bucket(),
         "NEUTRAL": Bucket(),
     }
+    all_rows: list[BarResult] = []
     total_rows = 0
     for sym in universe:
         summary, rows = backtest_symbol(
@@ -324,13 +395,13 @@ def main() -> int:
             stride=args.stride, hc_filter=args.min_conviction,
             bull_tau=bull_tau, bear_tau=bear_tau,
         )
+        if not summary.get("skipped"):
+            summary["option_proxy"] = _option_proxy_summary(rows)
         per_symbol.append(summary)
+        all_rows.extend(rows)
         total_rows += len(rows)
         for r in rows:
-            if r.verdict == "BEARISH":
-                global_buckets["BEARISH"].add(-r.fwd_return_pct)
-            else:
-                global_buckets[r.verdict].add(r.fwd_return_pct)
+            global_buckets[r.verdict].add(_signed_directional_return(r.verdict, r.fwd_return_pct))
         if summary.get("skipped"):
             print(f"[{sym}] skipped — {summary['reason']}")
             continue
@@ -346,6 +417,12 @@ def main() -> int:
         )
 
     agg = {k: v.summary() for k, v in global_buckets.items()}
+    calibration = {
+        "BULLISH": _calibration_bins(all_rows, "BULLISH"),
+        "BEARISH": _calibration_bins(all_rows, "BEARISH"),
+        "NEUTRAL": _calibration_bins(all_rows, "NEUTRAL"),
+    }
+    option_proxy_agg = _option_proxy_summary(all_rows)
     print()
     print("=" * 78)
     print(
@@ -375,6 +452,8 @@ def main() -> int:
         "bear_tau": bear_tau,
         "per_symbol": per_symbol,
         "aggregate": agg,
+        "option_proxy_aggregate": option_proxy_agg,
+        "calibration": calibration,
     }
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"\nwrote {args.out}")
@@ -399,6 +478,7 @@ def main() -> int:
         existing["thresholds"]["NEUTRAL"] = {
             "probability_pct": agg.get("NEUTRAL", {}).get("hit_rate", 55.5),
         }
+        existing["calibration"] = calibration
         existing["generated_by"] = "backtest_verdict --search-tau"
         existing["version"] = existing.get("version", 1)
         thr_path.write_text(json.dumps(existing, indent=2))

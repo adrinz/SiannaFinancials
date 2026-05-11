@@ -173,7 +173,7 @@ def yf_option_mid_per_share(
             return None
         ch = t.option_chain(best)
         chain = ch.calls if is_call else ch.puts
-        if chain is None or len(chain) == 0:
+        if chain is None or chain.empty:
             return None
         strikes = [float(x) for x in chain["strike"].tolist()]
         if not strikes:

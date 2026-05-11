@@ -172,6 +172,15 @@ def _load_backtest() -> Optional[dict[str, Any]]:
         return None
 
 
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
 def _reliability_for(
     backtest: Optional[dict[str, Any]], symbol: str, verdict: str,
 ) -> Optional[ReliabilityBlock]:
@@ -185,9 +194,9 @@ def _reliability_for(
             return ReliabilityBlock(
                 bucket=verdict,
                 n=int(bucket.get("n", 0)),
-                hit_rate_pct=float(bucket.get("hit_rate", 0.0)),
-                avg_return_pct=float(bucket.get("avg_return_pct", 0.0)),
-                profit_factor=float(bucket.get("profit_factor", 0.0)),
+                hit_rate_pct=_num(bucket.get("hit_rate"), 0.0),
+                avg_return_pct=_num(bucket.get("avg_return_pct"), 0.0),
+                profit_factor=_num(bucket.get("profit_factor"), 0.0),
             )
     return None
 
@@ -206,9 +215,9 @@ def _reliability_overall(
         out[bucket_name] = ReliabilityBlock(
             bucket=bucket_name,
             n=int(b.get("n", 0)),
-            hit_rate_pct=float(b.get("hit_rate", 0.0)),
-            avg_return_pct=float(b.get("avg_return_pct", 0.0)),
-            profit_factor=float(b.get("profit_factor", 0.0)),
+            hit_rate_pct=_num(b.get("hit_rate"), 0.0),
+            avg_return_pct=_num(b.get("avg_return_pct"), 0.0),
+            profit_factor=_num(b.get("profit_factor"), 0.0),
         )
     return out
 

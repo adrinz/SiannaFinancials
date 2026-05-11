@@ -96,3 +96,26 @@ def bearish_threshold() -> float:
 def probability_for_verdict(verdict: str) -> Optional[float]:
     cfg = load_signal_config()
     return cfg["thresholds"].get(verdict, {}).get("probability_pct")
+
+
+def probability_for_signal(verdict: str, score: float) -> Optional[float]:
+    """Return calibrated hit-rate for a specific verdict+score.
+
+    Looks up optional score calibration bins first, then falls back to the
+    verdict-level base probability when bins are absent.
+    """
+    cfg = load_signal_config()
+    score_abs = abs(float(score))
+    calibration = cfg.get("calibration", {})
+    bins = calibration.get(verdict, [])
+    if isinstance(bins, list):
+        for row in bins:
+            try:
+                lo = float(row["min_score"])
+                hi = float(row["max_score"])
+                hit = float(row["hit_rate"])
+            except Exception:
+                continue
+            if lo <= score_abs <= hi:
+                return hit
+    return cfg["thresholds"].get(verdict, {}).get("probability_pct")

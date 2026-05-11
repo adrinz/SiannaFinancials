@@ -588,7 +588,10 @@ def screener_earnings(
 ) -> ScreenerEarningsListOut:
     days = max(1, min(window_days, 60))
     n = max(1, min(limit, 200))
-    rows, source = _earnings.upcoming_earnings_with_source(window_days=days)
+    try:
+        rows, source = _earnings.upcoming_earnings_with_source(window_days=days)
+    except Exception:
+        rows, source = [], "unavailable"
     rows = rows[:n]
     return ScreenerEarningsListOut(
         window_days=days,
@@ -739,6 +742,90 @@ def llm_config() -> LLMConfigOut:
     return LLMConfigOut(enabled=cfg.enabled, model=cfg.model, last_error=_llm.last_error())
 
 
+def _deterministic_brief(rows: list[dict], timeframe: str, llm_err: str | None = None) -> str:
+    bull = [r for r in rows if r.get("verdict") == "BULLISH"]
+    bear = [r for r in rows if r.get("verdict") == "BEARISH"]
+    neutral = [r for r in rows if r.get("verdict") == "NEUTRAL"]
+    top_bull = sorted(bull, key=lambda r: float(r.get("conviction") or 0), reverse=True)[:3]
+    top_bear = sorted(bear, key=lambda r: float(r.get("conviction") or 0), reverse=True)[:3]
+    sectors: dict[str, dict[str, int]] = {}
+    for r in rows:
+        sec = str(r.get("sector") or "Unknown")
+        verdict = str(r.get("verdict") or "NEUTRAL")
+        if sec not in sectors:
+            sectors[sec] = {"BULLISH": 0, "BEARISH": 0, "NEUTRAL": 0}
+        if verdict in sectors[sec]:
+            sectors[sec][verdict] += 1
+    themes = sorted(
+        sectors.items(),
+        key=lambda kv: max(kv[1]["BULLISH"], kv[1]["BEARISH"]),
+        reverse=True,
+    )[:3]
+    lines: list[str] = []
+    lines.append(
+        f"{timeframe.upper()} setup: {len(bull)} bullish, {len(bear)} bearish, {len(neutral)} neutral signals."
+    )
+    if llm_err:
+        lines.append("")
+        lines.append(f"_LLM temporarily unavailable ({llm_err}). Showing deterministic fallback._")
+    lines.append("")
+    lines.append("### Bullish setups")
+    if top_bull:
+        for r in top_bull:
+            lines.append(
+                f"- `{r.get('symbol')}` {r.get('verdict')} | conviction {int(float(r.get('conviction') or 0)*100)}% | "
+                f"{r.get('rec_contract_type', 'call')} {r.get('rec_strike', '—')}"
+            )
+    else:
+        lines.append("- No strong bullish setups in the current sample.")
+    lines.append("")
+    lines.append("### Bearish setups")
+    if top_bear:
+        for r in top_bear:
+            lines.append(
+                f"- `{r.get('symbol')}` {r.get('verdict')} | conviction {int(float(r.get('conviction') or 0)*100)}% | "
+                f"{r.get('rec_contract_type', 'put')} {r.get('rec_strike', '—')}"
+            )
+    else:
+        lines.append("- No strong bearish setups in the current sample.")
+    lines.append("")
+    lines.append("### Cross-ticker themes")
+    if themes:
+        for sec, counts in themes:
+            dom = "bullish" if counts["BULLISH"] >= counts["BEARISH"] else "bearish"
+            dom_n = max(counts["BULLISH"], counts["BEARISH"])
+            lines.append(
+                f"- {sec}: {dom_n} names lean {dom} "
+                f"(bull {counts['BULLISH']} / bear {counts['BEARISH']} / neutral {counts['NEUTRAL']})."
+            )
+    else:
+        lines.append("- Sector alignment is mixed with no dominant theme.")
+    return "\n".join(lines)
+
+
+def _deterministic_explain(report: dict, question: str, llm_err: str | None = None) -> str:
+    sym = report.get("symbol", "Ticker")
+    verdict = report.get("verdict", "NEUTRAL")
+    score = report.get("composite_score", 0)
+    conv = int(float(report.get("conviction") or 0) * 100)
+    opt = report.get("options", {}) or {}
+    tp = opt.get("trade_plan", {}) or {}
+    lines = [
+        f"LLM is currently unavailable{f' ({llm_err})' if llm_err else ''}, so this is a deterministic summary.",
+        f"{sym} is {verdict} with composite {score:+.2f} and conviction {conv}%.",
+    ]
+    if tp:
+        lines.append(
+            f"Current ticket context: {tp.get('contract_type', 'option')} strike {tp.get('strike', '—')}, "
+            f"expiry ~{tp.get('expiry_dte', '—')}D, target {tp.get('target_price', '—')}, "
+            f"stop {tp.get('stop_loss', '—')}."
+        )
+    lines.append(
+        f'Question received: "{question.strip()}". Please retry when network access is restored for a full natural-language explanation.'
+    )
+    return "\n\n".join(lines)
+
+
 @app.get(
     "/api/analyst/polish/{symbol}",
     response_model=LLMTextOut,
@@ -755,7 +842,13 @@ def analyst_polish(symbol: str, timeframe: str = "daily") -> LLMTextOut:
         raise HTTPException(404, str(e))
     text = _llm.polish_narrative(rpt.model_dump())
     if not text:
-        raise HTTPException(502, _llm.last_error() or "LLM call failed")
+        text = rpt.narrative
+        return LLMTextOut(
+            text=text,
+            model="deterministic-fallback",
+            symbol=rpt.symbol,
+            timeframe=timeframe,
+        )
     return LLMTextOut(
         text=text, model=_llm.config().model,
         symbol=rpt.symbol, timeframe=timeframe,
@@ -770,10 +863,21 @@ def analyst_brief(timeframe: str = "daily") -> LLMTextOut:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     rows = overview_rows(timeframe)  # type: ignore[arg-type]
     if not rows:
-        raise HTTPException(500, "no overview data available")
-    text = _llm.market_brief([r.model_dump() for r in rows])
+        text = (
+            "Market brief is temporarily unavailable because live upstream data is blocked.\n\n"
+            "### Bullish setups\n"
+            "- No actionable bullish setups yet.\n\n"
+            "### Bearish setups\n"
+            "- No actionable bearish setups yet.\n\n"
+            "### Cross-ticker themes\n"
+            "- Using fallback mode until market data connectivity recovers."
+        )
+        return LLMTextOut(text=text, model="deterministic-fallback", timeframe=timeframe)
+    payload = [r.model_dump() for r in rows]
+    text = _llm.market_brief(payload)
     if not text:
-        raise HTTPException(502, _llm.last_error() or "LLM call failed")
+        text = _deterministic_brief(payload, timeframe, _llm.last_error())
+        return LLMTextOut(text=text, model="deterministic-fallback", timeframe=timeframe)
     return LLMTextOut(text=text, model=_llm.config().model, timeframe=timeframe)
 
 
@@ -793,9 +897,16 @@ def analyst_explain(symbol: str, body: ExplainIn) -> LLMTextOut:
         rpt = build_report(symbol, body.timeframe, fresh_quotes=True)  # type: ignore[arg-type]
     except ValueError as e:
         raise HTTPException(404, str(e))
-    text = _llm.explain_ticket(rpt.model_dump(), body.question)
+    payload = rpt.model_dump()
+    text = _llm.explain_ticket(payload, body.question)
     if not text:
-        raise HTTPException(502, _llm.last_error() or "LLM call failed")
+        text = _deterministic_explain(payload, body.question, _llm.last_error())
+        return LLMTextOut(
+            text=text,
+            model="deterministic-fallback",
+            symbol=rpt.symbol,
+            timeframe=body.timeframe,
+        )
     return LLMTextOut(
         text=text, model=_llm.config().model,
         symbol=rpt.symbol, timeframe=body.timeframe,

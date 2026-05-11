@@ -11,6 +11,7 @@ states computed in the same pass.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import math
 import threading
 import time
@@ -39,6 +40,7 @@ from .regime import breadth_above_50d, vix_quote
 from .signal_config import (
     bearish_threshold,
     bullish_threshold,
+    probability_for_signal,
     load_signal_config,
     probability_for_verdict,
 )
@@ -91,6 +93,8 @@ _build_locks_guard = threading.Lock()
 _overview_build_locks: dict[str, threading.Lock] = {}
 _overview_rows_cache: dict[str, tuple[float, list[OverviewRow]]] = {}
 OVERVIEW_ROWS_CACHE_TTL_SEC = 90.0
+OVERVIEW_MAX_WORKERS = 8
+OVERVIEW_TOTAL_TIMEOUT_SEC = 12.0
 
 
 def _lock_for_overview_key(key: str) -> threading.Lock:
@@ -107,6 +111,13 @@ def _overview_cache_key(
         return f"{timeframe}::default"
     syms = "|".join(sorted(m["symbol"] for m in metas))
     return f"{timeframe}::{syms}"
+
+
+def _safe_build_report(symbol: str, timeframe: Timeframe) -> ReportOut | None:
+    try:
+        return build_report(symbol, timeframe)
+    except Exception:
+        return None
 
 
 def reset_overview_rows_cache() -> None:
@@ -210,10 +221,12 @@ def build_report(
     earnings_score, earnings_note, _ew = _apply_earnings_gate(mr_score, sym, meta)
 
     # Step 3d: regime gate (VIX + market breadth — use vix_change for spike detection)
+    regime_data_fallback = False
     try:
         vix_val, vix_change_today = vix_quote()
         breadth_val = breadth_above_50d(timeframe)
     except Exception:
+        regime_data_fallback = True
         vix_val, vix_change_today, breadth_val = 17.0, 0.0, 50.0
     if not isinstance(breadth_val, float):
         breadth_val = 50.0
@@ -225,35 +238,7 @@ def build_report(
     headline = _headline(sym, timeframe, verdict, price_action, sma_block,
                          macd_block, rsi_block, adx_block)
 
-    # Step 5: calibrated historical probability from backtest artifact
-    try:
-        _bt_path = __file__[:__file__.index("app" + __import__("os").sep)] if False else None
-        import json as _json
-        from pathlib import Path as _Path
-        _bt_file = _Path(__file__).resolve().parent.parent.parent / "backtest_verdict.json"
-        if _bt_file.exists():
-            _bt = _json.loads(_bt_file.read_text())
-        else:
-            _bt = None
-    except Exception:
-        _bt = None
-
-    signal_probability: Optional[float] = None
-    if _bt is not None:
-        for _row in _bt.get("per_symbol", []):
-            if _row.get("symbol") == sym:
-                _bkt = _row.get("buckets", {}).get(verdict, {})
-                if int(_bkt.get("n", 0)) >= 20:
-                    signal_probability = float(_bkt["hit_rate"])
-                break
-        if signal_probability is None:
-            _agg = _bt.get("aggregate", {}).get(verdict, {})
-            if _agg.get("n"):
-                signal_probability = float(_agg["hit_rate"])
-    if signal_probability is None:
-        signal_probability = probability_for_verdict(verdict)
-
-    # Step 6: Tier-2 options intelligence (UOA · term-structure · skew)
+    # Step 5: Tier-2 options intelligence (UOA · term-structure · skew)
     # Fetched after the verdict so UOA/skew adj is applied to the pre-verdict score
     # and re-applied below, keeping the scoring pipeline transparent.
     try:
@@ -268,6 +253,9 @@ def build_report(
             term_note=flow.term_note,
             skew=flow.skew,
             skew_note=flow.skew_note,
+            atm_iv=flow.atm_iv,
+            iv_baseline_ratio=flow.iv_baseline_ratio,
+            implied_move_30d_pct=flow.implied_move_30d_pct,
             flow_score_adj=flow.flow_score_adj,
             source=flow.source,
         )
@@ -283,6 +271,44 @@ def build_report(
     except Exception:
         flow_out = OptionsFlowOut(source="unavailable")
     # -------------------------------------------------------------------------
+
+    # Step 6: calibrated historical probability from backtest artifact.
+    # Resolve after all score adjustments so the probability matches final verdict.
+    try:
+        _bt_path = __file__[:__file__.index("app" + __import__("os").sep)] if False else None
+        import json as _json
+        from pathlib import Path as _Path
+        _bt_file = _Path(__file__).resolve().parent.parent.parent / "backtest_verdict.json"
+        if _bt_file.exists():
+            _bt = _json.loads(_bt_file.read_text())
+        else:
+            _bt = None
+    except Exception:
+        _bt = None
+
+    signal_probability: Optional[float] = None
+    signal_probability_scope: Optional[str] = None
+    if _bt is not None:
+        for _row in _bt.get("per_symbol", []):
+            if _row.get("symbol") == sym:
+                _bkt = _row.get("buckets", {}).get(verdict, {})
+                if int(_bkt.get("n", 0)) >= 20:
+                    signal_probability = float(_bkt["hit_rate"])
+                    signal_probability_scope = "symbol"
+                break
+        if signal_probability is None:
+            _agg = _bt.get("aggregate", {}).get(verdict, {})
+            if _agg.get("n"):
+                signal_probability = float(_agg["hit_rate"])
+                signal_probability_scope = "aggregate"
+    if signal_probability is None:
+        signal_probability = probability_for_signal(verdict, composite)
+        if signal_probability is not None:
+            signal_probability_scope = "config"
+    if signal_probability is None:
+        signal_probability = probability_for_verdict(verdict)
+        if signal_probability is not None:
+            signal_probability_scope = "config"
 
     narrative = _compose_narrative(
         meta=meta,
@@ -312,6 +338,7 @@ def build_report(
         conviction=conviction,
         composite_score=composite,
         timeframe=timeframe,
+        allow_directional_trade=(data.source != "synthetic"),
         fresh_quotes=fresh_quotes,
     )
 
@@ -343,6 +370,11 @@ def build_report(
         signal_warnings.append(
             "⚠ SYNTHETIC DATA — live market connection failed; this signal uses "
             "simulated (GBM) price history. DO NOT trade on this."
+        )
+    if regime_data_fallback:
+        signal_warnings.append(
+            "Regime data unavailable (VIX/breadth). Using neutral fallback assumptions "
+            "for market regime — treat conviction as lower confidence."
         )
 
     # 2. Earnings proximity (from gate above)
@@ -393,9 +425,8 @@ def build_report(
     if bull_factors >= 4 and composite > 0.65:
         signal_warnings.append(
             f"{bull_factors}/5 trend-following factors simultaneously bullish — "
-            "peak indicator alignment often signals late-stage trend (trend exhaustion), "
-            "not a fresh entry opportunity. Consider whether you are chasing a move that "
-            "has already run. Check for RSI/MACD divergence before entering."
+            "this can happen late in a move, not at the start. "
+            "You may be chasing an extended trend. Check RSI/MACD divergence before entering."
         )
     if bear_factors >= 4 and composite < -0.65:
         signal_warnings.append(
@@ -407,39 +438,47 @@ def build_report(
     if bb_block.bandwidth_pct is not None and bb_block.bandwidth_pct < 4.5:
         signal_warnings.append(
             f"Bollinger Bands very tight (bandwidth {bb_block.bandwidth_pct:.1f}% of price) — "
-            "a volatility squeeze. A directional breakout may be imminent but "
-            "the current signal cannot determine direction reliably. "
-            "Avoid opening large positions until the squeeze resolves with volume."
+            "a volatility squeeze. A breakout may come soon, but direction is unclear. "
+            "Avoid large positions until price breaks out with volume."
         )
 
     # 8. Borderline score — just crossed threshold
     bull_tau_cfg = float(load_signal_config()["thresholds"]["BULLISH"]["min_score"])
     bear_tau_cfg = float(load_signal_config()["thresholds"]["BEARISH"]["max_score"])
-    if composite > 0 and composite < bull_tau_cfg + 0.12:
+    if composite >= bull_tau_cfg and composite < bull_tau_cfg + 0.12:
         signal_warnings.append(
             f"Score {composite:+.2f} is just above the BULLISH threshold ({bull_tau_cfg:+.2f}). "
             "Borderline signals have lower historical reliability — "
             "consider waiting for a stronger reading before opening a position."
         )
-    elif composite < 0 and composite > bear_tau_cfg - 0.12:
+    elif composite > 0 and composite < bull_tau_cfg:
+        signal_warnings.append(
+            f"Score {composite:+.2f} is below the BULLISH threshold ({bull_tau_cfg:+.2f}) "
+            "and remains in the neutral zone. Treat upside bias as weak until confirmation."
+        )
+    elif composite <= bear_tau_cfg and composite > bear_tau_cfg - 0.12:
         signal_warnings.append(
             f"Score {composite:+.2f} is just below the BEARISH threshold ({bear_tau_cfg:+.2f}). "
             "Borderline bear signals have the weakest historical edge — extra confirmation recommended."
+        )
+    elif composite < 0 and composite > bear_tau_cfg:
+        signal_warnings.append(
+            f"Score {composite:+.2f} is above the BEARISH threshold ({bear_tau_cfg:+.2f}) "
+            "and remains in the neutral zone. Treat downside bias as weak until confirmation."
         )
 
     # 9. RSI divergence (price and RSI disagree at recent pivots)
     if rsi_div == "bearish" and composite > 0:
         signal_warnings.append(
             "RSI bearish divergence detected — price made a higher high but RSI made a "
-            "lower high. This is one of the most reliable leading reversal signals: "
-            "momentum is weakening even as price rises. Bull signals under bearish "
-            "divergence have significantly lower historical accuracy."
+            "lower high. Momentum is weakening while price rises, which raises reversal risk. "
+            "Bull signals are less reliable under this pattern."
         )
     elif rsi_div == "bullish" and composite < 0:
         signal_warnings.append(
             "RSI bullish divergence detected — price made a lower low but RSI made a "
-            "higher low. Downside momentum is weakening. Bear signals under bullish "
-            "divergence have significantly lower historical accuracy."
+            "higher low. Downside momentum is weakening, which raises bounce risk. "
+            "Bear signals are less reliable under this pattern."
         )
 
     # 10. Overnight / intra-session gap detection
@@ -453,10 +492,8 @@ def build_report(
                     direction = "up" if gap_pct > 0 else "down"
                     signal_warnings.append(
                         f"Large {direction} gap detected: last bar opened "
-                        f"{gap_pct:+.1f}% vs prior close. Gaps of this size typically "
-                        "indicate news/earnings/macro events. Indicator values "
-                        "(SMA, MACD, RSI) reflect pre-gap bars and may be misleading "
-                        "for the post-gap price level."
+                        f"{gap_pct:+.1f}% vs prior close. This often means news or event risk. "
+                        "Indicators still reflect pre-gap bars, so signal quality is lower right now."
                     )
         except Exception:
             pass
@@ -483,8 +520,8 @@ def build_report(
                     signal_warnings.append(
                         f"Sector headwind: {_sector} ETF ({_etf_sym}) is bearish "
                         f"(score {_etf_score:+.2f}) while this ticker is bullish. "
-                        "Trading against the sector trend reduces the probability of "
-                        "a sustained move. Consider waiting for sector alignment."
+                        "Trading against sector trend lowers odds of follow-through. "
+                        "Consider waiting for better sector alignment."
                     )
                 elif composite < 0 and _etf_score > 0.20:
                     signal_warnings.append(
@@ -523,16 +560,14 @@ def build_report(
             if _oi < 100:
                 signal_warnings.append(
                     f"Low open interest at ${_tp.strike} {_tp.contract_type}: "
-                    f"OI = {_oi} contracts. Very thin liquidity — this option may be "
-                    "hard to fill at mid-price and difficult to exit. A market maker "
-                    "may not be willing to provide a fair price."
+                    f"OI = {_oi} contracts. Liquidity is thin, so fills may be poor "
+                    "and exits may be harder."
                 )
             if _sp is not None and _sp > 15:
                 signal_warnings.append(
                     f"Wide bid-ask spread at ${_tp.strike} {_tp.contract_type}: "
-                    f"{_sp:.0f}% of mid-price. You immediately lose ~{_sp/2:.0f}% "
-                    "of your premium on entry due to the spread. Prefer options with "
-                    "spreads under 5% of mid."
+                    f"{_sp:.0f}% of mid-price. You lose about {_sp/2:.0f}% on entry "
+                    "from spread alone. Prefer tighter markets."
                 )
     except Exception:
         pass
@@ -548,9 +583,8 @@ def build_report(
                 signal_warnings.append(
                     f"Premium ${_tp.cost_per_contract:.0f}/contract is "
                     f"{_cost_pct_of_sigma*100:.0f}% of a full 1σ expected move "
-                    f"(±${_tp.one_sigma_move_usd:.2f}/share). This contract requires a "
-                    "larger-than-average move to break even — consider whether the risk/reward "
-                    "justifies the cost."
+                    f"(±${_tp.one_sigma_move_usd:.2f}/share). This option is expensive "
+                    "for the expected move and may need a bigger move than usual to pay off."
                 )
     except Exception:
         pass
@@ -563,14 +597,13 @@ def build_report(
     if macd_block.histogram_direction == "decelerating_bull" and composite > 0:
         signal_warnings.append(
             "MACD histogram decelerating: still positive but shrinking — "
-            "bullish momentum is fading. This early-warning signal precedes "
-            "MACD bearish crosses by 2-5 bars. Consider tightening your stop "
-            "or waiting for the histogram to re-accelerate before entering."
+            "bullish momentum is fading. Consider tighter risk control or wait "
+            "for momentum to re-accelerate."
         )
     elif macd_block.histogram_direction == "decelerating_bear" and composite < 0:
         signal_warnings.append(
             "MACD histogram decelerating: still negative but shrinking — "
-            "bearish momentum is fading. Potential early bottoming signal."
+            "bearish momentum is fading. A bounce risk is increasing."
         )
 
     # 13. MACD cross quality — RSI below midline reduces reliability
@@ -578,28 +611,24 @@ def build_report(
     if macd_block.bullish_cross_recent and _rsi_val is not None and _rsi_val < 50:
         signal_warnings.append(
             f"MACD bull cross with RSI {_rsi_val:.0f} below 50 — "
-            "backtesting shows MACD crosses below the RSI midline have "
-            "42% win rate vs 58% when RSI > 50. Signal is lower quality."
+            "this is a weaker setup than a bull cross with RSI above 50."
         )
     elif macd_block.bearish_cross_recent and _rsi_val is not None and _rsi_val > 50:
         signal_warnings.append(
             f"MACD bear cross with RSI {_rsi_val:.0f} above 50 — "
-            "cross below the RSI midline is a weaker bear signal; "
-            "wait for RSI to confirm < 50 before high-conviction shorts."
+            "this is a weaker bearish setup. Waiting for RSI below 50 gives better confirmation."
         )
 
     # 14. Dual Stochastic + RSI overbought / oversold
     if rsi_block.state == "overbought" and stoch_block.state == "overbought":
         signal_warnings.append(
             f"Both RSI ({rsi_block.value:.0f}) and Stochastic ({stoch_block.pct_k:.0f}/{stoch_block.pct_d:.0f}) "
-            "are simultaneously overbought. Dual-indicator extremes have stronger mean-reversion "
-            "predictive power than either alone. Bull trades from this level carry elevated reversal risk."
+            "are overbought at the same time. Reversal risk is higher here for new bull entries."
         )
     elif rsi_block.state == "oversold" and stoch_block.state == "oversold":
         signal_warnings.append(
             f"Both RSI ({rsi_block.value:.0f}) and Stochastic ({stoch_block.pct_k:.0f}/{stoch_block.pct_d:.0f}) "
-            "are simultaneously oversold. Dual-indicator extremes signal potential oversold bounce; "
-            "bear trades from this level carry elevated snap-back risk."
+            "are oversold at the same time. Bounce risk is higher here for new bear entries."
         )
 
     # 15. IV crush risk (backwardation + earnings proximity)
@@ -611,17 +640,14 @@ def build_report(
             signal_warnings.append(
                 f"⚠ IV crush risk: options are pricing elevated near-term volatility "
                 f"({_of_term:.2f}× term slope = backwardation) ahead of earnings in "
-                f"{earnings_soon.days_until}d. Research shows average IV crush of 38% "
-                "post-earnings — even a CORRECT directional call can lose money if you "
-                "paid high premium before the event. Consider waiting AFTER earnings "
-                "to open long option positions, or use spreads to reduce vega exposure."
+                f"{earnings_soon.days_until}d. Option prices can drop hard after earnings, "
+                "so even a correct direction can still lose money if entry premium is high."
             )
         elif _of_term is not None and _of_term > 1.10 and not _has_earnings:
             signal_warnings.append(
                 f"Term structure in backwardation ({_of_term:.2f}×): front-month IV elevated "
-                "vs back-month. A near-term event or macro catalyst may be priced in. "
-                "Long option premium in this environment is expensive; IV may collapse "
-                "after the event resolves, hurting your position even if direction is right."
+                "vs back-month. Near-term event risk may be priced in. "
+                "Long options can be expensive and may lose value if volatility drops."
             )
     except Exception:
         pass
@@ -651,16 +677,14 @@ def build_report(
             if _earn_days > _tp_dte:
                 signal_warnings.append(
                     f"Option expires BEFORE earnings: your {_tp_dte}D contract expires "
-                    f"before earnings in {_earn_days}d. You will miss the post-earnings "
-                    "catalyst entirely. Consider a longer DTE option that expires after "
-                    f"the earnings date ({earnings_soon.earnings_date})."
+                    f"before earnings in {_earn_days}d. You may miss the main catalyst. "
+                    f"Consider longer days to expiry beyond {earnings_soon.earnings_date}."
                 )
             else:
                 signal_warnings.append(
                     f"Earnings in {_earn_days}d fall within your option's {_tp_dte}D window. "
-                    "The option is priced to include event IV — expect a 30-40% IV collapse "
-                    "after the report even if direction is correct. Consider entering AFTER "
-                    "earnings for a pure technical play, or use a debit spread to reduce vega."
+                    "Event volatility is already priced in, so option value can fall after "
+                    "earnings even if direction is right."
                 )
     except Exception:
         pass
@@ -673,16 +697,12 @@ def build_report(
             if composite < 0 and _si >= 0.20:
                 signal_warnings.append(
                     f"⚠ High short interest: {_si*100:.0f}% of float is sold short. "
-                    "Bearish signals on heavily shorted stocks are dangerous — a short squeeze "
-                    "(forced short covering) can cause violent upside moves of 20-100%+ in days, "
-                    "turning your bearish puts into large losses. Short interest >20% of float = "
-                    "elevated squeeze risk even with bearish technicals."
+                    "Squeeze risk is high, so bearish options can be hit by sharp upside moves."
                 )
             elif composite > 0 and _si >= 0.30:
                 signal_warnings.append(
                     f"High short interest: {_si*100:.0f}% of float is sold short (>30%). "
-                    "While this creates potential squeeze upside, the heavy short book also "
-                    "means institutional traders hold a strong contrary view. Elevated volatility."
+                    "Upside squeeze is possible, but volatility is also higher than normal."
                 )
     except Exception:
         pass
@@ -698,8 +718,7 @@ def build_report(
             signal_warnings.append(
                 f"Weekend theta: entering on {_day_name} with {_tp_dte2} DTE means "
                 f"paying ~${_weekend_cost:.2f}/contract over Sat+Sun while the market "
-                "is closed — no price movement, pure time decay. Consider entering "
-                "Monday or Tuesday for better theta efficiency."
+                "is closed (time decay only). Monday or Tuesday entries may be more efficient."
             )
     except Exception:
         pass
@@ -710,10 +729,8 @@ def build_report(
         if _tp_dte3 <= 14:
             signal_warnings.append(
                 f"Very short DTE: {_tp_dte3} days to expiry. Gamma is very high — a $1 "
-                "underlying move can change the option value by $0.20–$0.50 per share "
-                "(vs $0.05 at 35 DTE). This cuts both ways: gains are amplified but so "
-                "are losses. Very short DTE options are extremely high risk and not "
-                "suitable for directional trend plays."
+                "underlying move can swing option value quickly. Gains can be fast, "
+                "but losses can be just as fast."
             )
     except Exception:
         pass
@@ -733,22 +750,48 @@ def build_report(
             "risk appetite recovers."
         )
 
+    # 17f. Options IV context — expensive premium / move already priced
+    try:
+        _ivr = flow_out.iv_baseline_ratio if flow_out else None
+        _iv30 = flow_out.implied_move_30d_pct if flow_out else None
+        if _ivr is not None and _ivr >= 1.45:
+            signal_warnings.append(
+                f"Elevated IV regime: ATM IV is ~{_ivr:.2f}× the symbol's baseline. "
+                "Options are expensive right now, and prices can drop after a news event "
+                "even if your market direction is correct."
+            )
+        if (
+            _iv30 is not None
+            and options.trade_plan.target_price is not None
+            and spot_for_options > 0
+        ):
+            _target_move = abs((options.trade_plan.target_price - spot_for_options) / spot_for_options) * 100
+            if _target_move > (_iv30 * 1.15):
+                signal_warnings.append(
+                    f"Target may be ambitious vs implied move: 30D implied move is ±{_iv30:.1f}% "
+                    f"while target needs ~{_target_move:.1f}%. Consider smaller size or more time to expiry."
+                )
+            elif _target_move < (_iv30 * 0.45):
+                signal_warnings.append(
+                    f"Market is pricing a larger move than your target (±{_iv30:.1f}% implied vs "
+                    f"~{_target_move:.1f}% target). News-driven volatility may move this faster than expected."
+                )
+    except Exception:
+        pass
+
     # 18. Extreme volume spike (meme / squeeze / news event)
     if not _is_index and volume_stats.ratio > 5.0:
         signal_warnings.append(
             f"Extreme volume: {volume_stats.ratio:.0f}× normal 20-day average. "
-            "Research defines Unusual Options Activity as 5x+ normal volume — this level "
-            "typically indicates news, short squeeze, earnings leak, or large institutional "
-            "block. Technical indicators are unreliable when driven by extraordinary volume. "
-            "Verify the underlying cause before acting on the signal."
+            "This often means major news or squeeze risk. Indicator reliability is lower "
+            "when flows are this extreme."
         )
 
     # 19. Low average daily volume (thin liquidity)
     if not _is_index and volume_stats.avg_20 > 0 and volume_stats.avg_20 < 500_000:
         signal_warnings.append(
             f"Low average daily volume: {volume_stats.avg_20/1e6:.2f}M shares/day (20-day avg). "
-            "Thin markets produce unreliable indicator readings — any single large trade "
-            "can move the price significantly. Options bid-ask spreads are likely very wide."
+            "Thin markets can move fast on small orders, and option spreads are usually wider."
         )
 
     # 20. Near-term price deterioration within broader uptrend (poor entry timing)
@@ -821,6 +864,7 @@ def build_report(
         chart=chart,
         earnings_soon=earnings_soon,
         signal_probability=round(signal_probability, 1) if signal_probability is not None else None,
+        signal_probability_scope=signal_probability_scope,  # type: ignore[arg-type]
         mtf_confluence=mtf_note or None,
         regime_gate=regime_note or None,
         signal_warnings=signal_warnings,
@@ -862,10 +906,19 @@ def overview_rows(
 
         universe = metas if metas is not None else TICKERS
         rows: list[OverviewRow] = []
-        for meta in universe:
-            try:
-                rpt = build_report(meta["symbol"], timeframe)
-            except Exception:
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=OVERVIEW_MAX_WORKERS)
+        fut_to_meta = {
+            ex.submit(_safe_build_report, meta["symbol"], timeframe): meta
+            for meta in universe
+        }
+        done, not_done = concurrent.futures.wait(
+            set(fut_to_meta.keys()),
+            timeout=OVERVIEW_TOTAL_TIMEOUT_SEC,
+            return_when=concurrent.futures.ALL_COMPLETED,
+        )
+        for fut in done:
+            rpt = fut.result()
+            if rpt is None:
                 continue
             tp = rpt.options.trade_plan
             rows.append(
@@ -893,6 +946,10 @@ def overview_rows(
                     rec_risk_reward=tp.risk_reward,
                 )
             )
+        for fut in not_done:
+            fut.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        rows.sort(key=lambda r: r.symbol)
         ts = time.time()
         with _overview_lock:
             _overview_rows_cache[key] = (ts, rows)
@@ -2113,6 +2170,7 @@ def _build_options_suggestion(
     conviction: float,
     composite_score: float,
     timeframe: Timeframe,
+    allow_directional_trade: bool = True,
     fresh_quotes: bool = False,
 ) -> OptionsSuggestion:
     """Build a single directional ticket.
@@ -2142,6 +2200,7 @@ def _build_options_suggestion(
         dte_default = max(_dte_map["1h"], dte_default - 14)
 
     contract_type: str = "call" if composite_score >= 0 else "put"
+    actionable_directional = allow_directional_trade and verdict != "NEUTRAL" and conviction >= 0.40
 
     strike = _pick_strike(
         contract_type=contract_type,
@@ -2152,10 +2211,13 @@ def _build_options_suggestion(
         price_action=price_action,
     )
 
-    headline = (
-        f"BUY {contract_type.upper()} — "
-        f"${_fmt_strike(strike)} strike, ~{dte_default} DTE"
-    )
+    if actionable_directional:
+        headline = (
+            f"BUY {contract_type.upper()} — "
+            f"${_fmt_strike(strike)} strike, ~{dte_default} DTE"
+        )
+    else:
+        headline = "NO TRADE — wait for stronger directional confirmation"
 
     trade_plan = _build_trade_plan(
         sym=sym,
@@ -2173,13 +2235,20 @@ def _build_options_suggestion(
         fresh_quotes=fresh_quotes,
     )
 
-    direction_word = "bullish" if contract_type == "call" else "bearish"
-    rationale = (
-        f"Clean directional {contract_type} aligned with the {direction_word} "
-        f"read (composite {composite_score:+.2f}, verdict {verdict}, "
-        f"conviction {int(conviction*100)}%). IV estimate "
-        f"{int(iv_est*100)}% over {dte_default}D."
-    )
+    if actionable_directional:
+        direction_word = "bullish" if contract_type == "call" else "bearish"
+        rationale = (
+            f"Clean directional {contract_type} aligned with the {direction_word} "
+            f"read (composite {composite_score:+.2f}, verdict {verdict}, "
+            f"conviction {int(conviction*100)}%). IV estimate "
+            f"{int(iv_est*100)}% over {dte_default}D."
+        )
+    else:
+        rationale = (
+            f"Directional option entry is suppressed for now (verdict {verdict}, "
+            f"conviction {int(conviction*100)}%). Wait for a stronger setup before "
+            "opening a directional call/put."
+        )
 
     return OptionsSuggestion(
         headline=headline,
@@ -2399,6 +2468,17 @@ def _derive_equity_signal_warnings(
             uniq.append(
                 f"{dayn} entry: markets are closed Sat–Sun — headline and gap risk can move the stock "
                 "away from your levels. Stops do not guarantee execution prices."
+            )
+    if flow_out is not None:
+        if flow_out.iv_baseline_ratio is not None and flow_out.iv_baseline_ratio >= 1.45:
+            uniq.append(
+                f"Elevated volatility regime: ATM IV is ~{flow_out.iv_baseline_ratio:.2f}× baseline. "
+                "Price jumps and slippage risk are higher than usual; use smaller size."
+            )
+        if flow_out.implied_move_30d_pct is not None and flow_out.implied_move_30d_pct >= 12.0:
+            uniq.append(
+                f"High implied move context: options market prices ~±{flow_out.implied_move_30d_pct:.1f}% "
+                "30D move, signaling a choppy market with bigger overnight move risk."
             )
     return uniq
 

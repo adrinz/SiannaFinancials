@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -88,6 +89,11 @@ class OptionsFlowBlock:
     skew: Optional[float] = None         # OTM put IV / OTM call IV
     skew_note: str = ""
 
+    # Extra IV context
+    atm_iv: Optional[float] = None       # nearest-expiry ATM IV
+    iv_baseline_ratio: Optional[float] = None  # ATM IV / DEFAULT_IV baseline
+    implied_move_30d_pct: Optional[float] = None
+
     # Net adjustment applied to composite score (±MAX_FLOW_ADJ)
     flow_score_adj: float = 0.0
 
@@ -129,9 +135,9 @@ def _fetch_chain(sym: str, spot: float, bypass_cache: bool = False) -> ChainSnap
         for exp in selected:
             try:
                 ch = tk.option_chain(exp)
-                for row in (ch.calls.to_dict("records") if ch.calls is not None else []):
+                for row in (ch.calls.to_dict("records") if (ch.calls is not None and not ch.calls.empty) else []):
                     all_calls.append({**row, "_expiry": exp})
-                for row in (ch.puts.to_dict("records") if ch.puts is not None else []):
+                for row in (ch.puts.to_dict("records") if (ch.puts is not None and not ch.puts.empty) else []):
                     all_puts.append({**row, "_expiry": exp})
             except Exception:
                 continue
@@ -358,6 +364,15 @@ def get_options_flow(
         uoa_bull, uoa_bear, uoa_note = _uoa(snap)
         term_slope, front_iv, back_iv, term_note = _term_structure(snap)
         skew_ratio, skew_note = _skew(snap)
+        atm_iv = front_iv if front_iv is not None else back_iv
+        iv_baseline_ratio: Optional[float] = None
+        implied_move_30d_pct: Optional[float] = None
+        if atm_iv is not None and atm_iv > 0:
+            from .constants import DEFAULT_IV
+            base_iv = float(DEFAULT_IV.get(sym.upper(), 0.35))
+            if base_iv > 0:
+                iv_baseline_ratio = round(atm_iv / base_iv, 2)
+            implied_move_30d_pct = round(atm_iv * math.sqrt(30.0 / 365.0) * 100.0, 2)
 
         adj = _compute_adj(verdict, uoa_bull, uoa_bear, term_slope, skew_ratio)
 
@@ -371,6 +386,9 @@ def get_options_flow(
             term_note=term_note,
             skew=skew_ratio,
             skew_note=skew_note,
+            atm_iv=atm_iv,
+            iv_baseline_ratio=iv_baseline_ratio,
+            implied_move_30d_pct=implied_move_30d_pct,
             flow_score_adj=adj,
             source="yfinance",
         )

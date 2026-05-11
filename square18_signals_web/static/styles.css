@@ -1315,6 +1315,19 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
 .of-card-detail { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); opacity: 0.85; }
 .of-card-adj { font-size: 10px; margin-top: 6px; }
 
+.sw-kicker {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-size: 11px;
+}
+
+.sq-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+}
+
 /* Trade ticket P&L scenarios */
 .ticket-scenarios {
   padding: 12px 0 0;
