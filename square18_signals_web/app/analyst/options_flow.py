@@ -103,7 +103,7 @@ class OptionsFlowBlock:
 # ── Chain fetcher ─────────────────────────────────────────────────────────────
 
 def _fetch_chain(sym: str, spot: float, bypass_cache: bool = False) -> ChainSnapshot:
-    """Pull the nearest ≤3 expiries from Yahoo and return a ChainSnapshot."""
+    """Pull the nearest ≤3 expiries from Tradier (primary) or Yahoo (fallback)."""
     u = sym.upper()
     now = time.time()
     if not bypass_cache:
@@ -112,6 +112,50 @@ def _fetch_chain(sym: str, spot: float, bypass_cache: bool = False) -> ChainSnap
         if hit and (now - hit[0]) < _CHAIN_TTL:
             return hit[1]  # type: ignore[return-value]
 
+    from .tradier_client import get_option_expirations, get_option_chain, is_configured as is_tradier_configured
+    
+    # Try Tradier first
+    if is_tradier_configured():
+        try:
+            exps = get_option_expirations(u)
+            if exps:
+                selected = exps[:3]  # nearest 3 expiries
+                all_calls: list[dict] = []
+                all_puts: list[dict] = []
+                for exp in selected:
+                    chain = get_option_chain(u, exp)
+                    if not chain:
+                        continue
+                    for opt in chain:
+                        # Map Tradier keys to expected Yahoo-style keys for downstream compatibility
+                        greeks = opt.get("greeks") or {}
+                        row = {
+                            "strike": float(opt.get("strike") or 0),
+                            "volume": float(opt.get("volume") or 0),
+                            "openInterest": float(opt.get("open_interest") or 0),
+                            "impliedVolatility": float(greeks.get("mid_iv") or 0),
+                            "bid": float(opt.get("bid") or 0),
+                            "ask": float(opt.get("ask") or 0),
+                            "lastPrice": float(opt.get("last") or 0),
+                            "_expiry": exp
+                        }
+                        if opt.get("option_type") == "call":
+                            all_calls.append(row)
+                        elif opt.get("option_type") == "put":
+                            all_puts.append(row)
+                
+                if all_calls or all_puts:
+                    snap = ChainSnapshot(
+                        sym=u, spot=spot, expiries=selected,
+                        calls=all_calls, puts=all_puts, source="tradier"
+                    )
+                    with _CHAIN_LOCK:
+                        _CHAIN_CACHE[u] = (time.time(), snap)
+                    return snap
+        except Exception as e:
+            print(f"Tradier options flow fetch failed: {e}")
+
+    # Fallback to Yahoo
     def _pull() -> ChainSnapshot:
         try:
             import yfinance as yf  # type: ignore
@@ -390,7 +434,7 @@ def get_options_flow(
             iv_baseline_ratio=iv_baseline_ratio,
             implied_move_30d_pct=implied_move_30d_pct,
             flow_score_adj=adj,
-            source="yfinance",
+            source=snap.source,
         )
     except Exception:
         return OptionsFlowBlock(source="unavailable")

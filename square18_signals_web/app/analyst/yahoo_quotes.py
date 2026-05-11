@@ -1,14 +1,8 @@
-"""Best-effort Yahoo Finance quotes to align options tickets with broker UIs.
+"""Best-effort quotes to align options tickets with broker UIs.
 
-Uses the same free yfinance path as the rest of the app. When Yahoo is
-unreachable or a strike/expiry is not listed, callers fall back to bar
-close + model pricing.
-
-* Underlying: last / regular market price (or last daily close) with a
-  short in-process cache to avoid fan-out during screener builds.
-* Options: (bid+ask)/2 for the chain row nearest the requested strike on
-  the listed expiry **nearest** the ticket expiry (Yahoo’s chain dates,
-  not our internal roll-to-Friday logic, may differ by a day or two).
+Uses Tradier API if configured, otherwise falls back to Yahoo Finance.
+When neither is reachable or a strike/expiry is not listed, callers fall back
+to bar close + model pricing.
 """
 from __future__ import annotations
 
@@ -19,12 +13,13 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from .constants import TICKER_MAP
+from .tradier_client import get_quotes, get_option_chain, get_option_expirations, is_configured as is_tradier_configured
 
 _YF_TIMEOUT = 12.0
 _SPOT_CACHE: dict[str, tuple[float, float]] = {}
 _OPT_CACHE: dict[str, tuple[float, float]] = {}
 _SI_CACHE: dict[str, tuple[float, float]] = {}   # short interest % of float
-# Tunable when not using bypass — lower defaults so Cost/contract is less stale.
+
 _SPOT_TTL_SEC = float(os.environ.get("SQUARE18_SPOT_QUOTE_TTL_SEC", "30"))
 _OPT_TTL_SEC = float(os.environ.get("SQUARE18_OPTIONS_QUOTE_TTL_SEC", "30"))
 _SI_TTL_SEC = 3600.0  # short interest refreshes slowly (FINRA data is biweekly)
@@ -45,9 +40,7 @@ def _run_yf(fn, timeout: float = _YF_TIMEOUT) -> Any:
 
 def yf_short_interest_pct(sym: str) -> Optional[float]:
     """Return short interest as a fraction of float (0.20 = 20% of float shorted).
-
-    Sourced from Yahoo Finance `.info` via yfinance. Data is biweekly (FINRA)
-    so results are cached for 1 hour. Returns ``None`` when unavailable.
+    Sourced from Yahoo Finance `.info` via yfinance.
     """
     u = sym.upper()
     now = time.time()
@@ -64,8 +57,6 @@ def yf_short_interest_pct(sym: str) -> Optional[float]:
             info = yf.Ticker(_mapped_symbol(u)).info
             v = info.get("shortPercentOfFloat") or info.get("shortRatio")
             if v is not None:
-                # shortPercentOfFloat is 0–1 fraction; shortRatio is days-to-cover
-                # Only use shortPercentOfFloat here
                 spof = info.get("shortPercentOfFloat")
                 return float(spof) if spof is not None else None
         except Exception:
@@ -80,22 +71,30 @@ def yf_short_interest_pct(sym: str) -> Optional[float]:
 
 
 def yf_last_price(sym: str, *, bypass_cache: bool = False) -> Optional[float]:
-    """Latest tradable last from Yahoo (fast_info / history), or None.
-
-    Set ``bypass_cache=True`` to force a fresh pull (used for Analyst trade
-    tickets so spot aligns with live option mids).
-    """
+    """Latest tradable last from Tradier (primary) or Yahoo (fallback)."""
     u = sym.upper()
     now = time.time()
     if not bypass_cache:
         t_old = _SPOT_CACHE.get(u)
         if t_old and now - t_old[0] < _SPOT_TTL_SEC:
             return t_old[1]
-    yfs = _mapped_symbol(u)
+            
+    # Try Tradier first
+    if is_tradier_configured():
+        try:
+            quotes = get_quotes([u])
+            if quotes and len(quotes) > 0:
+                last_price = quotes[0].get("last")
+                if last_price and float(last_price) > 0:
+                    _SPOT_CACHE[u] = (now, float(last_price))
+                    return float(last_price)
+        except Exception:
+            pass
 
+    # Fallback to Yahoo
+    yfs = _mapped_symbol(u)
     def _pull() -> Optional[float]:
         import yfinance as yf  # type: ignore
-
         t = yf.Ticker(yfs)
         try:
             fi = t.fast_info
@@ -131,17 +130,9 @@ def yf_option_mid_per_share(
     bypass_cache: bool = False,
 ) -> Optional[float]:
     """(bid+ask)/2 or last for the option row nearest *strike*; or None.
-
-    *expiry* is the ticket’s target date; the **nearest** listed chain
-    expiry to that date is used (same weeklies/dailies as Robinhood’s list).
-
-    Yahoo’s free chain is typically **delayed** (~15 min). ``bypass_cache``
-    skips only **our** in-process cache so each Analyst report recomputes
-    from the latest yfinance snapshot for that HTTP request — not the same as
-    a paid real-time NBBO tape.
+    Uses Tradier API if available, falls back to Yahoo Finance.
     """
     u = sym.upper()
-    yfs = _mapped_symbol(u)
     cache_key = f"{u}|{round(float(strike), 4):.4f}|{int(is_call)}|{expiry.isoformat()}"
     now = time.time()
     if not bypass_cache:
@@ -149,9 +140,54 @@ def yf_option_mid_per_share(
         if t_old and now - t_old[0] < _OPT_TTL_SEC:
             return t_old[1]
 
+    # Try Tradier first
+    if is_tradier_configured():
+        try:
+            # Find nearest expiration
+            expirations = get_option_expirations(u)
+            if expirations:
+                best_exp = None
+                best_d = 10_000
+                for exp in expirations:
+                    d_ex = datetime.strptime(exp, "%Y-%m-%d").date()
+                    diff = abs((d_ex - expiry).days)
+                    if diff < best_d:
+                        best_d = diff
+                        best_exp = exp
+                
+                if best_exp and best_d <= 40:
+                    chain = get_option_chain(u, best_exp)
+                    if chain:
+                        # Filter by call/put
+                        opt_type = "call" if is_call else "put"
+                        filtered = [opt for opt in chain if opt.get("option_type") == opt_type]
+                        if filtered:
+                            # Find nearest strike
+                            nearest = min(filtered, key=lambda x: abs(float(x.get("strike", 0)) - float(strike)))
+                            bid = float(nearest.get("bid", 0) or 0)
+                            ask = float(nearest.get("ask", 0) or 0)
+                            lastp = float(nearest.get("last", 0) or 0)
+                            
+                            v = None
+                            if bid > 0 and ask > 0:
+                                v = (bid + ask) / 2.0
+                            elif lastp > 0:
+                                v = lastp
+                            elif ask > 0:
+                                v = ask
+                            elif bid > 0:
+                                v = bid
+                                
+                            if v is not None:
+                                _OPT_CACHE[cache_key] = (now, v)
+                                return v
+        except Exception:
+            pass
+
+    # Fallback to Yahoo
+    yfs = _mapped_symbol(u)
     def _pull() -> Optional[float]:
         import yfinance as yf  # type: ignore
-
         t = yf.Ticker(yfs)
         opts: tuple = tuple(getattr(t, "options", None) or ())
         if not opts:
