@@ -137,6 +137,10 @@ def _fetch_chain(sym: str, spot: float, bypass_cache: bool = False) -> ChainSnap
                             "bid": float(opt.get("bid") or 0),
                             "ask": float(opt.get("ask") or 0),
                             "lastPrice": float(opt.get("last") or 0),
+                            "delta": float(greeks.get("delta") or 0),
+                            "gamma": float(greeks.get("gamma") or 0),
+                            "theta": float(greeks.get("theta") or 0),
+                            "vega": float(greeks.get("vega") or 0),
                             "_expiry": exp
                         }
                         if opt.get("option_type") == "call":
@@ -445,7 +449,7 @@ def option_liquidity_at_strike(
     strike: float,
     is_call: bool,
 ) -> dict:
-    """Return OI and bid-ask spread for the nearest chain row to *strike*.
+    """Return OI, bid-ask spread, and live Greeks for the nearest chain row to *strike*.
 
     Uses the in-process chain cache populated by ``get_options_flow``;
     returns an empty dict when no chain data is available.  Callers
@@ -472,4 +476,14 @@ def option_liquidity_at_strike(
     ask = float(nearest.get("ask") or 0)
     mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
     spread_pct = round((ask - bid) / mid * 100, 1) if mid and mid > 0 else None
-    return {"oi": oi, "bid": bid, "ask": ask, "spread_pct": spread_pct}
+    
+    return {
+        "oi": oi, 
+        "bid": bid, 
+        "ask": ask, 
+        "spread_pct": spread_pct,
+        "delta": nearest.get("delta"),
+        "gamma": nearest.get("gamma"),
+        "theta": nearest.get("theta"),
+        "vega": nearest.get("vega")
+    }

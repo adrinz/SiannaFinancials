@@ -563,12 +563,14 @@ def build_report(
                     f"OI = {_oi} contracts. Liquidity is thin, so fills may be poor "
                     "and exits may be harder."
                 )
-            if _sp is not None and _sp > 15:
+            if _sp is not None and _sp > 10:
                 signal_warnings.append(
                     f"Wide bid-ask spread at ${_tp.strike} {_tp.contract_type}: "
                     f"{_sp:.0f}% of mid-price. You lose about {_sp/2:.0f}% on entry "
                     "from spread alone. Prefer tighter markets."
                 )
+                # Penalty for wide spread
+                conviction = round(max(0.10, conviction - 0.15), 3)
     except Exception:
         pass
 
@@ -2712,6 +2714,28 @@ def _build_trade_plan(
         one_sigma_usd=one_sigma_usd,
     )
 
+    # ---- Fetch Live Greeks & Liquidity --------------------------------------
+    from .options_flow import option_liquidity_at_strike
+    liq = option_liquidity_at_strike(sym, strike, contract_type == "call")
+    
+    # ---- Black-Scholes Greeks (analytical fallback) -------------------------
+    delta_val: Optional[float] = liq.get("delta") if liq else None
+    theta_day: Optional[float] = liq.get("theta") if liq else None
+    vega_pct: Optional[float] = liq.get("vega") if liq else None
+    
+    if delta_val is None:
+        try:
+            from square18_signals.pricing import greeks as _greeks
+            _g = _greeks(
+                S=spot, K=float(strike), T=T, r=0.045, sigma=iv,
+                option_type=contract_type, q=0.0,
+            )
+            delta_val = round(_g.delta, 3)
+            theta_day = round(_g.theta_per_day, 4)   # $ per share per calendar day
+            vega_pct = round(_g.vega_per_pct, 4)     # $ per share per +1% IV
+        except Exception:
+            pass
+
     # ---- Rationale ---------------------------------------------------------
     if premium is not None:
         _src = "Yahoo chain mid" if premium_source == "yahoo_chain" else "BS model"
@@ -2742,22 +2766,6 @@ def _build_trade_plan(
         f"Score {composite_score:+.2f}, verdict {verdict}, conviction "
         f"{int(conviction*100)}%.{validity_note}{special_note}"
     )
-
-    # ---- Black-Scholes Greeks (analytical) ----------------------------------
-    delta_val: Optional[float] = None
-    theta_day: Optional[float] = None
-    vega_pct: Optional[float] = None
-    try:
-        from square18_signals.pricing import greeks as _greeks
-        _g = _greeks(
-            S=spot, K=float(strike), T=T, r=0.045, sigma=iv,
-            option_type=contract_type, q=0.0,
-        )
-        delta_val = round(_g.delta, 3)
-        theta_day = round(_g.theta_per_day, 4)   # $ per share per calendar day
-        vega_pct = round(_g.vega_per_pct, 4)     # $ per share per +1% IV
-    except Exception:
-        pass
 
     # ---- P&L scenario estimates (BS repricing at key price levels) ----------
     scenario_target: Optional[float] = None

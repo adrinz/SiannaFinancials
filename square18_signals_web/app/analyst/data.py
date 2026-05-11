@@ -110,7 +110,7 @@ class OHLCV:
 def get_ohlcv(symbol: str, timeframe: Timeframe) -> OHLCV:
     """Return OHLCV for ``symbol`` at ``timeframe``.
 
-    Checks on-disk cache first, then yfinance (if available), then
+    Checks on-disk cache first, then Tradier, then yfinance, then
     synthesizes. Cache entries older than ``_CACHE_TTL_SECONDS`` are
     considered stale for intraday timeframes.
     """
@@ -118,7 +118,9 @@ def get_ohlcv(symbol: str, timeframe: Timeframe) -> OHLCV:
     if cached is not None:
         return cached
 
-    series = _fetch_yfinance(symbol, timeframe)
+    series = _fetch_tradier(symbol, timeframe)
+    if series is None:
+        series = _fetch_yfinance(symbol, timeframe)
     if series is None:
         series = _synthesize(symbol, timeframe)
 
@@ -176,6 +178,87 @@ _YFINANCE_PARAMS: dict[Timeframe, dict] = {
     "weekly": {"period": "5y",    "interval": "1wk"},
 }
 
+
+def _fetch_tradier(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
+    """Fetch OHLCV from Tradier API."""
+    from .tradier_client import get_historical_quotes, get_timesales, is_configured
+    if not is_configured():
+        return None
+
+    import pandas as pd
+    end_dt = datetime.now()
+
+    try:
+        if timeframe in ("daily", "weekly"):
+            start_dt = end_dt - timedelta(days=5*365 if timeframe == "weekly" else 2*365)
+            data = get_historical_quotes(
+                symbol, 
+                timeframe, 
+                start_dt.strftime("%Y-%m-%d"), 
+                end_dt.strftime("%Y-%m-%d")
+            )
+            if not data:
+                return None
+            
+            df = pd.DataFrame(data)
+            if df.empty or "close" not in df.columns:
+                return None
+                
+            # Tradier history returns 'date'
+            df["timestamp"] = pd.to_datetime(df["date"]).dt.tz_localize("UTC")
+            df = df.set_index("timestamp").sort_index()
+            
+        elif timeframe in ("1h", "4h"):
+            # Fetch 40 days of 15min data (gives ~2000 bars, enough for 200 SMA on 1h/4h)
+            start_dt = end_dt - timedelta(days=40)
+            data = get_timesales(
+                symbol, 
+                "15min", 
+                start_dt.strftime("%Y-%m-%d %H:%M"), 
+                end_dt.strftime("%Y-%m-%d %H:%M")
+            )
+            if not data:
+                return None
+                
+            df = pd.DataFrame(data)
+            if df.empty or "close" not in df.columns:
+                return None
+                
+            # Tradier timesales returns 'time'
+            df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("UTC")
+            df = df.set_index("timestamp").sort_index()
+            
+            # Resample 15min to 1h or 4h
+            agg = {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+            resample_rule = "1h" if timeframe == "1h" else "4h"
+            df = df.resample(resample_rule).agg(agg).dropna(subset=["open", "close"])
+            
+            if df.empty:
+                return None
+        else:
+            return None
+
+        ts = [x.to_pydatetime().isoformat() for x in df.index]
+        return OHLCV(
+            symbol=symbol.upper(),
+            timeframe=timeframe,
+            timestamps=ts,
+            open=[float(x) for x in df["open"].tolist()],
+            high=[float(x) for x in df["high"].tolist()],
+            low=[float(x) for x in df["low"].tolist()],
+            close=[float(x) for x in df["close"].tolist()],
+            volume=[float(x) for x in df["volume"].tolist()],
+            source="tradier",
+        )
+    except Exception as e:
+        print(f"Tradier OHLCV fetch failed for {symbol}: {e}")
+        return None
 
 def _fetch_yfinance(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
     global _YF_FAIL_STREAK, _YF_CIRCUIT_UNTIL  # noqa: PLW0603
@@ -525,6 +608,62 @@ def _filter_last_ny_session_day(df):
         return df
 
 
+def _fetch_tradier_1d_intraday(symbol: str) -> Optional[OHLCV]:
+    """1m/5m with extended hours, matching Yahoo's dense 1D line."""
+    from .tradier_client import get_timesales, is_configured
+    if not is_configured():
+        return None
+
+    import pandas as pd
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=5)
+
+    try:
+        # Try 1min first for highest resolution
+        data = get_timesales(
+            symbol, 
+            "1min", 
+            start_dt.strftime("%Y-%m-%d %H:%M"), 
+            end_dt.strftime("%Y-%m-%d %H:%M")
+        )
+        if not data:
+            # Fallback to 5min
+            data = get_timesales(
+                symbol, 
+                "5min", 
+                start_dt.strftime("%Y-%m-%d %H:%M"), 
+                end_dt.strftime("%Y-%m-%d %H:%M")
+            )
+            
+        if not data:
+            return None
+            
+        df = pd.DataFrame(data)
+        if df.empty or "close" not in df.columns:
+            return None
+            
+        df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("UTC")
+        df = df.set_index("timestamp").sort_index()
+        
+        # Filter to last trading day
+        df = _filter_last_ny_session_day(df)
+        if len(df) < 8:
+            return None
+            
+        # Map columns to Yahoo style for _df_to_ohlcv_1h_style
+        df = df.rename(columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume"
+        })
+        
+        return _df_to_ohlcv_1h_style(symbol, df, "tradier")
+    except Exception as e:
+        print(f"Tradier 1d intraday fetch failed for {symbol}: {e}")
+        return None
+
 def _fetch_yfinance_1d_intraday(symbol: str) -> Optional[OHLCV]:
     """1m/2m/5m with extended hours, matching Yahoo's dense 1D line."""
 
@@ -623,7 +762,10 @@ def get_ohlcv_1d_intraday(symbol: str) -> OHLCV:
     cached = _read_cache_1d_intraday(sym)
     if cached is not None:
         return cached
-    s = _fetch_yfinance_1d_intraday(sym)
+        
+    s = _fetch_tradier_1d_intraday(sym)
+    if s is None or len(s) < 2:
+        s = _fetch_yfinance_1d_intraday(sym)
     if s is None or len(s) < 2:
         s = _synthesize_1d_intraday_from_1h(sym)
     if s is None or len(s) < 2:

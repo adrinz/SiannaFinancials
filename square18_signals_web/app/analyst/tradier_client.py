@@ -95,7 +95,7 @@ def get_option_chain(symbol: str, expiration: str) -> List[Dict[str, Any]]:
 
 def get_historical_quotes(symbol: str, interval: str, start: str, end: str) -> List[Dict[str, Any]]:
     """Fetch historical OHLCV data.
-    interval: 'tick', '1min', '5min', '15min', 'daily', 'weekly', 'monthly'
+    interval: 'daily', 'weekly', 'monthly'
     """
     if not is_configured():
         return []
@@ -116,4 +116,30 @@ def get_historical_quotes(symbol: str, interval: str, start: str, end: str) -> L
         return history
     except Exception as e:
         print(f"Tradier get_historical_quotes error: {e}")
+        return []
+
+def get_timesales(symbol: str, interval: str, start: str, end: str, session_filter: str = "all") -> List[Dict[str, Any]]:
+    """Fetch intraday OHLCV data.
+    interval: 'tick', '1min', '5min', '15min'
+    session_filter: 'all', 'open'
+    """
+    if not is_configured():
+        return []
+        
+    url = f"{_get_base_url()}/markets/timesales"
+    try:
+        resp = requests.get(
+            url,
+            params={"symbol": symbol, "interval": interval, "start": start, "end": end, "session_filter": session_filter},
+            headers=_get_headers(),
+            timeout=15.0
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        series = data.get("series", {}).get("data", [])
+        if isinstance(series, dict):
+            return [series]
+        return series
+    except Exception as e:
+        print(f"Tradier get_timesales error: {e}")
         return []
