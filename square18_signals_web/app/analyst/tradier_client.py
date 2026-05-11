@@ -62,6 +62,8 @@ def get_option_expirations(symbol: str) -> List[str]:
         )
         resp.raise_for_status()
         data = resp.json()
+        if not data or "expirations" not in data or data["expirations"] is None:
+            return []
         dates = data.get("expirations", {}).get("date", [])
         if isinstance(dates, str):
             return [dates]
