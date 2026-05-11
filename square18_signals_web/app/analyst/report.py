@@ -93,8 +93,8 @@ _build_locks_guard = threading.Lock()
 _overview_build_locks: dict[str, threading.Lock] = {}
 _overview_rows_cache: dict[str, tuple[float, list[OverviewRow]]] = {}
 OVERVIEW_ROWS_CACHE_TTL_SEC = 90.0
-OVERVIEW_MAX_WORKERS = 8
-OVERVIEW_TOTAL_TIMEOUT_SEC = 12.0
+OVERVIEW_MAX_WORKERS = 16
+OVERVIEW_TOTAL_TIMEOUT_SEC = 45.0
 
 
 def _lock_for_overview_key(key: str) -> threading.Lock:
