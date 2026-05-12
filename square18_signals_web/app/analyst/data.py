@@ -205,7 +205,7 @@ def _fetch_tradier(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
                 return None
                 
             # Tradier history returns 'date'
-            df["timestamp"] = pd.to_datetime(df["date"]).dt.tz_localize("UTC")
+            df["timestamp"] = pd.to_datetime(df["date"]).dt.tz_localize("America/New_York").dt.tz_convert("UTC")
             df = df.set_index("timestamp").sort_index()
             
         elif timeframe in ("1h", "4h"):
@@ -225,7 +225,7 @@ def _fetch_tradier(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
                 return None
                 
             # Tradier timesales returns 'time'
-            df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("UTC")
+            df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("America/New_York").dt.tz_convert("UTC")
             df = df.set_index("timestamp").sort_index()
             
             # Resample 15min to 1h or 4h
@@ -642,7 +642,7 @@ def _fetch_tradier_1d_intraday(symbol: str) -> Optional[OHLCV]:
         if df.empty or "close" not in df.columns:
             return None
             
-        df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("UTC")
+        df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("America/New_York").dt.tz_convert("UTC")
         df = df.set_index("timestamp").sort_index()
         
         # Filter to last trading day

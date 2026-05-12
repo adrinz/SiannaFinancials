@@ -1288,7 +1288,7 @@ function renderPriceChart(d, target = 'detail') {
     const vk = (ch.range_key || '1d').toUpperCase();
     const g =
       ch.x_granularity === 'session'
-        ? '1D session (ET · 6am–6pm)'
+        ? '1D session (ET · 4am–8pm)'
         : ch.x_granularity === 'hour'
           ? 'Hourly'
           : 'Daily';
@@ -1300,11 +1300,15 @@ function renderPriceChart(d, target = 'detail') {
       btn.onclick = () => openDetailChartModal(d, target);
     }
     const xg = ch.x_granularity || 'day';
+    const pClose = d.row && d.row.last != null && d.row.change_pct != null
+      ? d.row.last / (1 + d.row.change_pct / 100)
+      : null;
     const o = {
       yahooLayout: true,
       width: 1000,
       height: 300,
       xGranularity: xg,
+      previousClose: pClose,
     };
     if (xg === 'session') {
       o.sessionZoom =
@@ -1371,12 +1375,16 @@ function openDetailChartModal(d, source = 'detail') {
           : state.detailChart.view || 'mountain';
   if (bars) {
     const xg = ch.x_granularity || 'day';
+    const pClose = d.row && d.row.last != null && d.row.change_pct != null
+      ? d.row.last / (1 + d.row.change_pct / 100)
+      : null;
     const o = {
       yahooLayout: true,
       width: 1400,
       height: 420,
       xGranularity: xg,
       enlarged: true,
+      previousClose: pClose,
     };
     if (xg === 'session') {
       o.sessionZoom =
@@ -1666,7 +1674,7 @@ function fancyPriceChart(series, direction, opts = {}) {
 
   // Reference: prior bar close (dashed) — "previous session" in window
   if (n >= 2) {
-    const pClose = series[n - 2];
+    const pClose = opts.previousClose != null ? opts.previousClose : series[n - 2];
     if (pClose != null && pClose >= lo && pClose <= hi) {
       const yP = pad.top + innerH - ((pClose - lo) / range) * innerH;
       root.append(
@@ -1883,14 +1891,16 @@ function _etMinFromMidnight(iso) {
     if (p.type === 'hour') hh = parseInt(p.value, 10);
     if (p.type === 'minute') mm = parseInt(p.value, 10);
   }
+  // Intl.DateTimeFormat with hour12: false can return '24' for midnight in some Node versions, or '00'
+  if (hh === 24) hh = 0;
   return hh * 60 + mm;
 }
 
 /** X position 0..1 for Yahoo-style 6:00am–6:00pm session strip (extended bars clamped). */
 function _etSessionRatio6am6pm(iso) {
   const m = _etMinFromMidnight(iso);
-  const start = 6 * 60;
-  const end = 18 * 60; // 6:00pm
+  const start = 4 * 60; // 4:00am ET (pre-market open)
+  const end = 20 * 60; // 8:00pm ET (after-hours close)
   return Math.max(0, Math.min(1, (m - start) / (end - start)));
 }
 
@@ -2064,7 +2074,7 @@ function tickerOhlcSessionChart(bars, view, direction, opts = {}) {
         rx: 2,
       }),
     );
-    const rOpen = ((9 * 60 + 30) - 6 * 60) / (12 * 60);
+    const rOpen = ((9 * 60 + 30) - 4 * 60) / (16 * 60);
     const xPre0 = rToX(0);
     const xPre1 = rToX(rOpen);
     const preW = Math.max(0, xPre1 - xPre0);
@@ -2074,6 +2084,22 @@ function tickerOhlcSessionChart(bars, view, direction, opts = {}) {
           x: xPre0,
           y: pad.top,
           width: preW,
+          height: innerH,
+          fill: `url(#${patId})`,
+          'fill-opacity': 0.45,
+        }),
+      );
+    }
+    const rClose = ((16 * 60) - 4 * 60) / (16 * 60);
+    const xPost0 = rToX(rClose);
+    const xPost1 = rToX(1);
+    const postW = Math.max(0, xPost1 - xPost0);
+    if (postW > 0) {
+      gPlot.append(
+        svg('rect', {
+          x: xPost0,
+          y: pad.top,
+          width: postW,
           height: innerH,
           fill: `url(#${patId})`,
           'fill-opacity': 0.45,
