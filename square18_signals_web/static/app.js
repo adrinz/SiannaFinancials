@@ -103,12 +103,23 @@ const fmtScore = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
 // cache; cap waits so the UI can show a failure instead of hanging forever.
 const API_FETCH_TIMEOUT_MS = 6 * 60 * 1000; // 6 minutes
 
-async function api(path) {
+async function apiJson(path, init = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), API_FETCH_TIMEOUT_MS);
   try {
-    const r = await fetch(path, { signal: controller.signal });
-    if (!r.ok) throw new Error(`${path}: ${r.status}`);
+    const r = await fetch(path, { ...init, signal: controller.signal });
+    if (!r.ok) {
+      let detail = '';
+      try {
+        const errData = await r.json();
+        if (errData && typeof errData === 'object' && errData.detail != null) {
+          detail = String(errData.detail);
+        }
+      } catch (_) {
+        detail = '';
+      }
+      throw new Error(`${path}: ${r.status}${detail ? ` - ${detail}` : ''}`);
+    }
     return r.json();
   } catch (e) {
     if (e && e.name === 'AbortError') {
@@ -120,6 +131,10 @@ async function api(path) {
   } finally {
     clearTimeout(t);
   }
+}
+
+async function api(path) {
+  return apiJson(path);
 }
 
 // ---------- Application state ----------------------------------------------
@@ -137,7 +152,7 @@ const state = {
   /** Analyst / Search embed charts use the same API + controls; session zoom is isolated per tab. */
   analystChart: { range: '1d', view: 'mountain' },
   analystChartSessionZoom: { start: 0, end: 1 },
-  stocksChart: { range: '1d', view: 'mountain' },
+  stocksChart: { range: '1d', view: 'line', overlayMode: 'simple' },
   stocksChartSessionZoom: { start: 0, end: 1 },
   searchChart: { range: '1d', view: 'mountain' },
   searchChartSessionZoom: { start: 0, end: 1 },
@@ -146,6 +161,30 @@ const state = {
 };
 
 const SESSION_1D_MIN_ZOOM = 0.0015; // ≈1 min in a 12h range — zoom in to “minute” scale
+const TICKER_DETAIL_CACHE_TTL_MS = 90_000;
+
+function _readFreshTickerDetail(cache, key) {
+  const d = cache[key];
+  if (!d) return null;
+  const fetchedAt = Number(d.__clientFetchedAtMs || 0);
+  if (!Number.isFinite(fetchedAt) || Date.now() - fetchedAt > TICKER_DETAIL_CACHE_TTL_MS) {
+    delete cache[key];
+    return null;
+  }
+  return d;
+}
+
+function _writeTickerDetailCache(cache, key, payload) {
+  if (payload && typeof payload === 'object') {
+    payload.__clientFetchedAtMs = Date.now();
+  }
+  cache[key] = payload;
+  return payload;
+}
+
+function stocksChartIsSimpleMode() {
+  return state.stocksChart.overlayMode !== 'advanced';
+}
 
 function detailCacheKey(symbol) {
   return `${symbol}|${state.detailChart.range}`;
@@ -559,7 +598,6 @@ async function loadCrypto() {
     }
     for (const c of d.rows) {
       const side24 = c.change_pct_24h >= 0 ? 'pos' : 'neg';
-      const side7 = c.change_pct_7d >= 0 ? 'pos' : 'neg';
       const tile = h(
         'div',
         { class: `crypto-tile ${side24}` },
@@ -576,7 +614,7 @@ async function loadCrypto() {
           cryptoSpark(c.spark, side24)
         ),
         h('div', { class: 'crypto-foot muted mono' },
-          `7d ${c.change_pct_7d >= 0 ? '+' : ''}${c.change_pct_7d.toFixed(2)}%`)
+          `24h ${c.change_pct_24h >= 0 ? '+' : ''}${c.change_pct_24h.toFixed(2)}%`)
       );
       grid.append(tile);
     }
@@ -612,12 +650,37 @@ function cryptoSpark(points, side) {
 // ---------- Dashboard: news feed -------------------------------------------
 
 function fmtNewsSource(src) {
+  const s = String(src || '');
+  if (s.includes('+')) {
+    const parts = s.split('+').map((x) => fmtNewsSource(x));
+    return parts.join(' + ');
+  }
   const m = {
     'cnbc-rss': 'CNBC',
     'marketwatch-rss': 'MarketWatch',
     'internal-snapshot': 'Sianna (snapshot)',
   };
-  return m[src] != null ? m[src] : src;
+  return m[s] != null ? m[s] : s;
+}
+
+function fitNewsListViewport(ul, visibleCount = 8) {
+  if (!ul) return;
+  const items = ul.querySelectorAll('.news-item');
+  if (!items.length) {
+    ul.style.maxHeight = '';
+    return;
+  }
+  if (items.length <= visibleCount) {
+    ul.style.maxHeight = '';
+    return;
+  }
+  const limit = Math.min(visibleCount, items.length);
+  let h = 0;
+  for (let i = 0; i < limit; i++) h += items[i].offsetHeight;
+  const cs = window.getComputedStyle(ul);
+  const gap = parseFloat(cs.rowGap || cs.gap || '0') || 0;
+  h += gap * Math.max(0, limit - 1);
+  ul.style.maxHeight = `${Math.ceil(h)}px`;
 }
 
 async function loadNews() {
@@ -649,8 +712,10 @@ async function loadNews() {
       );
       ul.append(li);
     }
+    fitNewsListViewport(ul, 8);
   } catch (e) {
     ul.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`;
+    ul.style.maxHeight = '';
   }
 }
 
@@ -823,6 +888,7 @@ function initDetailChartToolbar() {
   document.addEventListener('click', (e) => {
     const tr = e.target.closest('#detail-chart-toolbar [data-detail-range]');
     const tvModal = e.target.closest('#chart-modal-view-toolbar [data-detail-view]');
+    const toModal = e.target.closest('#chart-modal-overlays-toolbar [data-chart-overlays]');
     const tvDetail = e.target.closest('#detail-chart-toolbar [data-detail-view]');
     if (tr) {
       e.preventDefault();
@@ -892,6 +958,22 @@ function initDetailChartToolbar() {
       }
       return;
     }
+    if (toModal) {
+      e.preventDefault();
+      const src = state.chartModalSource;
+      if (src !== 'stocks') return;
+      const no = toModal.getAttribute('data-chart-overlays');
+      if (!no || no === state.stocksChart.overlayMode) return;
+      state.stocksChart.overlayMode = no;
+      const sym = stocks.activeSymbol;
+      const d = sym ? stocks.tickerDetails[stocksTickerCacheKey(sym)] : null;
+      if (d) {
+        renderPriceChart(d, 'stocks');
+        openDetailChartModal(d, 'stocks');
+      }
+      syncStocksChartToolbar();
+      return;
+    }
     if (tvDetail) {
       e.preventDefault();
       const nv = tvDetail.getAttribute('data-detail-view');
@@ -917,13 +999,12 @@ function initDetailChartToolbar() {
 async function loadAnalystTickerDetail(symbol) {
   const r = state.analystChart.range;
   const key = `${String(symbol).toUpperCase()}|${r}`;
-  const cached = analyst.tickerDetails[key];
+  const cached = _readFreshTickerDetail(analyst.tickerDetails, key);
   if (cached) return cached;
   const d = await api(
     `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`
   );
-  analyst.tickerDetails[key] = d;
-  return d;
+  return _writeTickerDetailCache(analyst.tickerDetails, key, d);
 }
 
 function initAnalystChartToolbar() {
@@ -986,7 +1067,8 @@ function initStocksChartToolbar() {
   document.addEventListener('click', (e) => {
     const tr = e.target.closest('#stocks-chart-toolbar [data-stocks-range]');
     const tv = e.target.closest('#stocks-chart-toolbar [data-stocks-view]');
-    if (!tr && !tv) return;
+    const to = e.target.closest('#stocks-chart-toolbar [data-stocks-overlay]');
+    if (!tr && !tv && !to) return;
     const sym = stocks.activeSymbol;
     if (!sym) return;
     e.preventDefault();
@@ -1019,6 +1101,22 @@ function initStocksChartToolbar() {
       })();
       return;
     }
+    if (to) {
+      const no = to.getAttribute('data-stocks-overlay');
+      if (no && no !== state.stocksChart.overlayMode) {
+        state.stocksChart.overlayMode = no;
+        const d = stocks.tickerDetails[stocksTickerCacheKey(sym)];
+        if (d) {
+          renderPriceChart(d, 'stocks');
+          const backdrop = $('#chart-enlarge-backdrop');
+          if (backdrop && !backdrop.classList.contains('hidden') && state.chartModalSource === 'stocks') {
+            openDetailChartModal(d, 'stocks');
+          }
+        }
+        syncStocksChartToolbar();
+      }
+      return;
+    }
     if (tv) {
       const nv = tv.getAttribute('data-stocks-view');
       if (nv && nv !== state.stocksChart.view) {
@@ -1041,13 +1139,12 @@ function initStocksChartToolbar() {
 async function loadStocksTickerDetail(symbol) {
   const r = state.stocksChart.range;
   const key = `${String(symbol).toUpperCase()}|${r}`;
-  const cached = stocks.tickerDetails[key];
+  const cached = _readFreshTickerDetail(stocks.tickerDetails, key);
   if (cached) return cached;
   const d = await api(
     `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`
   );
-  stocks.tickerDetails[key] = d;
-  return d;
+  return _writeTickerDetailCache(stocks.tickerDetails, key, d);
 }
 
 function initSearchChartToolbar() {
@@ -1111,13 +1208,12 @@ function initSearchChartToolbar() {
 async function loadSearchTickerDetail(symbol) {
   const r = state.searchChart.range;
   const key = `${String(symbol).toUpperCase()}|${r}`;
-  const cached = searchUI.tickerDetails[key];
+  const cached = _readFreshTickerDetail(searchUI.tickerDetails, key);
   if (cached) return cached;
   const d = await api(
     `/api/ticker/${encodeURIComponent(symbol)}?range=${encodeURIComponent(r)}`
   );
-  searchUI.tickerDetails[key] = d;
-  return d;
+  return _writeTickerDetailCache(searchUI.tickerDetails, key, d);
 }
 
 function renderChipRow() {
@@ -1276,6 +1372,7 @@ function renderPriceChart(d, target = 'detail') {
   host.innerHTML = '';
   const ch = d.chart;
   const bars = ch && Array.isArray(ch.bars) && ch.bars.length >= 2 ? ch.bars : null;
+  const simpleMode = target === 'stocks' ? stocksChartIsSimpleMode() : false;
   const view =
     target === 'analyst'
       ? state.analystChart.view || 'mountain'
@@ -1309,6 +1406,7 @@ function renderPriceChart(d, target = 'detail') {
       height: 300,
       xGranularity: xg,
       previousClose: pClose,
+      simpleMode,
     };
     if (xg === 'session') {
       o.sessionZoom =
@@ -1365,6 +1463,7 @@ function openDetailChartModal(d, source = 'detail') {
   const ch = d.chart;
   const bars = ch && Array.isArray(ch.bars) && ch.bars.length >= 2 ? ch.bars : null;
   host.innerHTML = '';
+  const simpleMode = source === 'stocks' ? stocksChartIsSimpleMode() : false;
   const view =
     source === 'analyst'
       ? state.analystChart.view || 'mountain'
@@ -1385,6 +1484,7 @@ function openDetailChartModal(d, source = 'detail') {
       xGranularity: xg,
       enlarged: true,
       previousClose: pClose,
+      simpleMode,
     };
     if (xg === 'session') {
       o.sessionZoom =
@@ -1424,6 +1524,16 @@ function openDetailChartModal(d, source = 'detail') {
       ? `${d.row.symbol} · ${ctx.headline}`
       : `${d.row.symbol} · price & indicators`;
   }
+  const overlaysBar = $('#chart-modal-overlays-toolbar');
+  if (overlaysBar) {
+    overlaysBar.hidden = source !== 'stocks';
+    if (source === 'stocks') {
+      const mode = state.stocksChart.overlayMode;
+      overlaysBar.querySelectorAll('[data-chart-overlays]').forEach((b) => {
+        b.classList.toggle('is-active', b.getAttribute('data-chart-overlays') === mode);
+      });
+    }
+  }
   sig.innerHTML = '';
   if (ctx && Array.isArray(ctx.lines) && ctx.lines.length) {
     for (const line of ctx.lines) {
@@ -1453,11 +1563,15 @@ function openDetailChartModal(d, source = 'detail') {
 function syncStocksChartToolbar() {
   const r = state.stocksChart.range;
   const v = state.stocksChart.view;
+  const o = state.stocksChart.overlayMode;
   document.querySelectorAll('#stocks-chart-toolbar [data-stocks-range]').forEach((b) => {
     b.classList.toggle('is-active', b.getAttribute('data-stocks-range') === r);
   });
   document.querySelectorAll('#stocks-chart-toolbar [data-stocks-view]').forEach((b) => {
     b.classList.toggle('is-active', b.getAttribute('data-stocks-view') === v);
+  });
+  document.querySelectorAll('#stocks-chart-toolbar [data-stocks-overlay]').forEach((b) => {
+    b.classList.toggle('is-active', b.getAttribute('data-stocks-overlay') === o);
   });
 }
 
@@ -1563,13 +1677,14 @@ function fancyPriceChart(series, direction, opts = {}) {
   const innerH = h0 - pad.top - pad.bottom;
   const n = series.length;
 
+  const simpleMode = !!opts.simpleMode;
   // Overlays — compute from closes only (no extra API payload required).
-  const sma5 = _sma(series, Math.min(5, n - 1));
-  const sma10 = _sma(series, Math.min(10, n - 1));
-  const sma20 = _sma(series, Math.min(20, n - 1));
-  const ema9 = _ema(series, Math.min(9, n - 1));
+  const sma5 = simpleMode ? [] : _sma(series, Math.min(5, n - 1));
+  const sma10 = simpleMode ? [] : _sma(series, Math.min(10, n - 1));
+  const sma20 = simpleMode ? [] : _sma(series, Math.min(20, n - 1));
+  const ema9 = simpleMode ? [] : _ema(series, Math.min(9, n - 1));
   const bandWin = Math.min(20, n - 1);
-  const bb = _bollinger(series, bandWin, 2);
+  const bb = simpleMode ? { upper: [], lower: [] } : _bollinger(series, bandWin, 2);
 
   // Value range uses price + bands so the envelope fits.
   const all = [...series];
@@ -1724,7 +1839,7 @@ function fancyPriceChart(series, direction, opts = {}) {
     bandD += 'L' + x.toFixed(2) + ',' + y.toFixed(2) + ' ';
   }
   if (bandD) bandD += 'Z';
-  if (bandD) {
+  if (!simpleMode && bandD) {
     root.append(svg('path', {
       d: bandD,
       fill: 'var(--info)',
@@ -1759,23 +1874,25 @@ function fancyPriceChart(series, direction, opts = {}) {
 
   // Indicator lines (lightest → heaviest so price is on top).
   const sw = yahooLayout ? 1.0 : 1.2;
-  root.append(svg('path', {
-    d: toPath(sma20),
-    fill: 'none', stroke: '#8b9dd9', 'stroke-width': sw, 'stroke-opacity': 0.75 * smA,
-  }));
-  root.append(svg('path', {
-    d: toPath(sma10),
-    fill: 'none', stroke: '#d9a36b', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA,
-  }));
-  root.append(svg('path', {
-    d: toPath(ema9),
-    fill: 'none', stroke: '#bf7af0', 'stroke-width': sw,
-    'stroke-dasharray': '4 2', 'stroke-opacity': 0.8 * smA,
-  }));
-  root.append(svg('path', {
-    d: toPath(sma5),
-    fill: 'none', stroke: '#f2d47a', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA,
-  }));
+  if (!simpleMode) {
+    root.append(svg('path', {
+      d: toPath(sma20),
+      fill: 'none', stroke: '#8b9dd9', 'stroke-width': sw, 'stroke-opacity': 0.75 * smA,
+    }));
+    root.append(svg('path', {
+      d: toPath(sma10),
+      fill: 'none', stroke: '#d9a36b', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA,
+    }));
+    root.append(svg('path', {
+      d: toPath(ema9),
+      fill: 'none', stroke: '#bf7af0', 'stroke-width': sw,
+      'stroke-dasharray': '4 2', 'stroke-opacity': 0.8 * smA,
+    }));
+    root.append(svg('path', {
+      d: toPath(sma5),
+      fill: 'none', stroke: '#f2d47a', 'stroke-width': sw, 'stroke-opacity': 0.8 * smA,
+    }));
+  }
 
   // Price line on top (mountain edge)
   root.append(svg('path', {
@@ -1809,11 +1926,15 @@ function fancyPriceChart(series, direction, opts = {}) {
     'div',
     { class: 'price-chart-legend-row mono' },
     legendSwatch(color, yahooLayout ? 'Close (area)' : 'Close'),
-    legendSwatch('#f2d47a', `SMA${Math.min(5, n - 1)}`),
-    legendSwatch('#d9a36b', `SMA${Math.min(10, n - 1)}`),
-    legendSwatch('#8b9dd9', `SMA${Math.min(20, n - 1)}`),
-    legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
-    legendSwatch('var(--info)', `Bollinger (${bandWin},2σ)`, false, true),
+    ...(simpleMode
+      ? [h('span', { class: 'muted' }, 'Simple chart')]
+      : [
+        legendSwatch('#f2d47a', `SMA${Math.min(5, n - 1)}`),
+        legendSwatch('#d9a36b', `SMA${Math.min(10, n - 1)}`),
+        legendSwatch('#8b9dd9', `SMA${Math.min(20, n - 1)}`),
+        legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
+        legendSwatch('var(--info)', `Bollinger (${bandWin},2σ)`, false, true),
+      ]),
   );
   const canvas = h('div', { class: 'price-chart-canvas' }, root, tip);
   const figure = h(
@@ -1990,7 +2111,8 @@ function tickerOhlcSessionChart(bars, view, direction, opts = {}) {
     max = Math.max(max, b.l, b.h, b.o, b.c);
   }
 
-  const showOverlays = view === 'mountain' || view === 'line';
+  const simpleMode = !!opts.simpleMode;
+  const showOverlays = !simpleMode && (view === 'mountain' || view === 'line');
   const sma5 = showOverlays ? _sma(series, Math.min(5, n - 1)) : [];
   const sma10 = showOverlays ? _sma(series, Math.min(10, n - 1)) : [];
   const sma20 = showOverlays ? _sma(series, Math.min(20, n - 1)) : [];
@@ -2440,7 +2562,7 @@ function tickerOhlcSessionChart(bars, view, direction, opts = {}) {
         legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
         legendSwatch('var(--info)', `Bollinger (${Math.min(20, n - 1)},2σ)`, false, true),
       ]
-      : [h('span', { class: 'muted' }, 'Indicators on Mountain / Line')]),
+      : [h('span', { class: 'muted' }, simpleMode ? 'Simple chart (indicators hidden)' : 'Indicators on Mountain / Line')]),
     h('span', { class: 'muted' }, 'Scroll to zoom · drag to pan · double-click to reset'),
   );
 
@@ -2569,7 +2691,8 @@ function tickerOhlcChart(bars, view, direction, opts = {}) {
     max = Math.max(max, b.l, b.h, b.o, b.c);
   }
 
-  const showOverlays = view === 'mountain' || view === 'line';
+  const simpleMode = !!opts.simpleMode;
+  const showOverlays = !simpleMode && (view === 'mountain' || view === 'line');
   const sma5 = showOverlays ? _sma(series, Math.min(5, n - 1)) : [];
   const sma10 = showOverlays ? _sma(series, Math.min(10, n - 1)) : [];
   const sma20 = showOverlays ? _sma(series, Math.min(20, n - 1)) : [];
@@ -2830,7 +2953,7 @@ function tickerOhlcChart(bars, view, direction, opts = {}) {
         legendSwatch('#bf7af0', `EMA${Math.min(9, n - 1)}`, true),
         legendSwatch('var(--info)', `Bollinger (${Math.min(20, n - 1)},2σ)`, false, true),
       ]
-      : [h('span', { class: 'muted' }, 'Indicators on Mountain / Line only')]),
+      : [h('span', { class: 'muted' }, simpleMode ? 'Simple chart (indicators hidden)' : 'Indicators on Mountain / Line only')]),
   );
 
   const canvas = h('div', { class: 'price-chart-canvas' }, root);
@@ -3478,11 +3601,92 @@ async function loadStocksOverview() {
     stocks.overview = rows;
     renderStocksOverviewList();
     renderStocksTickerStrip();
+    if (!stocks.activeSymbol) renderStocksAllPicksSummary();
     const srcEl = $('#stocks-source');
     if (srcEl) srcEl.textContent = rows.find((r) => r.source)?.source || '—';
   } catch (e) {
     list.innerHTML = `<div class="muted" style="padding:10px 12px;">Failed: ${e}</div>`;
   }
+}
+
+function renderStocksAllPicksSummary() {
+  const host = $('#stocks-report');
+  if (!host) return;
+  const rows = stocks.overview || [];
+  host.innerHTML = '';
+  if (!rows.length) {
+    host.append(
+      h('div', { class: 'callout' },
+        h('div', { class: 'callout-title' }, 'Loading stock picks…'),
+        'Fetching latest stock swing ideas for this timeframe.'
+      )
+    );
+    return;
+  }
+
+  const sorted = rows.slice().sort((a, b) => {
+    const vOrd = { BULLISH: 0, BEARISH: 1, NEUTRAL: 2 };
+    if (vOrd[a.verdict] !== vOrd[b.verdict]) return vOrd[a.verdict] - vOrd[b.verdict];
+    return b.conviction - a.conviction;
+  });
+  const top = sorted.slice(0, 12);
+
+  const tbody = h('tbody', {});
+  for (const r of top) {
+    const vcls =
+      r.verdict === 'BULLISH' ? 'success' :
+        r.verdict === 'BEARISH' ? 'danger' : 'neutral';
+    const rowCls =
+      r.verdict === 'BULLISH' ? 'row-buy' :
+        r.verdict === 'BEARISH' ? 'row-sell' : '';
+    const recType = r.rec_contract_type === 'put' ? 'PUT ref' : 'CALL ref';
+    const tp = r.rec_target != null ? fmtUSD(r.rec_target) : '—';
+    const st = r.rec_stop != null ? fmtUSD(r.rec_stop) : '—';
+    const conv = `${Math.round((r.conviction || 0) * 100)}%`;
+    tbody.append(
+      h(
+        'tr',
+        {
+          class: rowCls,
+          onClick: () => loadStocksReport(r.symbol),
+          style: 'cursor:pointer;',
+          title: `Open ${r.symbol} swing report`,
+        },
+        h('td', { class: 'mono' }, r.symbol),
+        h('td', {}, h('span', { class: `pill-badge ${vcls}` }, r.verdict)),
+        h('td', { class: 'mono' }, recType),
+        h('td', { class: 'num mono' }, tp),
+        h('td', { class: 'num mono' }, st),
+        h('td', { class: 'num' }, h('span', { class: `pill-badge ${vcls} mono` }, conv)),
+      )
+    );
+  }
+
+  host.append(
+    h('div', { class: 'top-picks-header' },
+      h('div', { class: 'top-picks-title' }, 'Stock Picks'),
+      h('div', { class: 'top-picks-note' }, 'Pick any row to open the full swing stock report with chart, levels, and rationale.')
+    ),
+    h(
+      'div',
+      { class: 'table-wrap' },
+      h(
+        'table',
+        { class: 'data-table' },
+        h('thead', {},
+          h('tr', {},
+            h('th', {}, 'Symbol'),
+            h('th', {}, 'Verdict'),
+            h('th', {}, 'Setup'),
+            h('th', { class: 'num' }, 'Target'),
+            h('th', { class: 'num' }, 'Stop'),
+            h('th', { class: 'num' }, 'Conviction'),
+          )
+        ),
+        tbody
+      )
+    )
+  );
 }
 
 function renderStocksOverviewList() {
@@ -4099,6 +4303,10 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     ['line', 'Line'],
     ['bar', 'Bar (OHLC)'],
   ];
+  const overlayPills = [
+    ['simple', 'Simple'],
+    ['advanced', 'Advanced'],
+  ];
   root.append(
     h(
       'div',
@@ -4167,6 +4375,30 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
               }),
             ),
           ),
+          ...(surface === 'stocks'
+            ? [
+              h(
+                'div',
+                { class: 'detail-chart-toolbar__row', role: 'group', 'aria-label': 'Indicator overlays' },
+                h('span', { class: 'detail-chart-toolbar__label muted' }, 'Overlays'),
+                h(
+                  'div',
+                  { class: 'pill-row' },
+                  ...overlayPills.map(([ok, lab]) =>
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        class: 'pill' + (state.stocksChart.overlayMode === ok ? ' is-active' : ''),
+                        'data-stocks-overlay': ok,
+                      },
+                      lab,
+                    ),
+                  ),
+                ),
+              ),
+            ]
+            : []),
         ),
         h('div', { id: priceChartHostId },
           h('div', { class: 'chart-placeholder' }, tickerD ? '…' : 'Loading…')),
@@ -5160,6 +5392,9 @@ async function refreshAll({ reason = 'manual' } = {}) {
 
   // Invalidate cached detail payloads so Ticker view pulls fresh data too.
   state.details = {};
+  analyst.tickerDetails = {};
+  stocks.tickerDetails = {};
+  searchUI.tickerDetails = {};
   analyst.overview = [];
   analyst.reports = {};
   analyst.polishCache = {};

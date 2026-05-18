@@ -1057,6 +1057,45 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
   background: var(--warning-soft);
 }
 .callout-warning .callout-title { color: var(--warning); }
+.top-picks-header {
+  margin-bottom: 10px;
+}
+.top-picks-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-elev));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent),
+    0 8px 18px color-mix(in srgb, var(--accent) 22%, transparent);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent) 62%, #ffffff);
+  margin-bottom: 8px;
+}
+.top-picks-title::before {
+  content: "TOP";
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #ffffff;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 90%, #ffffff) 0%,
+    color-mix(in srgb, var(--accent-2) 65%, #ffffff) 100%
+  );
+}
+.top-picks-note {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
 
 /* --- Analyst view --------------------------------------------------------- */
 
@@ -2756,7 +2795,12 @@ button { font-family: inherit; }
 
 /* --- News card ----------------------------------------------------------- */
 
-.card-news { padding: 14px 16px; }
+.card-news {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 .news-list {
   list-style: none;
   margin: 0;
@@ -2764,7 +2808,8 @@ button { font-family: inherit; }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 480px;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
 }
 .news-item {
@@ -3253,6 +3298,7 @@ body.chart-enlarge-open {
   color: var(--text);
   margin-bottom: 4px;
 }
+
 .chart-signal-detail {
   color: var(--text-muted);
   font-size: 12px;

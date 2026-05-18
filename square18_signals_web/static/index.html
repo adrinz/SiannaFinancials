@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=sianna-stocks-tab-10" />
+    <link rel="stylesheet" href="/static/styles.css?v=sianna-stocks-tab-23" />
   </head>
   <body>
     <div
@@ -894,6 +894,23 @@
             <button type="button" class="pill" data-detail-view="bar">Bar (OHLC)</button>
           </div>
         </div>
+        <div
+          class="chart-enlarge-view-bar"
+          id="chart-modal-overlays-toolbar"
+          role="group"
+          aria-label="Indicator overlays"
+          hidden
+        >
+          <span class="detail-chart-toolbar__label muted">Overlays</span>
+          <div class="pill-row">
+            <button type="button" class="pill is-active" data-chart-overlays="simple">
+              Simple
+            </button>
+            <button type="button" class="pill" data-chart-overlays="advanced">
+              Advanced
+            </button>
+          </div>
+        </div>
         <div class="chart-enlarge-body chart-enlarge-body--stacked">
           <div class="chart-enlarge-viz" id="chart-modal-chart-host"></div>
           <div class="chart-enlarge-below" id="chart-enlarge-below">
@@ -914,6 +931,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=sianna-stocks-tab-10" defer></script>
+    <script src="/static/app.js?v=sianna-stocks-tab-23" defer></script>
   </body>
 </html>
