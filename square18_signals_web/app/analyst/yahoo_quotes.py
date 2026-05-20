@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Any, Optional
 
-from .constants import TICKER_MAP
+from .constants import TICKER_MAP, yfinance_disabled
 from .tradier_client import get_quotes, get_option_chain, get_option_expirations, is_configured as is_tradier_configured
 
 _YF_TIMEOUT = 12.0
@@ -31,6 +31,8 @@ def _mapped_symbol(sym: str) -> str:
 
 
 def _run_yf(fn, timeout: float = _YF_TIMEOUT) -> Any:
+    if yfinance_disabled():
+        return None
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
             return ex.submit(fn).result(timeout=timeout)

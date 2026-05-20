@@ -1,8 +1,7 @@
 """Tier-2 options intelligence: UOA (#8), term-structure slope (#9), put-call skew (#10).
 
-All data is sourced from the Yahoo Finance options chain — the same free,
-slightly delayed feed the rest of the app uses.  No new subscriptions are
-required.
+Data is sourced from Tradier options chains when configured, with Yahoo
+as a best-effort fallback.
 
 What each signal does
 ---------------------
@@ -34,6 +33,8 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+
+from .constants import yfinance_disabled
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 _CHAIN_LOCK = threading.Lock()
@@ -67,7 +68,7 @@ class ChainSnapshot:
     expiries: list[str]          # ISO date strings, sorted ascending
     calls: list[dict]            # rows: strike, volume, openInterest, impliedVolatility
     puts: list[dict]
-    source: str                  # "yfinance" | "unavailable"
+    source: str                  # "tradier" | "yfinance" | "unavailable"
 
 
 @dataclass
@@ -159,7 +160,13 @@ def _fetch_chain(sym: str, spot: float, bypass_cache: bool = False) -> ChainSnap
         except Exception as e:
             print(f"Tradier options flow fetch failed: {e}")
 
-    # Fallback to Yahoo
+    # Fallback to Yahoo (unless strict mode disables all Yahoo paths)
+    if yfinance_disabled():
+        snap = ChainSnapshot(sym=u, spot=spot, expiries=[], calls=[], puts=[], source="unavailable")
+        with _CHAIN_LOCK:
+            _CHAIN_CACHE[u] = (time.time(), snap)
+        return snap
+
     def _pull() -> ChainSnapshot:
         try:
             import yfinance as yf  # type: ignore
@@ -402,7 +409,7 @@ def get_options_flow(
 
     Returns an ``OptionsFlowBlock`` with ``flow_score_adj`` capped at
     ±MAX_FLOW_ADJ.  Always returns a valid object; falls back gracefully
-    when Yahoo is unreachable.
+    when market data is unreachable.
     """
     try:
         snap = _fetch_chain(sym, spot, bypass_cache=bypass_cache)

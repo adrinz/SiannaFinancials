@@ -111,7 +111,7 @@ class TradePlan(BaseModel):
     strike: float
     expiry_date: str  # ISO date, e.g. "2026-05-22"
     expiry_dte: int
-    estimated_premium: Optional[float]        # per-share: Yahoo chain mid if available, else BS
+    estimated_premium: Optional[float]        # per-share: live chain mid if available, else BS
     cost_per_contract: Optional[float]        # 100 × premium (listed equity contract multiplier)
     spot_at_entry: float
     break_even: Optional[float]
@@ -202,7 +202,7 @@ class ReportOut(BaseModel):
     sector: str
     timeframe: Literal["1h", "4h", "daily", "weekly"]
     as_of: str
-    source: str  # yfinance | synthetic
+    source: str  # tradier | yfinance | synthetic
     verdict: Verdict
     conviction: float  # 0..1
     composite_score: float  # -1..+1

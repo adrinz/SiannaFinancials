@@ -1,6 +1,7 @@
 """Shared constants for the analyst module."""
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 Timeframe = Literal["1h", "4h", "daily", "weekly"]
@@ -130,3 +131,9 @@ ANCHOR_PRICES: dict[str, float] = {
 # Typical market hours (ET) — 6.5 hours = 6 full 1h bars + a short 0.5h bar
 # we collapse into the preceding bar to keep things tidy.
 HOURS_PER_SESSION = 7  # 09:30-10:30, 10:30-11:30, ..., 15:30-16:00 rounded up
+
+
+def yfinance_disabled() -> bool:
+    """Return True when Yahoo paths are explicitly disabled via env."""
+    raw = str(os.environ.get("SQUARE18_DISABLE_YF", "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}

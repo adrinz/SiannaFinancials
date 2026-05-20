@@ -2,8 +2,8 @@
 
 These functions compose data from the existing analyst pipeline
 (``overview_rows``) plus a handful of additional live calls (crypto via
-yfinance, news via CNBC and MarketWatch RSS) and return shapes the Dashboard
-UI can render without additional backend calls.
+yfinance with CoinGecko fallback, news via CNBC and MarketWatch RSS) and
+return shapes the Dashboard UI can render without additional backend calls.
 
 Design
 ------
@@ -19,13 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import json
 import re
 from statistics import mean
 from typing import Optional
 import urllib.request
 import xml.etree.ElementTree as ET
 
-from .constants import TICKERS, Timeframe
+from .constants import TICKERS, Timeframe, yfinance_disabled
 from .data import _threaded_with_timeout, _YF_REQUEST_TIMEOUT
 from .models import OverviewRow
 from .report import overview_rows
@@ -206,6 +207,14 @@ CRYPTO_SYMBOLS: list[dict] = [
     {"symbol": "ADA-USD",  "name": "Cardano"},
     {"symbol": "AVAX-USD", "name": "Avalanche"},
     {"symbol": "LINK-USD", "name": "Chainlink"},
+    {"symbol": "BNB-USD",  "name": "BNB"},
+    {"symbol": "TRX-USD",  "name": "TRON"},
+    {"symbol": "SUI-USD",  "name": "Sui"},
+    {"symbol": "TON-USD",  "name": "Toncoin"},
+    {"symbol": "SHIB-USD", "name": "Shiba Inu"},
+    {"symbol": "LTC-USD",  "name": "Litecoin"},
+    {"symbol": "BCH-USD",  "name": "Bitcoin Cash"},
+    {"symbol": "DOT-USD",  "name": "Polkadot"},
 ]
 
 
@@ -225,55 +234,139 @@ class CryptoSnapshot:
     source: str
 
 
+def _fetch_coinmarketcap_snapshot() -> list[CryptoRow]:
+    """Fallback crypto feed using public CoinMarketCap data API."""
+    url = (
+        "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing"
+        "?start=1&limit=200&sortBy=market_cap&sortType=desc&convert=USD"
+        "&cryptoType=all&tagType=all"
+    )
+    req = urllib.request.Request(url, headers=_RSS_HTTP_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    rows_raw = (
+        (payload.get("data") or {}).get("cryptoCurrencyList")
+        if isinstance(payload.get("data"), dict)
+        else None
+    )
+    if not isinstance(rows_raw, list):
+        return []
+
+    by_symbol = {
+        str(item.get("symbol", "")).upper(): item
+        for item in rows_raw
+        if isinstance(item, dict) and item.get("symbol")
+    }
+
+    out: list[CryptoRow] = []
+    for meta in CRYPTO_SYMBOLS:
+        sym = str(meta["symbol"]).replace("-USD", "").upper()
+        item = by_symbol.get(sym)
+        if not item:
+            continue
+        quotes = item.get("quotes")
+        quote = quotes[0] if isinstance(quotes, list) and quotes else {}
+        if not isinstance(quote, dict):
+            quote = {}
+        try:
+            last = float(quote.get("price"))
+        except Exception:
+            continue
+        c24 = quote.get("percentChange24h")
+        c7 = quote.get("percentChange7d")
+        high24 = quote.get("high24h")
+        low24 = quote.get("low24h")
+        # Listing endpoint does not provide sparkline; build a bounded proxy
+        # from low/high/current so the tile remains informative.
+        spark: list[float] = []
+        try:
+            hi = float(high24)
+            lo = float(low24)
+            if hi > 0 and lo > 0 and hi >= lo:
+                mid = (hi + lo) / 2
+                spark = [
+                    lo,
+                    lo * 1.01,
+                    mid * 0.99,
+                    mid * 1.01,
+                    hi * 0.995,
+                    last,
+                ]
+        except Exception:
+            spark = []
+        out.append(
+            CryptoRow(
+                symbol=meta["symbol"],  # keep -USD shape for UI consistency
+                name=meta["name"],
+                last=round(last, 4 if last < 1 else 2),
+                change_pct_24h=round(float(c24 or 0.0), 2),
+                change_pct_7d=round(float(c7 or 0.0), 2),
+                spark=spark if spark else [last],
+            )
+        )
+    return out
+
+
 def crypto_snapshot() -> CryptoSnapshot:
     rows: list[CryptoRow] = []
     source = "yfinance"
-    try:
-        import yfinance as yf  # type: ignore
-    except Exception:
-        return CryptoSnapshot(rows=[], source="unavailable")
-
-    for meta in CRYPTO_SYMBOLS:
+    if not yfinance_disabled():
         try:
-            sym = meta["symbol"]
-
-            def _pull_hist():
-                t = yf.Ticker(sym)
-                return t.history(
-                    period="60d", interval="1d", auto_adjust=True, actions=False
-                )
-
-            # Same hard cap as OHLCV so a stuck Yahoo socket cannot block the dashboard.
-            hist = _threaded_with_timeout(
-                _pull_hist, min(45.0, _YF_REQUEST_TIMEOUT)
-            )
-            if hist is None or hist.empty or "Close" not in hist.columns:
-                continue
-            hist = hist.dropna(subset=["Close"])
-            if hist.empty:
-                continue
-            closes = [float(x) for x in hist["Close"].tolist()]
-            last = closes[-1]
-            prev = closes[-2] if len(closes) >= 2 else last
-            wk_ago = closes[-8] if len(closes) >= 8 else closes[0]
-            change_24h = (last / prev - 1) * 100 if prev else 0.0
-            change_7d = (last / wk_ago - 1) * 100 if wk_ago else 0.0
-            spark = closes[-30:]
-            rows.append(
-                CryptoRow(
-                    symbol=meta["symbol"],
-                    name=meta["name"],
-                    last=round(last, 4 if last < 1 else 2),
-                    change_pct_24h=round(change_24h, 2),
-                    change_pct_7d=round(change_7d, 2),
-                    spark=spark,
-                )
-            )
+            import yfinance as yf  # type: ignore
         except Exception:
-            continue
+            yf = None
+
+        if yf is not None:
+            for meta in CRYPTO_SYMBOLS:
+                try:
+                    sym = meta["symbol"]
+
+                    def _pull_hist():
+                        t = yf.Ticker(sym)
+                        return t.history(
+                            period="60d", interval="1d", auto_adjust=True, actions=False
+                        )
+
+                    # Same hard cap as OHLCV so a stuck Yahoo socket cannot block the dashboard.
+                    hist = _threaded_with_timeout(
+                        _pull_hist, min(45.0, _YF_REQUEST_TIMEOUT)
+                    )
+                    if hist is None or hist.empty or "Close" not in hist.columns:
+                        continue
+                    hist = hist.dropna(subset=["Close"])
+                    if hist.empty:
+                        continue
+                    closes = [float(x) for x in hist["Close"].tolist()]
+                    last = closes[-1]
+                    prev = closes[-2] if len(closes) >= 2 else last
+                    wk_ago = closes[-8] if len(closes) >= 8 else closes[0]
+                    change_24h = (last / prev - 1) * 100 if prev else 0.0
+                    change_7d = (last / wk_ago - 1) * 100 if wk_ago else 0.0
+                    spark = closes[-30:]
+                    rows.append(
+                        CryptoRow(
+                            symbol=meta["symbol"],
+                            name=meta["name"],
+                            last=round(last, 4 if last < 1 else 2),
+                            change_pct_24h=round(change_24h, 2),
+                            change_pct_7d=round(change_7d, 2),
+                            spark=spark,
+                        )
+                    )
+                except Exception:
+                    continue
 
     if not rows:
-        source = "unavailable"
+        rows = _fetch_coinmarketcap_snapshot()
+        if rows:
+            source = "www.coinmarketcap.com"
+        else:
+            source = "unavailable"
     return CryptoSnapshot(rows=rows, source=source)
 
 
@@ -486,54 +579,8 @@ def _build_internal_snapshot_news(limit: int) -> list[NewsItem]:
     return items[:limit]
 
 
-def _yf_ticker_headlines(symbol: str, limit: int) -> list[NewsItem]:
-    """Yahoo Finance headlines for a symbol (best-effort, short timeout)."""
-    if limit <= 0:
-        return []
-
-    def _read() -> list[NewsItem]:
-        try:
-            import yfinance as yf
-        except ImportError:
-            return []
-        try:
-            tk = yf.Ticker(symbol)
-            raw = getattr(tk, "news", None) or []
-        except Exception:
-            return []
-        out: list[NewsItem] = []
-        for ent in raw:
-            if not isinstance(ent, dict):
-                continue
-            title = (ent.get("title") or "").strip()
-            if not title:
-                continue
-            link = (ent.get("link") or "").strip()
-            pub = ent.get("providerPublishTime")
-            if isinstance(pub, (int, float)):
-                published = datetime.fromtimestamp(float(pub), tz=timezone.utc).isoformat()
-            else:
-                published = ""
-            out.append(
-                NewsItem(
-                    title=title,
-                    publisher=(ent.get("publisher") or "Yahoo Finance")[:64],
-                    url=link,
-                    related=symbol.upper(),
-                    published_at=published,
-                    summary="",
-                )
-            )
-            if len(out) >= limit:
-                break
-        return out
-
-    got = _threaded_with_timeout(_read, min(6.0, _YF_REQUEST_TIMEOUT))
-    return got if isinstance(got, list) else []
-
-
 def news_for_ticker(ticker: str, limit: int = 8) -> list[NewsItem]:
-    """Headlines that mention the ticker (RSS) plus optional Yahoo symbol news."""
+    """Headlines that mention the ticker from live RSS feeds."""
     t = ticker.upper()
     t_word = re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE)
     feed = news_feed(50)
@@ -552,14 +599,6 @@ def news_for_ticker(ticker: str, limit: int = 8) -> list[NewsItem]:
         if len(out) >= limit:
             return out
 
-    for item in _yf_ticker_headlines(t, limit - len(out)):
-        if item.title in seen:
-            continue
-        seen.add(item.title)
-        out.append(item)
-        if len(out) >= limit:
-            return out
-
     for item in feed.items:
         if item.title in seen:
             continue
@@ -571,18 +610,45 @@ def news_for_ticker(ticker: str, limit: int = 8) -> list[NewsItem]:
 
 
 def news_feed(limit: int = 12) -> NewsFeed:
-    # CNBC RSS first: one or two quick HTTP fetches, continuously updated, no
-    # per-ticker yfinance news fan-out (which is slower and often Yahoo-sourced).
-    primary = _fetch_cnbc_rss(limit)
-    if primary:
-        return NewsFeed(items=primary, source="cnbc-rss")
+    # CNBC first. If it does not fully fill the requested limit, top up from
+    # MarketWatch, then internal snapshot so the dashboard card remains populated.
+    items = _fetch_cnbc_rss(limit)
+    seen_titles = {i.title for i in items}
+    source_parts: list[str] = ["cnbc-rss"] if items else []
 
-    fallback_items = _fetch_marketwatch_rss(limit)
-    if fallback_items:
-        return NewsFeed(items=fallback_items, source="marketwatch-rss")
+    if len(items) < limit:
+        mw_needed = max(0, limit - len(items))
+        mw_items = _fetch_marketwatch_rss(mw_needed)
+        added = 0
+        for it in mw_items:
+            if it.title in seen_titles:
+                continue
+            seen_titles.add(it.title)
+            items.append(it)
+            added += 1
+            if len(items) >= limit:
+                break
+        if added:
+            source_parts.append("marketwatch-rss")
 
+    if len(items) < limit:
+        snap_needed = max(0, limit - len(items))
+        internal_items = _build_internal_snapshot_news(snap_needed)
+        added = 0
+        for it in internal_items:
+            if it.title in seen_titles:
+                continue
+            seen_titles.add(it.title)
+            items.append(it)
+            added += 1
+            if len(items) >= limit:
+                break
+        if added:
+            source_parts.append("internal-snapshot")
+
+    if items:
+        return NewsFeed(items=items[:limit], source="+".join(source_parts))
     internal_items = _build_internal_snapshot_news(limit)
     if internal_items:
         return NewsFeed(items=internal_items, source="internal-snapshot")
-
     return NewsFeed(items=[], source="unavailable")

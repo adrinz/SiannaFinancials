@@ -17,6 +17,7 @@ sys.path.insert(0, str(_ROOT.parent / "square18_signals" / "src"))
 
 from app.analyst import earnings as earnings_mod  # noqa: E402
 from app.analyst import movers as movers_mod  # noqa: E402
+from app.analyst import report as report_mod  # noqa: E402
 from app.analyst import universe as universe_mod  # noqa: E402
 from app.analyst.constants import TICKER_MAP, TICKERS  # noqa: E402
 from app.main import app  # noqa: E402
@@ -453,6 +454,21 @@ def test_earnings_within_window_falls_back_when_yf_missing_symbol(monkeypatch):
 
     out = earnings_mod.earnings_within_window_days("NVDA", {}, window_days=7)
     assert out == (sample[0].earnings_date, 1)
+
+
+def test_overview_rows_cacheable_threshold():
+    assert report_mod._overview_rows_cacheable([], 36) is False
+    assert report_mod._overview_rows_cacheable([object()] * 17, 36) is False
+    assert report_mod._overview_rows_cacheable([object()] * 18, 36) is True
+
+
+def test_overview_rows_does_not_cache_empty(monkeypatch):
+    report_mod.reset_overview_rows_cache()
+    monkeypatch.setattr(report_mod, "_safe_build_report", lambda _s, _tf: None)
+    rows = report_mod.overview_rows("daily")
+    assert rows == []
+    with report_mod._overview_lock:
+        assert not report_mod._overview_rows_cache
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
 """FastAPI entry point for the Sianna Financials web app."""
 from __future__ import annotations
 
+import logging
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -59,6 +61,25 @@ app = FastAPI(
 )
 
 _STATIC_DIR = _HERE.parent / "static"
+_log = logging.getLogger(__name__)
+
+
+def _warm_analyst_overview_cache() -> None:
+    """Pre-build daily overview so Analyst tab is not empty on first open."""
+    try:
+        overview_rows("daily")  # type: ignore[arg-type]
+        _log.info("Warmed analyst overview cache (daily)")
+    except Exception as exc:
+        _log.warning("Analyst overview warm-up skipped: %s", exc)
+
+
+@app.on_event("startup")
+def _startup_warm_overview() -> None:
+    threading.Thread(
+        target=_warm_analyst_overview_cache,
+        name="overview-warm-daily",
+        daemon=True,
+    ).start()
 
 
 @app.get("/api/regime", response_model=RegimeEnvelope, tags=["dashboard"])

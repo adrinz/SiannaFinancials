@@ -3168,6 +3168,7 @@ const analyst = {
   activeSymbol: null,
   timeframe: 'daily',
   overview: [],
+  _overviewReqId: 0,
   reports: {}, // key = sym|tf
   /** "SYMBOL|range" (client chart range) -> GET /api/ticker payload */
   tickerDetails: {},
@@ -3315,22 +3316,50 @@ function renderTickerStrip() {
 
 async function loadAnalystOverview() {
   const list = $('#overview-list');
-  list.innerHTML = '<div class="muted" style="padding:10px 12px;">Loading…</div>';
   const allRec = $('#all-recs-tbody');
-  if (allRec) allRec.innerHTML = '<tr><td colspan="9" class="loading">Computing all recommendations…</td></tr>';
+  const reqId = ++analyst._overviewReqId;
+  const tf = analyst.timeframe;
+
+  const setLoading = (msg) => {
+    if (list) list.innerHTML = `<div class="muted" style="padding:10px 12px;">${msg}</div>`;
+    if (allRec) {
+      allRec.innerHTML = `<tr><td colspan="9" class="loading">${msg}</td></tr>`;
+    }
+  };
+
+  setLoading('Computing all recommendations…');
+
+  const fetchOverview = () =>
+    api(`/api/analyst/overview?timeframe=${encodeURIComponent(tf)}`);
+
   try {
-    const rows = await api(
-      `/api/analyst/overview?timeframe=${encodeURIComponent(analyst.timeframe)}`
-    );
+    let rows = await fetchOverview();
+    if (!rows.length) {
+      setLoading('Overview still computing — retrying…');
+      await new Promise((r) => setTimeout(r, 2500));
+      if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
+      rows = await fetchOverview();
+    }
+    if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
+
     analyst.overview = rows;
     renderOverviewList();
     renderAllRecsTable();
     renderTickerStrip();
-    const firstSource = rows.find((r) => r.source)?.source || '—';
-    $('#analyst-source').textContent = firstSource;
+    const srcEl = $('#analyst-source');
+    if (srcEl) {
+      srcEl.textContent = rows.find((r) => r.source)?.source || '—';
+    }
+    if (!rows.length) {
+      setLoading(
+        'No overview data yet — server may still be warming up. Click Refresh or wait a moment.',
+      );
+    }
   } catch (e) {
-    list.innerHTML = `<div class="muted" style="padding:10px 12px;">Failed: ${e}</div>`;
-    if (allRec) allRec.innerHTML = `<tr><td colspan="9" class="loading">Failed: ${e}</td></tr>`;
+    if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
+    const err = escapeHtml(String(e));
+    if (list) list.innerHTML = `<div class="muted" style="padding:10px 12px;">Failed: ${err}</div>`;
+    if (allRec) allRec.innerHTML = `<tr><td colspan="9" class="loading">Failed: ${err}</td></tr>`;
   }
 }
 

@@ -2,10 +2,11 @@
 
 Strategy
 --------
-1. Primary: ``yfinance`` if installed *and* network is available. Tries
-   once per symbol+timeframe, result is cached on disk as JSON in
+1. Primary: Tradier if configured and reachable. Tries once per
+   symbol+timeframe, result is cached on disk as JSON in
    ``~/.cache/square18_signals/ohlcv/``.
-2. Fallback: a seeded geometric Brownian motion generator that produces
+2. Secondary: ``yfinance`` when Tradier is unavailable.
+3. Fallback: a seeded geometric Brownian motion generator that produces
    a plausible 1h base series; every coarser timeframe resamples from
    it. Deterministic across calls — same symbol always yields the same
    series so the UI is stable while offline.
@@ -34,6 +35,7 @@ from .constants import (
     HOURS_PER_SESSION,
     TICKER_MAP,
     Timeframe,
+    yfinance_disabled,
 )
 
 _CACHE_DIR = Path.home() / ".cache" / "square18_signals" / "ohlcv"
@@ -92,7 +94,7 @@ class OHLCV:
     low: list[float]
     close: list[float]
     volume: list[float]
-    source: str  # "yfinance" | "synthetic"
+    source: str  # "tradier" | "yfinance" | "synthetic"
 
     def __len__(self) -> int:
         return len(self.close)
@@ -261,6 +263,8 @@ def _fetch_tradier(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
         return None
 
 def _fetch_yfinance(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
+    if yfinance_disabled():
+        return None
     global _YF_FAIL_STREAK, _YF_CIRCUIT_UNTIL  # noqa: PLW0603
     now = time.time()
     with _YF_CIRCUIT_LOCK:
@@ -619,21 +623,33 @@ def _fetch_tradier_1d_intraday(symbol: str) -> Optional[OHLCV]:
     start_dt = end_dt - timedelta(days=5)
 
     try:
-        # Try 1min first for highest resolution
-        data = get_timesales(
-            symbol, 
-            "1min", 
-            start_dt.strftime("%Y-%m-%d %H:%M"), 
+        # 1min is preferred, but some feeds can lag for selected symbols.
+        # Pull 1min and 5min then choose the freshest payload.
+        data_1m = get_timesales(
+            symbol,
+            "1min",
+            start_dt.strftime("%Y-%m-%d %H:%M"),
             end_dt.strftime("%Y-%m-%d %H:%M")
         )
-        if not data:
-            # Fallback to 5min
-            data = get_timesales(
-                symbol, 
-                "5min", 
-                start_dt.strftime("%Y-%m-%d %H:%M"), 
-                end_dt.strftime("%Y-%m-%d %H:%M")
-            )
+        data_5m = get_timesales(
+            symbol,
+            "5min",
+            start_dt.strftime("%Y-%m-%d %H:%M"),
+            end_dt.strftime("%Y-%m-%d %H:%M")
+        )
+
+        def _latest_epoch(rows: list[dict]) -> int:
+            if not rows:
+                return -1
+            try:
+                vals = [int(r.get("timestamp") or 0) for r in rows]
+                return max(vals) if vals else -1
+            except Exception:
+                return -1
+
+        latest_1m = _latest_epoch(data_1m)
+        latest_5m = _latest_epoch(data_5m)
+        data = data_1m if latest_1m >= latest_5m else data_5m
             
         if not data:
             return None
@@ -666,6 +682,8 @@ def _fetch_tradier_1d_intraday(symbol: str) -> Optional[OHLCV]:
 
 def _fetch_yfinance_1d_intraday(symbol: str) -> Optional[OHLCV]:
     """1m/2m/5m with extended hours, matching Yahoo's dense 1D line."""
+    if yfinance_disabled():
+        return None
 
     def _pull() -> Optional[OHLCV]:
         try:

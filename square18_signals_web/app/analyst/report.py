@@ -93,8 +93,12 @@ _build_locks_guard = threading.Lock()
 _overview_build_locks: dict[str, threading.Lock] = {}
 _overview_rows_cache: dict[str, tuple[float, list[OverviewRow]]] = {}
 OVERVIEW_ROWS_CACHE_TTL_SEC = 90.0
-OVERVIEW_MAX_WORKERS = 16
-OVERVIEW_TOTAL_TIMEOUT_SEC = 45.0
+# Too many parallel Tradier option/quote calls can throttle; 6 is a better balance.
+OVERVIEW_MAX_WORKERS = 6
+# Cold cache + concurrent Tradier pulls can exceed 45s; too low caches empty/partial
+# overview tables and the Analyst tab shows "No data" for ~90s.
+OVERVIEW_TOTAL_TIMEOUT_SEC = 120.0
+OVERVIEW_MIN_CACHE_ROWS_RATIO = 0.5
 
 
 def _lock_for_overview_key(key: str) -> threading.Lock:
@@ -120,10 +124,45 @@ def _safe_build_report(symbol: str, timeframe: Timeframe) -> ReportOut | None:
         return None
 
 
+def _overview_row_from_report(rpt: ReportOut) -> OverviewRow:
+    tp = rpt.options.trade_plan
+    return OverviewRow(
+        symbol=rpt.symbol,
+        name=rpt.name,
+        sector=rpt.sector,
+        last=round(tp.spot_at_entry, 2),
+        change_pct=round(rpt.price_action.change_pct, 2),
+        verdict=rpt.verdict,
+        conviction=rpt.conviction,
+        composite_score=rpt.composite_score,
+        rsi=round(rpt.rsi.value, 1) if rpt.rsi.value is not None else None,
+        trend=rpt.price_action.trend,
+        source=rpt.source,
+        rec_contract_type=tp.contract_type,
+        rec_strike=tp.strike,
+        rec_expiry_date=tp.expiry_date,
+        rec_expiry_dte=tp.expiry_dte,
+        rec_premium=tp.estimated_premium,
+        rec_cost_per_contract=tp.cost_per_contract,
+        rec_break_even=tp.break_even,
+        rec_target=tp.target_price,
+        rec_stop=tp.stop_loss,
+        rec_risk_reward=tp.risk_reward,
+    )
+
+
 def reset_overview_rows_cache() -> None:
     """Test helper: clear the optional overview row cache."""
     with _overview_lock:
         _overview_rows_cache.clear()
+
+
+def _overview_rows_cacheable(rows: list[OverviewRow], universe_size: int) -> bool:
+    """Only cache a full-enough snapshot — avoid poisoning UI with empty partials."""
+    if not rows:
+        return False
+    min_rows = max(5, int(universe_size * OVERVIEW_MIN_CACHE_ROWS_RATIO))
+    return len(rows) >= min_rows
 
 
 # ---------------------------------------------------------------------------
@@ -922,39 +961,42 @@ def overview_rows(
             rpt = fut.result()
             if rpt is None:
                 continue
-            tp = rpt.options.trade_plan
-            rows.append(
-                OverviewRow(
-                    symbol=rpt.symbol,
-                    name=rpt.name,
-                    sector=rpt.sector,
-                    last=round(rpt.options.trade_plan.spot_at_entry, 2),
-                    change_pct=round(rpt.price_action.change_pct, 2),
-                    verdict=rpt.verdict,
-                    conviction=rpt.conviction,
-                    composite_score=rpt.composite_score,
-                    rsi=round(rpt.rsi.value, 1) if rpt.rsi.value is not None else None,
-                    trend=rpt.price_action.trend,
-                    source=rpt.source,
-                    rec_contract_type=tp.contract_type,
-                    rec_strike=tp.strike,
-                    rec_expiry_date=tp.expiry_date,
-                    rec_expiry_dte=tp.expiry_dte,
-                    rec_premium=tp.estimated_premium,
-                    rec_cost_per_contract=tp.cost_per_contract,
-                    rec_break_even=tp.break_even,
-                    rec_target=tp.target_price,
-                    rec_stop=tp.stop_loss,
-                    rec_risk_reward=tp.risk_reward,
-                )
-            )
+            rows.append(_overview_row_from_report(rpt))
         for fut in not_done:
             fut.cancel()
         ex.shutdown(wait=False, cancel_futures=True)
+
+        # Under Tradier throttling the first pass may finish only a handful — top up in
+        # a smaller second parallel burst (bounded wait, avoids 30+ sequential calls).
+        min_rows = max(5, int(len(universe) * OVERVIEW_MIN_CACHE_ROWS_RATIO))
+        if len(rows) < min_rows:
+            have = {r.symbol for r in rows}
+            missing = [m for m in universe if m["symbol"] not in have]
+            if missing:
+                ex2 = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+                fut2 = {
+                    ex2.submit(_safe_build_report, m["symbol"], timeframe): m
+                    for m in missing
+                }
+                done2, not_done2 = concurrent.futures.wait(
+                    set(fut2.keys()),
+                    timeout=60.0,
+                    return_when=concurrent.futures.ALL_COMPLETED,
+                )
+                for fut in done2:
+                    rpt = fut.result()
+                    if rpt is None:
+                        continue
+                    rows.append(_overview_row_from_report(rpt))
+                for fut in not_done2:
+                    fut.cancel()
+                ex2.shutdown(wait=False, cancel_futures=True)
+
         rows.sort(key=lambda r: r.symbol)
-        ts = time.time()
-        with _overview_lock:
-            _overview_rows_cache[key] = (ts, rows)
+        if _overview_rows_cacheable(rows, len(universe)):
+            ts = time.time()
+            with _overview_lock:
+                _overview_rows_cache[key] = (ts, rows)
     return rows
 
 
@@ -2671,7 +2713,7 @@ def _build_trade_plan(
         expiry_dt += timedelta(days=1)
     expiry_date_iso = expiry_dt.isoformat()
 
-    # Premium: Yahoo option chain (bid+ask)/2 when a listed expiry/strike exists,
+    # Premium: live option chain (bid+ask)/2 when a listed expiry/strike exists,
     # else Black–Scholes so the ticket still renders offline.
     premium: Optional[float] = None
     premium_source = "model"
@@ -2684,7 +2726,7 @@ def _build_trade_plan(
     )
     if chain_mid is not None and chain_mid > 0:
         premium = round(chain_mid, 2)
-        premium_source = "yahoo_chain"
+        premium_source = "live_chain"
     if premium is None:
         try:
             premium = round(
@@ -2738,7 +2780,7 @@ def _build_trade_plan(
 
     # ---- Rationale ---------------------------------------------------------
     if premium is not None:
-        _src = "Yahoo chain mid" if premium_source == "yahoo_chain" else "BS model"
+        _src = "Live chain mid" if premium_source == "live_chain" else "BS model"
         prem_txt = f"${premium:.2f}/sh ({_src}; ${cost:.0f}/contract)"
     else:
         prem_txt = "premium pending"

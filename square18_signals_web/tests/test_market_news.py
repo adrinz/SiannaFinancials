@@ -70,11 +70,48 @@ def test_news_feed_prefers_cnbc_rss(monkeypatch):
         return []
 
     monkeypatch.setattr(market, "_fetch_marketwatch_rss", _track_mw)
+    monkeypatch.setattr(market, "_build_internal_snapshot_news", lambda _limit: [])
     feed = market.news_feed(limit=3)
     assert feed.source == "cnbc-rss"
     assert len(feed.items) == 1
     assert feed.items[0].title == "Headline from CNBC"
-    assert called_mw["n"] == 0
+    assert called_mw["n"] == 1
+
+
+def test_news_feed_tops_up_with_marketwatch_when_cnbc_short(monkeypatch):
+    monkeypatch.setattr(
+        market,
+        "_fetch_cnbc_rss",
+        lambda limit: [
+            market.NewsItem(
+                title="CNBC primary",
+                publisher="CNBC",
+                url="https://www.cnbc.com/example",
+                related="MKT",
+                published_at="2026-04-22T12:00:00+00:00",
+                summary="",
+            )
+        ][:limit],
+    )
+    monkeypatch.setattr(
+        market,
+        "_fetch_marketwatch_rss",
+        lambda limit: [
+            market.NewsItem(
+                title=f"MW {i}",
+                publisher="MarketWatch",
+                url=f"https://example.com/mw-{i}",
+                related="MKT",
+                published_at="2026-04-22T12:15:00+00:00",
+                summary="fallback",
+            )
+            for i in range(limit)
+        ],
+    )
+    feed = market.news_feed(limit=4)
+    assert feed.source == "cnbc-rss+marketwatch-rss"
+    assert len(feed.items) == 4
+    assert feed.items[0].title == "CNBC primary"
 
 
 def test_news_feed_uses_marketwatch_when_cnbc_empty(monkeypatch):
@@ -93,10 +130,47 @@ def test_news_feed_uses_marketwatch_when_cnbc_empty(monkeypatch):
             )
         ][:limit],
     )
+    monkeypatch.setattr(market, "_build_internal_snapshot_news", lambda _limit: [])
     feed = market.news_feed(limit=3)
     assert feed.source == "marketwatch-rss"
     assert len(feed.items) == 1
     assert feed.items[0].title == "Fallback headline"
+
+
+def test_news_feed_tops_up_with_internal_snapshot_when_external_short(monkeypatch):
+    monkeypatch.setattr(
+        market,
+        "_fetch_cnbc_rss",
+        lambda limit: [
+            market.NewsItem(
+                title="CNBC only one",
+                publisher="CNBC",
+                url="https://www.cnbc.com/example",
+                related="MKT",
+                published_at="2026-04-22T12:00:00+00:00",
+                summary="",
+            )
+        ][:limit],
+    )
+    monkeypatch.setattr(market, "_fetch_marketwatch_rss", lambda _limit: [])
+    monkeypatch.setattr(
+        market,
+        "_build_internal_snapshot_news",
+        lambda limit: [
+            market.NewsItem(
+                title=f"Internal {i}",
+                publisher="Sianna Internal",
+                url="",
+                related="MKT",
+                published_at="2026-04-22T12:10:00+00:00",
+                summary="snapshot",
+            )
+            for i in range(limit)
+        ],
+    )
+    feed = market.news_feed(limit=4)
+    assert feed.source == "cnbc-rss+internal-snapshot"
+    assert len(feed.items) == 4
 
 
 def test_news_feed_uses_internal_snapshot_when_external_sources_empty(monkeypatch):

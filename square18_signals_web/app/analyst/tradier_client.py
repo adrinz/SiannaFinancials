@@ -24,16 +24,19 @@ def _get_base_url() -> str:
 def is_configured() -> bool:
     return bool(os.environ.get("TRADIER_API_KEY"))
 
-def get_quotes(symbols: List[str]) -> List[Dict[str, Any]]:
+def get_quotes(symbols: List[str], include_greeks: bool = True) -> List[Dict[str, Any]]:
     """Fetch quotes for one or more symbols."""
     if not is_configured() or not symbols:
         return []
     
     url = f"{_get_base_url()}/markets/quotes"
     try:
+        params = {"symbols": ",".join(symbols)}
+        if include_greeks:
+            params["greeks"] = "true"
         resp = requests.get(
             url,
-            params={"symbols": ",".join(symbols), "greeks": "true"},
+            params=params,
             headers=_get_headers(),
             timeout=10.0
         )

@@ -2,15 +2,15 @@
 
 Unlike ``build_report`` which is keyed to the curated TICKER_MAP, this
 module accepts any ticker symbol (or common company name) and resolves
-it via yfinance. The resulting plan is **stock-centric** (entry / target /
-stop in dollars) rather than an options ticket, which is the right shape
-for a search result card.
+it via Tradier when available (with yfinance as fallback). The resulting
+plan is **stock-centric** (entry / target / stop in dollars) rather than
+an options ticket, which is the right shape for a search result card.
 
 Design
 ------
 1. ``resolve_symbol(query)`` — turn "apple", "Apple Inc", or "aapl" into
-   a canonical ticker + human name + sector. Uses yfinance.Search when
-   available, falls back to direct symbol probing.
+   a canonical ticker + human name + sector. Uses deterministic aliases,
+   then yfinance.Search for free-text discovery, then direct probing.
 2. ``build_stock_plan(report)`` — derive Buy/Sell/Hold + entry/target/
    stop from an already-computed ``ReportOut``. The math is intentionally
    rule-based so the recommendation is reproducible.
@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from .constants import TICKER_MAP, Timeframe
+from .constants import TICKER_MAP, Timeframe, yfinance_disabled
 from .data import get_ohlcv
 from .models import ReportOut
 from .report import build_report
@@ -152,6 +152,8 @@ def resolve_symbol(query: str) -> ResolvedSymbol | None:
 
 def _yfinance_search(q: str) -> list[str]:
     """Best-effort free-text → [symbol,...] via yfinance.Search."""
+    if yfinance_disabled():
+        return []
     try:
         import yfinance as yf  # type: ignore
         # yfinance.Search appears in 0.2.50+. Guard for older versions.
@@ -174,8 +176,8 @@ def _probe_symbol(sym: str) -> ResolvedSymbol | None:
     """Return metadata for ``sym`` if we can find it, else None.
 
     Curated tickers are resolved from ``TICKER_MAP`` directly (no network
-    roundtrip); everything else hits ``yfinance.Ticker(sym).info`` and is
-    accepted only if the symbol has a real short name + market.
+    roundtrip); everything else probes Tradier first, then falls back to
+    ``yfinance.Ticker(sym).info``.
     """
     sym = sym.upper()
     meta = TICKER_MAP.get(sym)
@@ -185,6 +187,27 @@ def _probe_symbol(sym: str) -> ResolvedSymbol | None:
             name=meta["name"],
             sector=meta["sector"],
         )
+
+    # Prefer Tradier as the primary live metadata/quote source.
+    try:
+        from .tradier_client import get_quotes, is_configured as is_tradier_configured
+        if is_tradier_configured():
+            quotes = get_quotes([sym], include_greeks=False)
+            if quotes:
+                q0 = quotes[0] if isinstance(quotes, list) else {}
+                qsym = str(q0.get("symbol") or sym).upper()
+                return ResolvedSymbol(
+                    symbol=qsym,
+                    name=str(q0.get("description") or qsym),
+                    sector=str(q0.get("type") or q0.get("exch") or "—"),
+                    currency="USD",
+                    exchange=str(q0.get("exch") or ""),
+                )
+    except Exception:
+        pass
+
+    if yfinance_disabled():
+        return None
 
     try:
         import yfinance as yf  # type: ignore

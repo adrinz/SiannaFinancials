@@ -1,14 +1,13 @@
 """Market-wide movers helper for the Stock Screener.
 
-Fetches the latest two daily closes for the configured screener
-universe (S&P 500 by default) in a single batched ``yfinance.download``
-call, computes today's % change, and returns sorted top gainers /
-losers. Results are cached in-process for 10 minutes so the three
-screener cards on the same refresh cycle don't trigger a fresh
-fan-out.
+Fetches live quotes for the configured screener universe (S&P 500 by
+default) from Tradier, computes today's % change from ``prevclose``,
+and returns sorted top gainers / losers. Results are cached in-process
+for 10 minutes so the three screener cards on the same refresh cycle
+don't trigger a fresh fan-out.
 
-When the broad fetch fails (network/yfinance offline), callers should
-fall back to the curated overview pipeline. ``movers_with_fallback``
+When the broad fetch fails (network/provider offline), callers fall
+back to the curated overview pipeline. ``movers_with_fallback``
 encapsulates that decision in one place.
 
 Public surface
@@ -32,9 +31,10 @@ from .universe import sp500_universe, universe_by_symbol
 
 
 _CACHE_TTL_SECONDS = 10 * 60
+_TRADIER_QUOTE_BATCH_SIZE = 80
 _cache: dict[str, object] = {"ts": 0.0, "rows": []}
-# Jumps and dips are requested in parallel; without this, two cold calls
-# each run a full ~500-ticker yfinance download roughly doubling wait time.
+# Jumps and dips are requested in parallel; this lock avoids duplicate
+# broad-universe quote fan-out on simultaneous cold requests.
 _broad_fetch_lock = threading.Lock()
 
 
@@ -80,59 +80,51 @@ def _enrich_with_curated_signals(
 
 
 def _fetch_universe_quotes() -> list[MoverItem]:
-    """Single batched yfinance download for the whole universe.
+    """Fetch broad-universe movers from Tradier quotes.
 
-    Returns one ``MoverItem`` per symbol that produced two valid daily
-    closes. Empty list on any failure.
+    Returns one ``MoverItem`` per symbol that has both ``last`` and
+    ``prevclose``. Empty list on any failure.
     """
     universe = sp500_universe()
     if not universe:
         return []
 
+    try:
+        from .tradier_client import get_quotes, is_configured as is_tradier_configured
+    except Exception:
+        return []
+    if not is_tradier_configured():
+        return []
+
     symbols = [meta["symbol"] for meta in universe]
-    try:
-        import yfinance as yf  # type: ignore
-    except Exception:
-        return []
-
-    try:
-        # group_by="ticker" gives a top-level column per symbol so we
-        # can iterate the universe without rebuilding the frame shape.
-        df = yf.download(
-            tickers=" ".join(symbols),
-            period="3d",
-            interval="1d",
-            group_by="ticker",
-            auto_adjust=False,
-            progress=False,
-            threads=True,
-        )
-    except Exception:
-        return []
-
-    if df is None or getattr(df, "empty", True):
-        return []
-
     by_symbol = universe_by_symbol()
+    quote_rows: list[dict] = []
+    for i in range(0, len(symbols), _TRADIER_QUOTE_BATCH_SIZE):
+        chunk = symbols[i:i + _TRADIER_QUOTE_BATCH_SIZE]
+        try:
+            got = get_quotes(chunk, include_greeks=False)
+        except Exception:
+            got = []
+        if got:
+            quote_rows.extend(got)
+    if not quote_rows:
+        return []
+
     rows: list[MoverItem] = []
-    for sym in symbols:
+    for q in quote_rows:
+        sym = str(q.get("symbol") or "").upper()
+        if not sym:
+            continue
         meta = by_symbol.get(sym)
         if not meta:
             continue
         try:
-            sub = df[sym] if sym in df.columns.get_level_values(0) else None  # type: ignore[union-attr]
-        except Exception:
-            sub = None
-        if sub is None or getattr(sub, "empty", True):
-            continue
-        try:
-            closes = sub["Close"].dropna()
+            last = float(q.get("last"))
+            prev = float(q.get("prevclose"))
         except Exception:
             continue
-        if len(closes) < 2:
+        if prev <= 0 or last <= 0:
             continue
-        last = float(closes.iloc[-1])
-        prev = float(closes.iloc[-2])
         if prev == 0 or last != last or prev != prev:  # NaN guard
             continue
         change_pct = round(((last - prev) / prev) * 100.0, 2)
@@ -149,7 +141,7 @@ def _fetch_universe_quotes() -> list[MoverItem]:
 
 
 def _broad_universe_rows() -> list[MoverItem]:
-    """Cache wrapper around the batched yfinance download."""
+    """Cache wrapper around broad Tradier quote fetches."""
     now = time.time()
     cached = _cache.get("rows") or []
     if cached and now - float(_cache.get("ts") or 0) < _CACHE_TTL_SECONDS:
