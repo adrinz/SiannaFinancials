@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .constants import SCREENER_EARNINGS_WINDOW_DAYS, TICKERS
+from .constants import SCREENER_EARNINGS_WINDOW_DAYS, TICKERS, yfinance_disabled
 from .movers import _broad_universe_rows
 from .report import overview_rows, reset_overview_rows_cache
 from .universe import universe_by_symbol
@@ -209,6 +209,8 @@ def _next_earnings_date(yf, symbol: str) -> Optional[date]:
 
 
 def _curated_earnings(window_days: int) -> list[EarningsRow]:
+    if yfinance_disabled():
+        return []
     try:
         import yfinance as yf  # type: ignore
     except Exception:
@@ -314,20 +316,33 @@ def earnings_within_window_days(
     *,
     window_days: int,
 ) -> tuple[str, int] | None:
-    """Next earnings `(iso_date, days_until)` via yfinance if within ``window_days``.
+    """Next earnings `(iso_date, days_until)` if within ``window_days``.
 
-    Aligns with the screener "upcoming earnings" window — used for Analyst tab UI.
+    Tries yfinance first for single-symbol freshness, then falls back to the same
+    cached screener earnings calendar so Analyst and Screener stay consistent when
+    Yahoo is disabled or temporarily unavailable.
     """
+    sym = symbol.upper()
+    if not yfinance_disabled():
+        try:
+            import yfinance as yf  # type: ignore
+        except Exception:
+            yf = None
+        if yf is not None:
+            yf_sym = (meta.get("yfinance_symbol") or sym).upper()
+            d = _next_earnings_date(yf, yf_sym)
+            if d is not None:
+                today = date.today()
+                days_until = (d - today).days
+                if 0 <= days_until <= window_days:
+                    return (d.isoformat(), days_until)
+
+    # Fallback: use the same cached broad/curated calendar backing Screener.
     try:
-        import yfinance as yf  # type: ignore
+        rows, _ = upcoming_earnings_with_source(window_days=window_days)
     except Exception:
         return None
-    yf_sym = (meta.get("yfinance_symbol") or symbol).upper()
-    d = _next_earnings_date(yf, yf_sym)
-    if d is None:
-        return None
-    today = date.today()
-    days_until = (d - today).days
-    if days_until < 0 or days_until > window_days:
-        return None
-    return (d.isoformat(), days_until)
+    for row in rows:
+        if row.symbol == sym:
+            return (row.earnings_date, row.days_until)
+    return None

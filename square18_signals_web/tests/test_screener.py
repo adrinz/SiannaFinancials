@@ -341,6 +341,7 @@ def test_broad_earnings_filters_to_universe(monkeypatch):
 def test_upcoming_earnings_falls_back_to_curated(monkeypatch):
     """When Nasdaq is dead, helper falls back to curated yfinance walk."""
     earnings_mod.reset_cache()
+    monkeypatch.delenv("SQUARE18_DISABLE_YF", raising=False)
     today = date.today()
 
     monkeypatch.setattr(earnings_mod, "_fetch_nasdaq_day", lambda iso, timeout=6.0: [])
@@ -402,6 +403,56 @@ def test_upcoming_earnings_cache_short_circuits(monkeypatch):
     rows, source = earnings_mod.upcoming_earnings_with_source(window_days=7)
     assert source == "sp500"
     assert rows == sample
+
+
+def test_earnings_within_window_falls_back_to_calendar_when_yf_disabled(monkeypatch):
+    earnings_mod.reset_cache()
+    monkeypatch.setenv("SQUARE18_DISABLE_YF", "1")
+    today = date.today()
+    sample = [
+        earnings_mod.EarningsRow(
+            symbol="NVDA",
+            name="NVIDIA Corporation",
+            sector="Information Technology",
+            earnings_date=(today + timedelta(days=2)).isoformat(),
+            days_until=2,
+            last=900.0,
+            change_pct=1.2,
+            verdict="BULLISH",
+        )
+    ]
+    earnings_mod._cache["rows"] = sample
+    earnings_mod._cache["ts"] = __import__("time").time()
+    earnings_mod._cache["source"] = "sp500"
+
+    out = earnings_mod.earnings_within_window_days("NVDA", {}, window_days=7)
+    assert out == (sample[0].earnings_date, 2)
+
+
+def test_earnings_within_window_falls_back_when_yf_missing_symbol(monkeypatch):
+    earnings_mod.reset_cache()
+    monkeypatch.delenv("SQUARE18_DISABLE_YF", raising=False)
+    monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(Ticker=lambda _sym: object()))
+    monkeypatch.setattr(earnings_mod, "_next_earnings_date", lambda yf, symbol: None)
+    today = date.today()
+    sample = [
+        earnings_mod.EarningsRow(
+            symbol="NVDA",
+            name="NVIDIA Corporation",
+            sector="Information Technology",
+            earnings_date=(today + timedelta(days=1)).isoformat(),
+            days_until=1,
+            last=900.0,
+            change_pct=1.2,
+            verdict="BULLISH",
+        )
+    ]
+    earnings_mod._cache["rows"] = sample
+    earnings_mod._cache["ts"] = __import__("time").time()
+    earnings_mod._cache["source"] = "sp500"
+
+    out = earnings_mod.earnings_within_window_days("NVDA", {}, window_days=7)
+    assert out == (sample[0].earnings_date, 1)
 
 
 # ---------------------------------------------------------------------------
