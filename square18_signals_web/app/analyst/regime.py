@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
 _breadth_lock = threading.Lock()
 _breadth_cache: dict[str, tuple[float, float]] = {}  # tf -> (ts, pct)
+_breadth_refresh_pending: set[str] = set()
 BREADTH_CACHE_TTL_SEC = 300.0
+BREADTH_STALE_SERVE_SEC = 1800.0  # serve stale breadth up to 30m while refreshing
 
 
 def vix_quote() -> tuple[float, float]:
@@ -58,20 +60,54 @@ def _compute_breadth(timeframe: str) -> float:
     return (above / total * 100.0) if total else 50.0
 
 
+def _store_breadth(timeframe: str, pct: float) -> None:
+    with _breadth_lock:
+        _breadth_cache[timeframe] = (time.time(), pct)
+
+
+def _peek_breadth(timeframe: str) -> float | None:
+    now = time.time()
+    with _breadth_lock:
+        hit = _breadth_cache.get(timeframe)
+        if hit and (now - hit[0]) < BREADTH_STALE_SERVE_SEC:
+            return hit[1]
+    return None
+
+
+def schedule_breadth_refresh(timeframe: str = "daily") -> None:
+    """Recompute breadth in the background without blocking HTTP handlers."""
+    with _breadth_lock:
+        if timeframe in _breadth_refresh_pending:
+            return
+        _breadth_refresh_pending.add(timeframe)
+
+    def _run() -> None:
+        try:
+            pct = _compute_breadth(timeframe)
+            _store_breadth(timeframe, pct)
+        finally:
+            with _breadth_lock:
+                _breadth_refresh_pending.discard(timeframe)
+
+    threading.Thread(
+        target=_run,
+        name=f"breadth-refresh-{timeframe}",
+        daemon=True,
+    ).start()
+
+
 def breadth_above_50d(timeframe: str = "daily") -> float:
-    """Cached % of tickers above their 50-bar SMA."""
+    """Cached % of tickers above their 50-bar SMA (non-blocking on cold cache)."""
     now = time.time()
     with _breadth_lock:
         hit = _breadth_cache.get(timeframe)
         if hit and (now - hit[0]) < BREADTH_CACHE_TTL_SEC:
             return hit[1]
 
-    pct = _compute_breadth(timeframe)
+    stale = _peek_breadth(timeframe)
+    if stale is not None:
+        schedule_breadth_refresh(timeframe)
+        return stale
 
-    with _breadth_lock:
-        now2 = time.time()
-        hit2 = _breadth_cache.get(timeframe)
-        if hit2 and (now2 - hit2[0]) < BREADTH_CACHE_TTL_SEC:
-            return hit2[1]
-        _breadth_cache[timeframe] = (time.time(), pct)
-    return pct
+    schedule_breadth_refresh(timeframe)
+    return 50.0

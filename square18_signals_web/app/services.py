@@ -132,6 +132,30 @@ def _dte_pref_for(rv_rank: Optional[float]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _row_from_overview_fast(r: OverviewRow) -> TickerRowOut:
+    """Dashboard screener row without per-symbol OHLCV (fast path after idle)."""
+    iv = DEFAULT_IV.get(r.symbol, 0.30)
+    signal = _signal_for(r.verdict)
+    direction = _direction_for(r.verdict)
+    return TickerRowOut(
+        symbol=r.symbol,
+        name=r.name,
+        sector=r.sector,
+        price=r.last,
+        change_pct=r.change_pct,
+        signal=signal,          # type: ignore[arg-type]
+        direction=direction,    # type: ignore[arg-type]
+        composite_score=round(r.composite_score, 3),
+        confidence=round(r.conviction, 3),
+        rsi=round(r.rsi, 1) if r.rsi is not None else 50.0,
+        iv=round(iv, 3),
+        iv_rank=50.0,
+        iv_percentile=50.0,
+        dte_pref=_dte_pref_for(50.0),
+        earnings_in_window=False,
+    )
+
+
 def _row_from_overview(r: OverviewRow, closes: list[float]) -> TickerRowOut:
     rv, rank, pct = _rv_rank_pct(closes)
     iv = rv if rv is not None else DEFAULT_IV.get(r.symbol, 0.30)
@@ -240,7 +264,7 @@ def _regime_label(vix: float, trend_score: float, breadth_pct: float) -> str:
 
 
 def screener_rows(signal_filter: str = "all", timeframe: Timeframe = "daily") -> list[TickerRowOut]:
-    """Live signals table, driven by ``overview_rows(timeframe)``."""
+    """Live signals table from cached overview (no per-ticker OHLCV on dashboard path)."""
     rows_live = overview_rows_fast(timeframe)
     out: list[TickerRowOut] = []
     want = signal_filter.lower()
@@ -248,13 +272,7 @@ def screener_rows(signal_filter: str = "all", timeframe: Timeframe = "daily") ->
         signal = _signal_for(r.verdict)
         if want != "all" and signal.lower() != want:
             continue
-        closes: list[float] = []
-        try:
-            series = get_ohlcv(r.symbol, timeframe)
-            closes = series.close
-        except Exception:
-            closes = []
-        out.append(_row_from_overview(r, closes))
+        out.append(_row_from_overview_fast(r))
     # Buy/Sell by |composite|, Holds last.
     out.sort(key=lambda x: (x.signal == "Hold", -abs(x.composite_score)))
     return out

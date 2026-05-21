@@ -160,6 +160,146 @@ const state = {
   chartModalSource: null,
 };
 
+// Last-known dashboard payload (sessionStorage) — shown instantly after idle refresh.
+const DASHBOARD_SNAP_KEY = 'sianna-dashboard-v1';
+const DASHBOARD_SNAP_MAX_AGE_MS = 30 * 60 * 1000;
+
+function readDashboardSnapshot() {
+  try {
+    const raw = sessionStorage.getItem(DASHBOARD_SNAP_KEY);
+    if (!raw) return null;
+    const snap = JSON.parse(raw);
+    if (!snap || !snap.savedAt) return null;
+    if (Date.now() - snap.savedAt > DASHBOARD_SNAP_MAX_AGE_MS) return null;
+    return snap;
+  } catch {
+    return null;
+  }
+}
+
+function saveDashboardSnapshot(partial) {
+  try {
+    const prev = readDashboardSnapshot() || {};
+    const next = {
+      ...prev,
+      ...partial,
+      savedAt: Date.now(),
+      filter: partial.filter != null ? partial.filter : (prev.filter || state.filter),
+    };
+    sessionStorage.setItem(DASHBOARD_SNAP_KEY, JSON.stringify(next));
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+function setDashboardUpdating(on) {
+  const dash = document.querySelector('.view[data-view="dashboard"]');
+  if (dash) dash.classList.toggle('is-refreshing', !!on);
+  const scan = $('#last-scan');
+  if (!scan) return;
+  const base = scan.dataset.baseScan || scan.textContent.replace(/ · updating$/i, '');
+  if (!scan.dataset.baseScan && base && !/updating/i.test(base)) {
+    scan.dataset.baseScan = base;
+  }
+  if (on && scan.dataset.baseScan) {
+    scan.textContent = scan.dataset.baseScan + ' · updating';
+  } else if (!on && scan.dataset.baseScan) {
+    scan.textContent = scan.dataset.baseScan;
+  }
+}
+
+function restoreDashboardSnapshot() {
+  const snap = readDashboardSnapshot();
+  if (!snap) return false;
+  let restored = false;
+  if (snap.regime) {
+    renderRegime(snap.regime);
+    restored = true;
+  }
+  if (snap.pulse) {
+    const p = snap.pulse;
+    renderMovers($('#movers-gainers'), p.top_gainers, 'pos');
+    renderMovers($('#movers-losers'), p.top_losers, 'neg');
+    renderSectorHeat($('#sector-heat'), p.sector_heatmap);
+    const trail = $('#pulse-trail');
+    if (trail && p.tickers_covered != null) {
+      trail.textContent =
+        `${p.tickers_covered} tickers · ${p.breadth_pct_up.toFixed(0)}% up`;
+    }
+    const breadthEl = $('#stat-breadth');
+    if (breadthEl && p.breadth_pct_up != null) {
+      breadthEl.textContent = `${p.breadth_pct_up.toFixed(0)}%`;
+    }
+    restored = true;
+  }
+  if (snap.options) {
+    renderOptionCards($('#opts-calls'), snap.options.top_calls, 'call');
+    renderOptionCards($('#opts-puts'), snap.options.top_puts, 'put');
+    restored = true;
+  }
+  if (snap.crypto && snap.crypto.rows) {
+    const grid = $('#crypto-grid');
+    const srcEl = $('#crypto-source');
+    if (grid) {
+      if (srcEl && snap.crypto.source) srcEl.textContent = snap.crypto.source;
+      grid.innerHTML = '';
+      for (const c of snap.crypto.rows) {
+        const side24 = c.change_pct_24h >= 0 ? 'pos' : 'neg';
+        grid.append(h(
+          'div',
+          { class: `crypto-tile ${side24}` },
+          h('div', { class: 'crypto-head' },
+            h('div', { class: 'crypto-name' },
+              h('span', { class: 'crypto-sym' }, c.symbol.replace('-USD', '')),
+              h('span', { class: 'crypto-full muted' }, c.name)),
+            h('div', { class: `crypto-pct mono ${side24}` },
+              (c.change_pct_24h >= 0 ? '+' : '') + c.change_pct_24h.toFixed(2) + '%')),
+          h('div', { class: 'crypto-body' },
+            h('div', { class: 'crypto-price mono' }, fmtUSD(c.last)),
+            cryptoSpark(c.spark, side24)),
+          h('div', { class: 'crypto-foot muted mono' },
+            `24h ${c.change_pct_24h >= 0 ? '+' : ''}${c.change_pct_24h.toFixed(2)}%`)
+        ));
+      }
+      restored = true;
+    }
+  }
+  if (snap.news && snap.news.items) {
+    const ul = $('#news-list');
+    const srcEl = $('#news-source');
+    if (ul) {
+      if (srcEl && snap.news.source) srcEl.textContent = fmtNewsSource(snap.news.source);
+      ul.innerHTML = '';
+      for (const n of snap.news.items) {
+        const when = n.published_at ? fmtNewsWhen(n.published_at) : '';
+        ul.append(h(
+          'li',
+          { class: 'news-item' },
+          h('div', { class: 'news-head' },
+            h('span', { class: 'news-sym mono' }, n.related.replace('-USD', '')),
+            h('span', { class: 'news-pub muted' }, n.publisher),
+            when ? h('span', { class: 'news-time muted mono' }, when) : ''),
+          n.url
+            ? h('a', { class: 'news-title', href: n.url, target: '_blank', rel: 'noopener' }, n.title)
+            : h('div', { class: 'news-title' }, n.title),
+          n.summary ? h('div', { class: 'news-sum muted' }, shortText(n.summary, 180)) : ''
+        ));
+      }
+      fitNewsListViewport(ul, 8);
+      restored = true;
+    }
+  }
+  if (snap.screen && snap.screen.length) {
+    const want = snap.filter || 'all';
+    if (want === state.filter) {
+      state.universe = snap.screen.map((r) => r.symbol);
+      renderScreen(snap.screen);
+      restored = true;
+    }
+  }
+  return restored;
+}
+
 const SESSION_1D_MIN_ZOOM = 0.0015; // ≈1 min in a 12h range — zoom in to “minute” scale
 const TICKER_DETAIL_CACHE_TTL_MS = 90_000;
 
@@ -366,9 +506,11 @@ async function loadDashboard() {
   // overview + breadth); if it runs first, every card stayed on "Loading…"
   // until it finished. Parallelize so pulse, news, crypto, and the screener
   // can render as soon as their endpoints respond.
+  setDashboardUpdating(true);
   const regimeP = api('/api/regime')
     .then((env) => {
       renderRegime(env);
+      saveDashboardSnapshot({ regime: env });
     })
     .catch((e) => {
       const label = $('#regime-label');
@@ -386,6 +528,7 @@ async function loadDashboard() {
     loadScreen(state.filter),
   ];
   await Promise.allSettled(tasks);
+  setDashboardUpdating(false);
 }
 
 function renderRegime(env) {
@@ -395,7 +538,10 @@ function renderRegime(env) {
     const el = document.getElementById(id);
     if (el) el.textContent = val;
   };
-  set('last-scan', 'scan ' + fmtESTCompact(env.last_scan_iso));
+  const scanText = 'scan ' + fmtESTCompact(env.last_scan_iso);
+  set('last-scan', scanText);
+  const scanEl = $('#last-scan');
+  if (scanEl) scanEl.dataset.baseScan = scanText;
   set('regime-label', `Market regime: ${r.label}`);
 
   // Regime banner "pills" — populated into structured spans so each term
@@ -438,6 +584,7 @@ async function loadMarketPulse() {
     if (trail) trail.textContent =
       `${p.tickers_covered} tickers · ${p.breadth_pct_up.toFixed(0)}% up`;
     if (breadthEl) breadthEl.textContent = `${p.breadth_pct_up.toFixed(0)}%`;
+    saveDashboardSnapshot({ pulse: p });
   } catch (e) {
     gainers && (gainers.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`);
     losers && (losers.innerHTML = '');
@@ -513,6 +660,7 @@ async function loadOptionsHighlights() {
     const h_ = await api('/api/options/highlights');
     renderOptionCards(calls, h_.top_calls, 'call');
     renderOptionCards(puts, h_.top_puts, 'put');
+    saveDashboardSnapshot({ options: h_ });
   } catch (e) {
     calls && (calls.innerHTML = `<div class="loading">Failed: ${escapeHtml(String(e))}</div>`);
     puts && (puts.innerHTML = '');
@@ -618,6 +766,7 @@ async function loadCrypto() {
       );
       grid.append(tile);
     }
+    saveDashboardSnapshot({ crypto: d });
   } catch (e) {
     grid.innerHTML = `<div class="loading">Failed: ${escapeHtml(String(e))}</div>`;
   }
@@ -713,6 +862,7 @@ async function loadNews() {
       ul.append(li);
     }
     fitNewsListViewport(ul, 8);
+    saveDashboardSnapshot({ news: d });
   } catch (e) {
     ul.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`;
     ul.style.maxHeight = '';
@@ -754,11 +904,18 @@ function initFilters() {
 async function loadScreen(filter) {
   const tbody = $('#screen-tbody');
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="10" class="loading">Loading signals…</td></tr>';
+  const snap = readDashboardSnapshot();
+  const hasStaleRows =
+    snap?.screen?.length &&
+    (snap.filter === filter || snap.filter == null);
+  if (!hasStaleRows) {
+    tbody.innerHTML = '<tr><td colspan="10" class="loading">Loading signals…</td></tr>';
+  }
   try {
     const rows = await api(`/api/screen?filter=${encodeURIComponent(filter)}`);
     state.universe = rows.map((r) => r.symbol);
     renderScreen(rows);
+    saveDashboardSnapshot({ screen: rows, filter });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="10" class="loading">Failed: ${e}</td></tr>`;
   }
@@ -5424,6 +5581,7 @@ function startESTClock() {
 // ---------- Data refresh (manual + 5 min auto) ----------------------------
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DASHBOARD_WARM_MS = 4 * 60 * 1000;
 
 const refresher = {
   timer: null,
@@ -5449,6 +5607,8 @@ async function refreshAll({ reason = 'manual' } = {}) {
   etf.overview = [];
 
   try {
+    restoreDashboardSnapshot();
+    setDashboardUpdating(true);
     const analystRefreshP =
       state.view === 'analyst' || analyst.initialized
         ? (async () => {
@@ -5501,6 +5661,7 @@ async function refreshAll({ reason = 'manual' } = {}) {
     console.warn('refresh failed:', e);
   } finally {
     refresher.inFlight = false;
+    setDashboardUpdating(false);
     if (btn) btn.classList.remove('refreshing');
     scheduleNextRefresh();
   }
@@ -5525,6 +5686,12 @@ function initRefresh() {
     }
   });
   scheduleNextRefresh();
+  // Keep server caches warm while the tab stays open (reduces post-idle cold hits).
+  setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    void fetch('/api/regime').catch(() => {});
+    void fetch('/api/screen?filter=all').catch(() => {});
+  }, DASHBOARD_WARM_MS);
 }
 
 // ---------- Powered-by label ----------------------------------------------
@@ -6414,6 +6581,7 @@ function boot() {
     initChartEnlargeModal();
     initDetailChartToolbar();
     void initPoweredBy();
+    restoreDashboardSnapshot();
     void loadDashboard();
     initRefresh();
     initSignalReportMenu();
