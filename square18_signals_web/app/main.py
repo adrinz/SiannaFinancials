@@ -30,7 +30,11 @@ if load_dotenv is not None:
 from .analyst import TICKERS as ANALYST_TICKERS  # noqa: E402
 from .analyst.constants import SCREENER_EARNINGS_WINDOW_DAYS  # noqa: E402
 from .analyst import build_report, overview_rows  # noqa: E402
-from .analyst.report import etf_overview_rows  # noqa: E402
+from .analyst.report import (  # noqa: E402
+    etf_overview_rows,
+    peek_overview_rows_cache,
+    schedule_overview_rows_refresh,
+)
 from .analyst import earnings as _earnings  # noqa: E402
 from .analyst import llm as _llm  # noqa: E402
 from .analyst import market as _market  # noqa: E402
@@ -65,12 +69,11 @@ _log = logging.getLogger(__name__)
 
 
 def _warm_analyst_overview_cache() -> None:
-    """Pre-build daily overview so Analyst tab is not empty on first open."""
-    try:
-        overview_rows("daily")  # type: ignore[arg-type]
-        _log.info("Warmed analyst overview cache (daily)")
-    except Exception as exc:
-        _log.warning("Analyst overview warm-up skipped: %s", exc)
+    """Kick off a background daily overview build (non-blocking for HTTP workers)."""
+    from .analyst.report import schedule_overview_rows_refresh
+
+    schedule_overview_rows_refresh("daily", min_age_sec=0.0)  # type: ignore[arg-type]
+    _log.info("Scheduled analyst overview warm-up (daily)")
 
 
 @app.on_event("startup")
@@ -129,10 +132,22 @@ def analyst_tickers() -> list[TickerMeta]:
 
 
 @app.get("/api/analyst/overview", response_model=list[OverviewRow], tags=["analyst"])
-def analyst_overview(timeframe: str = "daily") -> list[OverviewRow]:
+def analyst_overview(
+    timeframe: str = "daily",
+    fresh: bool = Query(
+        False,
+        description="Force a blocking rebuild. Default serves warm cache and refreshes in background.",
+    ),
+) -> list[OverviewRow]:
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
-    return overview_rows(timeframe)  # type: ignore[arg-type]
+    tf = timeframe  # type: ignore[assignment]
+    if not fresh:
+        cached = peek_overview_rows_cache(tf)
+        if cached:
+            schedule_overview_rows_refresh(tf)
+            return cached
+    return overview_rows(tf, fresh=fresh)  # type: ignore[arg-type]
 
 
 @app.get("/api/etf/signals", response_model=list[OverviewRow], tags=["etf"])

@@ -462,6 +462,16 @@ def test_overview_rows_cacheable_threshold():
     assert report_mod._overview_rows_cacheable([object()] * 18, 36) is True
 
 
+def test_peek_overview_rows_cache_returns_warm_snapshot():
+    report_mod.reset_overview_rows_cache()
+    sample = [object()] * 20
+    key = report_mod._overview_cache_key("daily", None)
+    report_mod._overview_rows_cache[key] = (__import__("time").time(), sample)
+    hit = report_mod.peek_overview_rows_cache("daily")
+    assert hit is not None
+    assert len(hit) == 20
+
+
 def test_overview_rows_does_not_cache_empty(monkeypatch):
     report_mod.reset_overview_rows_cache()
     monkeypatch.setattr(report_mod, "_safe_build_report", lambda _s, _tf: None)

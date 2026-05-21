@@ -92,7 +92,9 @@ _overview_lock = threading.Lock()
 _build_locks_guard = threading.Lock()
 _overview_build_locks: dict[str, threading.Lock] = {}
 _overview_rows_cache: dict[str, tuple[float, list[OverviewRow]]] = {}
-OVERVIEW_ROWS_CACHE_TTL_SEC = 90.0
+_overview_refresh_pending: set[str] = set()
+_overview_building: set[str] = set()
+OVERVIEW_ROWS_CACHE_TTL_SEC = 300.0
 # Too many parallel Tradier option/quote calls can throttle; 6 is a better balance.
 OVERVIEW_MAX_WORKERS = 6
 # Cold cache + concurrent Tradier pulls can exceed 45s; too low caches empty/partial
@@ -155,6 +157,72 @@ def reset_overview_rows_cache() -> None:
     """Test helper: clear the optional overview row cache."""
     with _overview_lock:
         _overview_rows_cache.clear()
+        _overview_refresh_pending.clear()
+        _overview_building.clear()
+
+
+def peek_overview_rows_cache(
+    timeframe: Timeframe = "daily",
+    *,
+    metas: list[dict] | None = None,
+) -> list[OverviewRow] | None:
+    """Return a warm cache snapshot without triggering a build."""
+    key = _overview_cache_key(timeframe, metas)
+    now = time.time()
+    with _overview_lock:
+        hit = _overview_rows_cache.get(key)
+        if hit and (now - hit[0]) < OVERVIEW_ROWS_CACHE_TTL_SEC:
+            return list(hit[1])
+    return None
+
+
+def schedule_overview_rows_refresh(
+    timeframe: Timeframe = "daily",
+    *,
+    metas: list[dict] | None = None,
+    min_age_sec: float = 180.0,
+) -> None:
+    """Rebuild overview in the background (stale-while-revalidate for the UI)."""
+    key = _overview_cache_key(timeframe, metas)
+    now = time.time()
+    with _overview_lock:
+        if key in _overview_refresh_pending or key in _overview_building:
+            return
+        hit = _overview_rows_cache.get(key)
+        if hit is not None and (now - hit[0]) < min_age_sec:
+            return
+        _overview_refresh_pending.add(key)
+
+    def _run() -> None:
+        try:
+            overview_rows(timeframe, metas=metas, fresh=True)
+        finally:
+            with _overview_lock:
+                _overview_refresh_pending.discard(key)
+
+    threading.Thread(
+        target=_run,
+        name=f"overview-refresh-{key}",
+        daemon=True,
+    ).start()
+
+
+def overview_rows_fast(
+    timeframe: Timeframe = "daily",
+    *,
+    metas: list[dict] | None = None,
+) -> list[OverviewRow]:
+    """Non-blocking dashboard read: never hold HTTP requests on a cold full rebuild."""
+    cached = peek_overview_rows_cache(timeframe, metas=metas)
+    if cached is not None:
+        schedule_overview_rows_refresh(timeframe, metas=metas)
+        return cached
+    key = _overview_cache_key(timeframe, metas)
+    with _overview_lock:
+        if key in _overview_building or key in _overview_refresh_pending:
+            return []
+    schedule_overview_rows_refresh(timeframe, metas=metas, min_age_sec=0.0)
+    return []
 
 
 def _overview_rows_cacheable(rows: list[OverviewRow], universe_size: int) -> bool:
@@ -918,86 +986,96 @@ def build_report(
     )
 
 
+def _compute_overview_rows(
+    timeframe: Timeframe,
+    universe: list[dict],
+) -> list[OverviewRow]:
+    """Heavy Tradier/yfinance fan-out — must not run under per-key build locks."""
+    rows: list[OverviewRow] = []
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=OVERVIEW_MAX_WORKERS)
+    fut_to_meta = {
+        ex.submit(_safe_build_report, meta["symbol"], timeframe): meta
+        for meta in universe
+    }
+    done, not_done = concurrent.futures.wait(
+        set(fut_to_meta.keys()),
+        timeout=OVERVIEW_TOTAL_TIMEOUT_SEC,
+        return_when=concurrent.futures.ALL_COMPLETED,
+    )
+    for fut in done:
+        rpt = fut.result()
+        if rpt is None:
+            continue
+        rows.append(_overview_row_from_report(rpt))
+    for fut in not_done:
+        fut.cancel()
+    ex.shutdown(wait=False, cancel_futures=True)
+
+    min_rows = max(5, int(len(universe) * OVERVIEW_MIN_CACHE_ROWS_RATIO))
+    if len(rows) < min_rows:
+        have = {r.symbol for r in rows}
+        missing = [m for m in universe if m["symbol"] not in have]
+        if missing:
+            ex2 = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+            fut2 = {
+                ex2.submit(_safe_build_report, m["symbol"], timeframe): m
+                for m in missing
+            }
+            done2, not_done2 = concurrent.futures.wait(
+                set(fut2.keys()),
+                timeout=60.0,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+            for fut in done2:
+                rpt = fut.result()
+                if rpt is None:
+                    continue
+                rows.append(_overview_row_from_report(rpt))
+            for fut in not_done2:
+                fut.cancel()
+            ex2.shutdown(wait=False, cancel_futures=True)
+
+    rows.sort(key=lambda r: r.symbol)
+    return rows
+
+
 def overview_rows(
     timeframe: Timeframe = "daily",
     *,
     metas: list[dict] | None = None,
+    fresh: bool = False,
 ) -> list[OverviewRow]:
     """Compact verdict + recommendation for every entry in *metas* (default: ``TICKERS``)."""
     key = _overview_cache_key(timeframe, metas)
-    now = time.time()
-    with _overview_lock:
-        hit = _overview_rows_cache.get(key)
-        if (
-            hit
-            and (now - hit[0]) < OVERVIEW_ROWS_CACHE_TTL_SEC
-        ):
-            return list(hit[1])
+    if not fresh:
+        cached = peek_overview_rows_cache(timeframe, metas=metas)
+        if cached is not None:
+            return cached
 
     b_lock = _lock_for_overview_key(key)
     with b_lock:
-        now2 = time.time()
+        if not fresh:
+            cached = peek_overview_rows_cache(timeframe, metas=metas)
+            if cached is not None:
+                return cached
         with _overview_lock:
-            hit2 = _overview_rows_cache.get(key)
-            if (
-                hit2
-                and (now2 - hit2[0]) < OVERVIEW_ROWS_CACHE_TTL_SEC
-            ):
-                return list(hit2[1])
+            if key in _overview_building:
+                stale = peek_overview_rows_cache(timeframe, metas=metas)
+                if stale is not None:
+                    return stale
+                return []
+            _overview_building.add(key)
 
+    try:
         universe = metas if metas is not None else TICKERS
-        rows: list[OverviewRow] = []
-        ex = concurrent.futures.ThreadPoolExecutor(max_workers=OVERVIEW_MAX_WORKERS)
-        fut_to_meta = {
-            ex.submit(_safe_build_report, meta["symbol"], timeframe): meta
-            for meta in universe
-        }
-        done, not_done = concurrent.futures.wait(
-            set(fut_to_meta.keys()),
-            timeout=OVERVIEW_TOTAL_TIMEOUT_SEC,
-            return_when=concurrent.futures.ALL_COMPLETED,
-        )
-        for fut in done:
-            rpt = fut.result()
-            if rpt is None:
-                continue
-            rows.append(_overview_row_from_report(rpt))
-        for fut in not_done:
-            fut.cancel()
-        ex.shutdown(wait=False, cancel_futures=True)
-
-        # Under Tradier throttling the first pass may finish only a handful — top up in
-        # a smaller second parallel burst (bounded wait, avoids 30+ sequential calls).
-        min_rows = max(5, int(len(universe) * OVERVIEW_MIN_CACHE_ROWS_RATIO))
-        if len(rows) < min_rows:
-            have = {r.symbol for r in rows}
-            missing = [m for m in universe if m["symbol"] not in have]
-            if missing:
-                ex2 = concurrent.futures.ThreadPoolExecutor(max_workers=4)
-                fut2 = {
-                    ex2.submit(_safe_build_report, m["symbol"], timeframe): m
-                    for m in missing
-                }
-                done2, not_done2 = concurrent.futures.wait(
-                    set(fut2.keys()),
-                    timeout=60.0,
-                    return_when=concurrent.futures.ALL_COMPLETED,
-                )
-                for fut in done2:
-                    rpt = fut.result()
-                    if rpt is None:
-                        continue
-                    rows.append(_overview_row_from_report(rpt))
-                for fut in not_done2:
-                    fut.cancel()
-                ex2.shutdown(wait=False, cancel_futures=True)
-
-        rows.sort(key=lambda r: r.symbol)
+        rows = _compute_overview_rows(timeframe, universe)
         if _overview_rows_cacheable(rows, len(universe)):
-            ts = time.time()
             with _overview_lock:
-                _overview_rows_cache[key] = (ts, rows)
-    return rows
+                _overview_rows_cache[key] = (time.time(), rows)
+        return rows
+    finally:
+        with _overview_lock:
+            _overview_building.discard(key)
 
 
 def etf_overview_rows(timeframe: Timeframe = "daily") -> list[OverviewRow]:

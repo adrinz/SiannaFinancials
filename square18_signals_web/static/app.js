@@ -3314,31 +3314,43 @@ function renderTickerStrip() {
   }
 }
 
-async function loadAnalystOverview() {
+function _setAnalystOverviewLoading(msg, { keepTable = false } = {}) {
+  const list = $('#overview-list');
+  const allRec = $('#all-recs-tbody');
+  if (list) {
+    list.innerHTML = `<div class="muted" style="padding:10px 12px;">${msg}</div>`;
+  }
+  if (allRec && !keepTable) {
+    allRec.innerHTML = `<tr><td colspan="9" class="loading">${msg}</td></tr>`;
+  }
+}
+
+async function loadAnalystOverview(opts = {}) {
+  const { silent = false, pollBackground = false } = opts;
   const list = $('#overview-list');
   const allRec = $('#all-recs-tbody');
   const reqId = ++analyst._overviewReqId;
   const tf = analyst.timeframe;
+  const hadRows = analyst.overview.length > 0;
 
-  const setLoading = (msg) => {
-    if (list) list.innerHTML = `<div class="muted" style="padding:10px 12px;">${msg}</div>`;
-    if (allRec) {
-      allRec.innerHTML = `<tr><td colspan="9" class="loading">${msg}</td></tr>`;
-    }
-  };
+  if (!hadRows) {
+    _setAnalystOverviewLoading('Computing all recommendations…');
+  }
 
-  setLoading('Computing all recommendations…');
-
-  const fetchOverview = () =>
-    api(`/api/analyst/overview?timeframe=${encodeURIComponent(tf)}`);
+  const fetchOverview = (fresh = false) =>
+    api(
+      `/api/analyst/overview?timeframe=${encodeURIComponent(tf)}${
+        fresh ? '&fresh=1' : ''
+      }`,
+    );
 
   try {
-    let rows = await fetchOverview();
+    let rows = await fetchOverview(false);
     if (!rows.length) {
-      setLoading('Overview still computing — retrying…');
+      _setAnalystOverviewLoading('Overview still computing — retrying…');
       await new Promise((r) => setTimeout(r, 2500));
       if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
-      rows = await fetchOverview();
+      rows = await fetchOverview(false);
     }
     if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
 
@@ -3351,9 +3363,16 @@ async function loadAnalystOverview() {
       srcEl.textContent = rows.find((r) => r.source)?.source || '—';
     }
     if (!rows.length) {
-      setLoading(
+      _setAnalystOverviewLoading(
         'No overview data yet — server may still be warming up. Click Refresh or wait a moment.',
       );
+    } else if (pollBackground && !silent) {
+      // Server returns warm cache immediately; pick up background rebuild shortly.
+      window.setTimeout(() => {
+        if (reqId === analyst._overviewReqId && tf === analyst.timeframe) {
+          loadAnalystOverview({ silent: true });
+        }
+      }, 35000);
     }
   } catch (e) {
     if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
@@ -5424,28 +5443,35 @@ async function refreshAll({ reason = 'manual' } = {}) {
   analyst.tickerDetails = {};
   stocks.tickerDetails = {};
   searchUI.tickerDetails = {};
-  analyst.overview = [];
   analyst.reports = {};
   analyst.polishCache = {};
   analyst.briefCache = {};
   etf.overview = [];
 
   try {
-    await loadDashboard();
+    const analystRefreshP =
+      state.view === 'analyst' || analyst.initialized
+        ? (async () => {
+            if (reason === 'manual') {
+              analyst.activeSymbol = null;
+              analyst._priceChartSymbol = null;
+              const rpt = $('#analyst-report');
+              if (rpt) rpt.innerHTML = '';
+              renderTickerStrip();
+            }
+            await loadAnalystOverview({ pollBackground: reason === 'manual' });
+            if (analyst.activeSymbol) await loadAnalystReport(analyst.activeSymbol);
+            if (analyst.llm.enabled) await loadDailyBrief({ force: reason === 'manual' });
+          })()
+        : null;
+
+    await Promise.allSettled([
+      loadDashboard(),
+      analystRefreshP,
+    ]);
+
     if (state.view === 'detail' && state.activeSymbol) {
       await openTicker(state.activeSymbol);
-    }
-    if (state.view === 'analyst' || analyst.initialized) {
-      if (reason === 'manual') {
-        analyst.activeSymbol = null;
-        analyst._priceChartSymbol = null;
-        const rpt = $('#analyst-report');
-        if (rpt) rpt.innerHTML = '';
-        renderTickerStrip();
-      }
-      loadAnalystOverview();
-      if (analyst.activeSymbol) loadAnalystReport(analyst.activeSymbol);
-      if (analyst.llm.enabled) loadDailyBrief({ force: reason === 'manual' });
     }
     if (state.view === 'search' && searchUI.lastQuery) {
       runSearch(searchUI.lastQuery);

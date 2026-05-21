@@ -35,7 +35,7 @@ from .analyst.data import get_ohlcv, get_ohlcv_1d_intraday, OHLCV
 from .analyst.market import news_for_ticker
 from .analyst.models import OverviewRow, ReportOut
 from .analyst.regime import breadth_above_50d, vix_quote
-from .analyst.report import build_report, overview_rows
+from .analyst.report import build_report, overview_rows, overview_rows_fast
 from .models import (
     CountsOut,
     ExpectedMoveOut,
@@ -166,7 +166,7 @@ def regime_envelope(last_scan_iso: str, timeframe: Timeframe = "daily") -> Regim
     * Put/call ratio is still a fixture (needs an options-chain feed).
     * Label is derived from the pair (vix_level, trend_score).
     """
-    rows = overview_rows(timeframe)
+    rows = overview_rows_fast(timeframe)
 
     # Trend score: universe-wide mean composite.
     if rows:
@@ -241,7 +241,7 @@ def _regime_label(vix: float, trend_score: float, breadth_pct: float) -> str:
 
 def screener_rows(signal_filter: str = "all", timeframe: Timeframe = "daily") -> list[TickerRowOut]:
     """Live signals table, driven by ``overview_rows(timeframe)``."""
-    rows_live = overview_rows(timeframe)
+    rows_live = overview_rows_fast(timeframe)
     out: list[TickerRowOut] = []
     want = signal_filter.lower()
     for r in rows_live:

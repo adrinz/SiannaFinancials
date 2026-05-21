@@ -26,7 +26,7 @@ import threading
 import time
 
 from .models import OverviewRow
-from .report import overview_rows, reset_overview_rows_cache
+from .report import overview_rows_fast, reset_overview_rows_cache
 from .universe import sp500_universe, universe_by_symbol
 
 
@@ -67,7 +67,7 @@ def _enrich_with_curated_signals(
     """
     if ov is None:
         try:
-            ov = {r.symbol: r for r in overview_rows("daily")}
+            ov = {r.symbol: r for r in overview_rows_fast("daily")}
         except Exception:
             ov = {}
     for r in rows:
@@ -169,7 +169,7 @@ def _split_broad_to_jumps_dips(
     dips = [r for r in all_rows if r.change_pct < 0]
     dips.sort(key=lambda r: r.change_pct)
     try:
-        ov = {r.symbol: r for r in overview_rows("daily")}
+        ov = {r.symbol: r for r in overview_rows_fast("daily")}
     except Exception:
         ov = {}
     return (
@@ -187,7 +187,7 @@ def broad_movers(side: Literal["jumps", "dips"], limit: int = 10) -> list[MoverI
 def _curated_movers_pair(limit: int) -> tuple[list[MoverItem], list[MoverItem]]:
     """One :func:`overview_rows` call, then split to jumps + dips (sorted)."""
     try:
-        rows = overview_rows("daily")
+        rows = overview_rows_fast("daily")
     except Exception:
         return [], []
     items = [

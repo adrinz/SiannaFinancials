@@ -28,7 +28,7 @@ import urllib.request
 
 from .constants import SCREENER_EARNINGS_WINDOW_DAYS, TICKERS, yfinance_disabled
 from .movers import _broad_universe_rows
-from .report import overview_rows, reset_overview_rows_cache
+from .report import overview_rows_fast, reset_overview_rows_cache
 from .universe import universe_by_symbol
 
 
@@ -87,7 +87,7 @@ def _broad_earnings(window_days: int) -> list[EarningsRow]:
     quote_index = {q.symbol: q for q in _broad_universe_rows()}
     overview_index: dict[str, object] = {}
     try:
-        overview_index = {r.symbol: r for r in overview_rows("daily")}
+        overview_index = {r.symbol: r for r in overview_rows_fast("daily")}
     except Exception:
         overview_index = {}
 
@@ -218,7 +218,7 @@ def _curated_earnings(window_days: int) -> list[EarningsRow]:
 
     overview_by_symbol = {}
     try:
-        overview_by_symbol = {r.symbol: r for r in overview_rows("daily")}
+        overview_by_symbol = {r.symbol: r for r in overview_rows_fast("daily")}
     except Exception:
         overview_by_symbol = {}
 

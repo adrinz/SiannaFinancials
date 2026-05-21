@@ -366,15 +366,25 @@ def main() -> int:
     ap.add_argument("--search-tau", action="store_true",
                     help="grid-search BULLISH/BEARISH thresholds for best PF and "
                          "emit signal_thresholds.json alongside the backtest artifact")
+    ap.add_argument("--bull-tau", type=float, default=None,
+                    help="fixed BULLISH min_score (e.g. 0.35); overrides --search-tau")
+    ap.add_argument("--bear-tau", type=float, default=None,
+                    help="fixed BEARISH max_score (e.g. -0.60); overrides --search-tau")
+    ap.add_argument("--write-thresholds", action="store_true",
+                    help="write signal_thresholds.json from this run's aggregate stats")
     ap.add_argument("--thresholds-out", default="signal_thresholds.json",
-                    help="output path for the tuned thresholds (--search-tau only)")
+                    help="output path for signal_thresholds.json")
     args = ap.parse_args()
 
     universe = args.symbols or [m["symbol"] for m in TICKERS]
 
     # Optional: tune thresholds first, then run backtest with the best τ.
     bull_tau, bear_tau = 0.30, -0.40  # defaults
-    if args.search_tau:
+    if args.bull_tau is not None:
+        bull_tau = float(args.bull_tau)
+    if args.bear_tau is not None:
+        bear_tau = float(args.bear_tau)
+    if args.search_tau and args.bull_tau is None and args.bear_tau is None:
         print("Searching for best BULLISH / BEARISH τ …")
         bull_tau, bear_tau = _tau_search(
             universe, args.timeframe, args.horizon, args.min_bars, args.stride
@@ -458,7 +468,7 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"\nwrote {args.out}")
 
-    if args.search_tau:
+    if args.search_tau or args.write_thresholds:
         thr_path = Path(args.thresholds_out)
         existing: dict = {}
         if thr_path.exists():
@@ -479,7 +489,11 @@ def main() -> int:
             "probability_pct": agg.get("NEUTRAL", {}).get("hit_rate", 55.5),
         }
         existing["calibration"] = calibration
-        existing["generated_by"] = "backtest_verdict --search-tau"
+        existing["generated_by"] = (
+            "backtest_verdict --search-tau"
+            if args.search_tau
+            else f"backtest_verdict --bull-tau {bull_tau} --bear-tau {bear_tau}"
+        )
         existing["version"] = existing.get("version", 1)
         thr_path.write_text(json.dumps(existing, indent=2))
         print(f"wrote tuned thresholds → {thr_path}")

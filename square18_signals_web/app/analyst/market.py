@@ -29,7 +29,7 @@ import xml.etree.ElementTree as ET
 from .constants import TICKERS, Timeframe, yfinance_disabled
 from .data import _threaded_with_timeout, _YF_REQUEST_TIMEOUT
 from .models import OverviewRow
-from .report import overview_rows
+from .report import overview_rows, overview_rows_fast
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ class MarketPulse:
 
 
 def market_pulse(timeframe: Timeframe = "daily", top_n: int = 5) -> MarketPulse:
-    rows = overview_rows(timeframe)
+    rows = overview_rows_fast(timeframe)
     movers = [
         MoverRow(
             symbol=r.symbol,
@@ -154,7 +154,7 @@ class OptionsHighlights:
 
 
 def options_highlights(timeframe: Timeframe = "daily", top_n: int = 5) -> OptionsHighlights:
-    rows = overview_rows(timeframe)
+    rows = overview_rows_fast(timeframe)
 
     def _rec(r: OverviewRow) -> OptionRec:
         return OptionRec(
@@ -506,7 +506,7 @@ def _fetch_marketwatch_rss(limit: int) -> list[NewsItem]:
 
 def _build_internal_snapshot_news(limit: int) -> list[NewsItem]:
     """Generate headline-style updates from the current analyst overview."""
-    rows = overview_rows("daily")
+    rows = overview_rows_fast("daily")
     if not rows:
         return []
 
