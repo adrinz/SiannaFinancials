@@ -49,7 +49,7 @@ Top-level layout:
 - Pydantic v2
 - `python-dotenv` (loads `square18_signals_web/.env` at startup)
 - Optional `tradier` and `yfinance` for live market/news data (Tradier is primary for real-time OHLCV and Options, yfinance is fallback)
-- Optional `anthropic` for LLM enrichment
+- Optional LLM providers for enrichment (`gemini` recommended free tier, `anthropic` optional)
 - `pytest` for tests
 - `playwright` for browser E2E
 - Frontend: plain HTML/CSS/vanilla JS (no npm/bundler)
@@ -62,9 +62,9 @@ From workspace root:
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -r square18_signals_web/requirements.txt
 
-# Set up Claude (optional)
+# Set up LLM (optional)
 cp square18_signals_web/.env.example square18_signals_web/.env
-# Edit .env: ANTHROPIC_API_KEY=sk-ant-...
+# Edit .env: SQUARE18_LLM_PROVIDER=auto and GEMINI_API_KEY=...
 
 bash square18_signals_web/run.sh
 ```
@@ -181,7 +181,10 @@ Conviction: proportional to `abs(score)`, capped at 0.85 (never 100%).
 Environment variables (set in `square18_signals_web/.env` or shell export):
 
 - `TRADIER_API_KEY` and `TRADIER_ENV` (enables real-time Tradier data)
-- `ANTHROPIC_API_KEY` (enables LLM endpoints/features)
+- `SQUARE18_LLM_PROVIDER` (`auto` | `gemini` | `anthropic`, default `auto`)
+- `GEMINI_API_KEY` (recommended free-tier provider via Google AI Studio)
+- `GEMINI_MODEL` (optional override; default `gemini-2.5-flash`)
+- `ANTHROPIC_API_KEY` (optional alternative provider)
 - `ANTHROPIC_MODEL` (optional override; default `claude-sonnet-4-5`)
 - `SQUARE18_LLM_CACHE_TTL` (optional cache TTL in seconds)
 - `SQUARE18_OHLCV_TTL_INTRADAY`, `SQUARE18_OHLCV_TTL_DAILY`, etc. (cache TTLs)
@@ -189,7 +192,7 @@ Environment variables (set in `square18_signals_web/.env` or shell export):
 - `SQUARE18_SP500_REFRESH_HOURS`, `SQUARE18_SP500_CSV_URL`
 - `PORT`, `HOST`, `PYTHON` (launcher)
 
-If ANTHROPIC_API_KEY is unset:
+If no configured provider key is set:
 - Deterministic core analysis still works fully
 - LLM endpoints return 503; UI chips/brief card hide automatically
 

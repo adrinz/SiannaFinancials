@@ -3325,6 +3325,7 @@ const analyst = {
   activeSymbol: null,
   timeframe: 'daily',
   overview: [],
+  overviewByTf: {}, // key = timeframe -> overview rows
   _overviewReqId: 0,
   reports: {}, // key = sym|tf
   /** "SYMBOL|range" (client chart range) -> GET /api/ticker payload */
@@ -3364,21 +3365,34 @@ async function initAnalystOnce() {
     : [];
 
   analystTfPills.forEach((p) => {
-    p.addEventListener('click', () => {
+    p.addEventListener('click', async () => {
       if (analyst.timeframe === p.dataset.tf) return;
       analyst.timeframe = p.dataset.tf;
       analystTfPills.forEach((x) =>
         x.classList.toggle('is-active', x === p)
       );
       $('#overview-timeframe').textContent = p.dataset.tf;
-      analyst.overview = [];
-      loadAnalystOverview();
+      const tf = analyst.timeframe;
+      const cachedRows = analyst.overviewByTf[tf] || [];
+      if (cachedRows.length) {
+        analyst.overview = cachedRows;
+        renderOverviewList();
+        renderAllRecsTable();
+        renderTickerStrip();
+        const srcEl = $('#analyst-source');
+        if (srcEl) srcEl.textContent = cachedRows.find((r) => r.source)?.source || '—';
+      }
+      await loadAnalystOverview({
+        silent: cachedRows.length > 0,
+        pollBackground: true,
+      });
       if (analyst.llm.enabled) loadDailyBrief({ force: false });
+      // Prioritize overview table update first; then hydrate the active symbol card.
       if (analyst.activeSymbol) loadAnalystReport(analyst.activeSymbol);
     });
   });
 
-  // Probe LLM availability — shows Claude UI elements only when enabled.
+  // Probe LLM availability — shows AI-assistant elements only when enabled.
   try {
     const cfg = await api('/api/analyst/llm-config');
     analyst.llm = { enabled: !!cfg.enabled, model: cfg.model || '' };
@@ -3401,7 +3415,7 @@ async function initAnalystOnce() {
     return;
   }
   renderTickerStrip();
-  loadAnalystOverview();
+  await loadAnalystOverview({ pollBackground: true });
   if (analyst.llm.enabled) loadDailyBrief({ force: false });
 
   const first = analyst.tickers[0];
@@ -3488,6 +3502,13 @@ async function loadAnalystOverview(opts = {}) {
   const allRec = $('#all-recs-tbody');
   const reqId = ++analyst._overviewReqId;
   const tf = analyst.timeframe;
+  const cachedRows = analyst.overviewByTf[tf] || [];
+  if (cachedRows.length && (!analyst.overview.length || analyst.timeframe === tf)) {
+    analyst.overview = cachedRows;
+    renderOverviewList();
+    renderAllRecsTable();
+    renderTickerStrip();
+  }
   const hadRows = analyst.overview.length > 0;
 
   if (!hadRows) {
@@ -3503,15 +3524,20 @@ async function loadAnalystOverview(opts = {}) {
 
   try {
     let rows = await fetchOverview(false);
-    if (!rows.length) {
-      _setAnalystOverviewLoading('Overview still computing — retrying…');
-      await new Promise((r) => setTimeout(r, 2500));
+    let attempts = 0;
+    while (!rows.length && attempts < 3) {
+      attempts += 1;
+      _setAnalystOverviewLoading('Overview still computing — retrying…', { keepTable: true });
+      await new Promise((r) => setTimeout(r, 1500));
       if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
       rows = await fetchOverview(false);
     }
     if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
 
     analyst.overview = rows;
+    if (rows.length) {
+      analyst.overviewByTf[tf] = rows;
+    }
     renderOverviewList();
     renderAllRecsTable();
     renderTickerStrip();
@@ -3744,7 +3770,7 @@ async function loadAnalystReport(symbol) {
     try {
       rpt = await api(
         `/api/analyst/report/${encodeURIComponent(symbol)}` +
-        `?timeframe=${encodeURIComponent(requestedTimeframe)}`,
+        `?timeframe=${encodeURIComponent(requestedTimeframe)}&fresh_quotes=0`,
       );
       rpt._cachedAt = Date.now();
       analyst.reports[key] = rpt;
@@ -4626,7 +4652,7 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     }
   }
 
-  // Narrative — deterministic by default; optionally polished by Claude.
+  // Narrative — deterministic by default; optionally polished by AI.
   const narrativeHost = h(
     'div',
     {
@@ -4644,7 +4670,7 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
           id: 'polish-btn',
           onClick: () => togglePolishNarrative(r),
         },
-        'Polish with Claude ✨'
+        'Polish with AI ✨'
       )
       : null;
   root.append(
@@ -4719,7 +4745,7 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
     );
   }
 
-  // Optional: ask Claude about this specific report.
+  // Optional: ask AI about this specific report.
   if (analyst.llm.enabled) {
     root.append(explainBox(r));
   }
@@ -4930,7 +4956,7 @@ async function togglePolishNarrative(report) {
     report.narrative.split('\n\n').forEach((para) =>
       host.append(h('p', {}, para))
     );
-    btn.textContent = 'Polish with Claude ✨';
+    btn.textContent = 'Polish with AI ✨';
     return;
   }
 
@@ -4959,7 +4985,7 @@ async function togglePolishNarrative(report) {
       h(
         'div',
         { class: 'polish-footer muted mono' },
-        `Polished by Claude ${analyst.llm.model} · facts pinned from technicals`
+        `Polished by ${prettyModelName(analyst.llm.model)} · facts pinned from technicals`
       )
     );
     btn.textContent = 'Show raw analysis';
@@ -5029,8 +5055,8 @@ function explainBox(report) {
     h(
       'div',
       { class: 'explain-head' },
-      h('h3', {}, `Ask Claude about ${report.symbol}`),
-      h('span', { class: 'brief-tag' }, `Claude ${analyst.llm.model}`)
+      h('h3', {}, `Ask AI about ${report.symbol}`),
+      h('span', { class: 'brief-tag' }, prettyModelName(analyst.llm.model))
     ),
     h(
       'div',
@@ -5080,7 +5106,7 @@ async function submitExplain(report) {
   btn.disabled = true;
   const prev = btn.textContent;
   btn.textContent = 'Thinking…';
-  ans.innerHTML = '<div class="muted">Claude is reasoning over the report…</div>';
+  ans.innerHTML = '<div class="muted">AI is reasoning over the report…</div>';
 
   try {
     const r = await fetch(
@@ -5103,7 +5129,7 @@ async function submitExplain(report) {
     );
     initPoweredBy(); // success -> clear any stale "error" badge
   } catch (e) {
-    ans.innerHTML = `<div class="muted">Claude couldn't answer: ${e}</div>`;
+    ans.innerHTML = `<div class="muted">AI couldn't answer: ${e}</div>`;
     initPoweredBy();
   } finally {
     btn.disabled = false;
@@ -5706,15 +5732,15 @@ async function initPoweredBy() {
 
   const setState = ({ state, model, detail }) => {
     el.classList.remove('powered-on', 'powered-off', 'powered-error');
-    const pretty = prettyModelName(model || 'claude-sonnet-4-5');
+    const pretty = prettyModelName(model || 'gemini-2.5-flash');
     if (state === 'on') {
       el.textContent = pretty;
       el.classList.add('powered-on');
       if (wrap) wrap.dataset.state = 'on';
       if (ttTitle) ttTitle.textContent = `${pretty} — online`;
       if (ttBody) ttBody.innerHTML =
-        'Live calls to the Anthropic API are working. The ' +
-        '<b>Polish with Claude</b> button, the <b>Daily desk brief</b> ' +
+        'Live calls to your configured LLM provider are working. The ' +
+        '<b>Polish with AI</b> button, the <b>Daily desk brief</b> ' +
         'card, and the <b>Ask about this trade</b> box are all enabled.';
     } else if (state === 'error') {
       el.textContent = `${pretty} (error)`;
@@ -5724,7 +5750,7 @@ async function initPoweredBy() {
       if (ttBody) ttBody.innerHTML =
         'The API key is accepted but the last request was rejected:' +
         `<br/><span class="tt-reason mono">${escapeHtml(detail || 'unknown error')}</span><br/>` +
-        'The deterministic analysis is unaffected — only Claude-powered ' +
+        'The deterministic analysis is unaffected - only AI-powered ' +
         'features (polish / brief / Q&amp;A) are paused until this clears.';
     } else {
       el.textContent = `${pretty} (offline)`;
@@ -5732,12 +5758,13 @@ async function initPoweredBy() {
       if (wrap) wrap.dataset.state = 'off';
       if (ttTitle) ttTitle.textContent = `${pretty} — offline`;
       if (ttBody) ttBody.innerHTML =
-        '"Offline" means the app has no <code>ANTHROPIC_API_KEY</code> ' +
-        'set, so it will never call Anthropic. Every deterministic ' +
+        '"Offline" means the app has no provider API key configured ' +
+        '(<code>GEMINI_API_KEY</code> / <code>GOOGLE_API_KEY</code> / <code>ANTHROPIC_API_KEY</code>). Every deterministic ' +
         'feature (dashboard, signals, analyst report, charts, ' +
         'recommended option strategy) still works.<br/><br/>' +
-        'To enable Claude:<br/>' +
-        '<span class="tt-cmd mono">export ANTHROPIC_API_KEY=sk-ant-…</span><br/>' +
+        'To enable AI enrichment:<br/>' +
+        '<span class="tt-cmd mono">export SQUARE18_LLM_PROVIDER=auto</span><br/>' +
+        '<span class="tt-cmd mono">export GEMINI_API_KEY=...</span><br/>' +
         '<span class="tt-cmd mono">./run.sh prod</span>';
     }
   };
@@ -5752,7 +5779,7 @@ async function initPoweredBy() {
       setState({ state: 'off', model: cfg.model });
     }
   } catch (e) {
-    setState({ state: 'off', model: 'claude-sonnet-4-5' });
+    setState({ state: 'off', model: 'gemini-2.5-flash' });
   }
 }
 
@@ -5766,15 +5793,21 @@ function escapeHtml(s) {
 }
 
 function prettyModelName(slug) {
-  if (!slug) return 'Claude Sonnet 4.5';
-  // "claude-sonnet-4-5" -> "Claude Sonnet 4.5"
-  const parts = slug.split('-');
-  if (parts[0] !== 'claude') return slug;
-  const family = parts[1] || '';
-  const major = parts[2] || '';
-  const minor = parts[3] || '';
-  const ver = minor ? `${major}.${minor}` : major;
-  return `Claude ${family.charAt(0).toUpperCase() + family.slice(1)} ${ver}`.trim();
+  if (!slug) return 'AI model';
+  const s = String(slug).trim();
+  const parts = s.split('-');
+  if (parts[0] === 'claude') {
+    const family = parts[1] || '';
+    const major = parts[2] || '';
+    const minor = parts[3] || '';
+    const ver = minor ? `${major}.${minor}` : major;
+    return `Claude ${family.charAt(0).toUpperCase() + family.slice(1)} ${ver}`.trim();
+  }
+  if (parts[0] === 'gemini') {
+    const rest = parts.slice(1).join(' ');
+    return `Gemini ${rest}`.replace(/\s+/g, ' ').trim();
+  }
+  return s;
 }
 
 // ---------- Screener view (jumps / dips / upcoming earnings) -------------

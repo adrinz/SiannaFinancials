@@ -1,26 +1,25 @@
-"""Claude Sonnet 4.5 layer — narrative polish, daily brief, ticket Q&A.
+"""LLM enrichment layer - narrative polish, daily brief, ticket Q&A.
 
 Design principles
 -----------------
-1. **Fail-open**: every public function returns ``None`` (or raises a
-   dedicated ``LLMUnavailable``) when ``ANTHROPIC_API_KEY`` is missing or a
-   call errors. Callers must treat the deterministic output as ground
-   truth and the LLM result as optional enrichment.
-2. **Facts pinned**: every prompt wraps the structured report/indicator
-   data in ``<facts>…</facts>`` tags and instructs Claude to never
-   introduce a number that isn't inside those tags.
-3. **Deterministic keys / cached responses**: response cache is keyed by
-   ``(task, model, sha256(input_json))`` so re-loading the same ticker
-   doesn't re-bill.
-4. **No math delegation**: Claude never computes a price, strike, or
-   indicator value. Those all come from the Python layer and are fed in.
+1. **Fail-open**: every public function returns ``None`` when a provider key
+   is missing or a call errors. Callers treat deterministic output as ground
+   truth and LLM responses as optional enrichment.
+2. **Facts pinned**: prompts wrap structured values in XML-like tags and
+   instruct the model to avoid introducing numbers not present in facts.
+3. **Deterministic cache keys**: response cache is keyed by provider, model,
+   task, and digest so identical requests do not re-bill.
+4. **No math delegation**: the model never computes prices/Greeks/levels.
+   Those values are generated in Python and passed to prompts as facts.
 
 Environment
 -----------
-- ``ANTHROPIC_API_KEY``  — enables the layer; when unset, everything no-ops.
-- ``ANTHROPIC_MODEL``    — override model slug (default
-  ``claude-sonnet-4-5``).
-- ``SQUARE18_LLM_CACHE_TTL`` — seconds (default 86400 = 1 day).
+- ``SQUARE18_LLM_PROVIDER`` - ``auto`` (default), ``gemini``, ``anthropic``
+- ``GEMINI_API_KEY`` or ``GOOGLE_API_KEY`` (Gemini provider key)
+- ``GEMINI_MODEL`` (default ``gemini-2.5-flash``)
+- ``ANTHROPIC_API_KEY`` (Anthropic provider key)
+- ``ANTHROPIC_MODEL`` (default ``claude-sonnet-4-5``)
+- ``SQUARE18_LLM_CACHE_TTL`` seconds (default 86400 = 1 day)
 """
 from __future__ import annotations
 
@@ -29,11 +28,16 @@ import hashlib
 import json
 import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-_DEFAULT_MODEL = "claude-sonnet-4-5"
+_DEFAULT_PROVIDER = "auto"
+_DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
 _CACHE_DIR = Path.home() / ".cache" / "square18_signals" / "llm"
 _CACHE_TTL = int(os.environ.get("SQUARE18_LLM_CACHE_TTL", 86400))  # 1 day
 _MAX_QUESTION_LEN = 800  # reject absurdly long explain-prompts
@@ -69,14 +73,43 @@ def last_error() -> Optional[str]:
 @dataclass(frozen=True)
 class LLMConfig:
     enabled: bool
+    provider: str
     model: str
     cache_dir: str
 
 
+def _gemini_api_key() -> str:
+    return os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
+
+
+def _resolve_provider() -> str:
+    raw = os.environ.get("SQUARE18_LLM_PROVIDER", _DEFAULT_PROVIDER).strip().lower()
+    if raw not in {"auto", "gemini", "anthropic"}:
+        raw = "auto"
+    if raw == "gemini":
+        return "gemini"
+    if raw == "anthropic":
+        return "anthropic"
+    # auto mode: prefer Gemini (free tier), then Anthropic if configured.
+    if _gemini_api_key():
+        return "gemini"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    return "gemini"
+
+
 def config() -> LLMConfig:
+    provider = _resolve_provider()
+    if provider == "anthropic":
+        enabled = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        model = os.environ.get("ANTHROPIC_MODEL", _DEFAULT_ANTHROPIC_MODEL)
+    else:
+        enabled = bool(_gemini_api_key())
+        model = os.environ.get("GEMINI_MODEL", _DEFAULT_GEMINI_MODEL)
     return LLMConfig(
-        enabled=bool(os.environ.get("ANTHROPIC_API_KEY")),
-        model=os.environ.get("ANTHROPIC_MODEL", _DEFAULT_MODEL),
+        enabled=enabled,
+        provider=provider,
+        model=model,
         cache_dir=str(_CACHE_DIR),
     )
 
@@ -86,7 +119,7 @@ def config() -> LLMConfig:
 # ---------------------------------------------------------------------------
 
 
-def _get_client():
+def _get_anthropic_client():
     """Return a singleton Anthropic client, or None if disabled."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return None
@@ -94,10 +127,10 @@ def _get_client():
         from anthropic import Anthropic  # type: ignore
     except Exception:
         return None
-    global _CLIENT  # noqa: PLW0603
-    if "_CLIENT" not in globals():
-        _CLIENT = Anthropic()
-    return _CLIENT  # type: ignore[name-defined]
+    global _ANTHROPIC_CLIENT  # noqa: PLW0603
+    if "_ANTHROPIC_CLIENT" not in globals():
+        _ANTHROPIC_CLIENT = Anthropic()
+    return _ANTHROPIC_CLIENT  # type: ignore[name-defined]
 
 
 def _cache_path(task: str, model: str, digest: str) -> Path:
@@ -134,6 +167,107 @@ def _digest(payload: Any) -> str:
     ).hexdigest()[:16]
 
 
+def _anthropic_call(
+    *,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    temperature: float,
+) -> Optional[str]:
+    client = _get_anthropic_client()
+    if client is None:
+        return None
+
+    def _do_call():
+        return client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+
+    msg = _run_with_timeout(_do_call, _LLM_REQUEST_TIMEOUT_SEC)
+    parts = [
+        b.text for b in msg.content
+        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+    ]
+    text = "\n".join(parts).strip()
+    return text or None
+
+
+def _gemini_call(
+    *,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    temperature: float,
+) -> Optional[str]:
+    api_key = _gemini_api_key()
+    if not api_key:
+        return None
+
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {
+            "temperature": float(temperature),
+            "maxOutputTokens": int(max_tokens),
+        },
+    }
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
+    )
+    req = urllib.request.Request(
+        url=url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    def _do_call() -> str:
+        with urllib.request.urlopen(req, timeout=_LLM_REQUEST_TIMEOUT_SEC) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return ""
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        texts = [str(p.get("text", "")).strip() for p in parts if p.get("text")]
+        return "\n".join(t for t in texts if t).strip()
+
+    text = _run_with_timeout(_do_call, _LLM_REQUEST_TIMEOUT_SEC)
+    return text or None
+
+
+def _provider_call(
+    *,
+    cfg: LLMConfig,
+    system: str,
+    user: str,
+    max_tokens: int,
+    temperature: float,
+) -> Optional[str]:
+    if cfg.provider == "anthropic":
+        return _anthropic_call(
+            model=cfg.model,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    return _gemini_call(
+        model=cfg.model,
+        system=system,
+        user=user,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+
 def _call(
     *,
     task: str,
@@ -144,62 +278,61 @@ def _call(
     temperature: float = 0.2,
     bypass_cache: bool = False,
 ) -> Optional[str]:
-    """Internal: cached, fail-open call to Claude.
-
-    Returns the text content of the first message block, or ``None`` if the
-    LLM layer is disabled or the call fails.
-    """
+    """Internal: cached, fail-open call to configured provider."""
     cfg = config()
     if not cfg.enabled:
         return None
 
     digest = _digest(cache_key)
+    cache_model = f"{cfg.provider}__{cfg.model}"
     if not bypass_cache:
-        cached = _read_cache(task, cfg.model, digest)
+        cached = _read_cache(task, cache_model, digest)
         if cached is not None:
             return cached
 
-    client = _get_client()
-    if client is None:
-        return None
-
     global _LAST_ERROR  # noqa: PLW0603
     try:
-        def _do_call():
-            return client.messages.create(
-                model=cfg.model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-            )
-
-        msg = _run_with_timeout(_do_call, _LLM_REQUEST_TIMEOUT_SEC)
-        parts = [
-            b.text for b in msg.content
-            if getattr(b, "type", None) == "text" and getattr(b, "text", None)
-        ]
-        text = "\n".join(parts).strip()
+        text = _provider_call(
+            cfg=cfg,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
         if text:
-            _write_cache(task, cfg.model, digest, text)
+            _write_cache(task, cache_model, digest, text)
             _LAST_ERROR = None
         return text or None
     except Exception as e:
-        # Keep the short human-readable reason (e.g. "insufficient credits")
-        # around so the API/UI can display it without exposing internals.
         if isinstance(e, concurrent.futures.TimeoutError):
-            _LAST_ERROR = "LLM request timed out"
+            _LAST_ERROR = f"{cfg.provider.capitalize()} request timed out"
             return None
-        _LAST_ERROR = _summarize_anthropic_error(e)
+        _LAST_ERROR = _summarize_provider_error(cfg.provider, e)
         return None
 
 
-def _summarize_anthropic_error(exc: BaseException) -> str:
-    """Boil an Anthropic SDK exception down to one short, user-safe line."""
+def _summarize_provider_error(provider: str, exc: BaseException) -> str:
+    """Boil provider-specific errors down to one short, user-safe line."""
     name = type(exc).__name__
     msg = str(exc)
-    # The SDK typically surfaces a JSON body with a nested error.message.
-    # Pull that out when we can.
+
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body_raw = exc.read().decode("utf-8", errors="replace")
+            payload = json.loads(body_raw)
+            if isinstance(payload, dict):
+                inner = payload.get("error") or {}
+                if isinstance(inner, dict):
+                    msg = str(inner.get("message") or msg)
+        except Exception:
+            pass
+        if exc.code == 401:
+            if provider == "gemini":
+                return "Gemini API key rejected (invalid or revoked)."
+            return "Anthropic API key rejected (invalid or revoked)."
+        if exc.code == 429:
+            return f"{provider.capitalize()} rate-limited the request - try again shortly."
+
     try:
         body = getattr(exc, "body", None) or getattr(exc, "response", None)
         if body is not None:
@@ -211,16 +344,24 @@ def _summarize_anthropic_error(exc: BaseException) -> str:
     except Exception:
         pass
     lower = msg.lower()
+    if "resource exhausted" in lower or "quota" in lower:
+        if provider == "gemini":
+            return "Gemini free-tier quota exhausted - wait for reset or upgrade."
+        return "Anthropic quota exhausted - check account credits."
     if "credit balance" in lower or "insufficient" in lower:
-        return "Anthropic account has no credits — add billing at console.anthropic.com."
+        if provider == "gemini":
+            return "Gemini quota exhausted - wait for reset or upgrade."
+        return "Anthropic account has no credits - add billing at console.anthropic.com."
     if "invalid api key" in lower or "authentication" in lower or "401" in lower:
+        if provider == "gemini":
+            return "Gemini API key rejected (invalid or revoked)."
         return "Anthropic API key rejected (invalid or revoked)."
     if "rate" in lower and "limit" in lower:
-        return "Anthropic rate-limited the request — try again shortly."
+        return f"{provider.capitalize()} rate-limited the request - try again shortly."
     if "model" in lower and ("not found" in lower or "does not exist" in lower):
-        return "Model not available to this account — try `claude-3-5-sonnet-latest`."
+        return f"{provider.capitalize()} model not available to this account."
     if "timeout" in lower or "timed out" in lower:
-        return "Anthropic request timed out — try again."
+        return f"{provider.capitalize()} request timed out - try again."
     # Fallback: first 160 chars of the message with the class name.
     return f"{name}: {msg[:160]}"
 

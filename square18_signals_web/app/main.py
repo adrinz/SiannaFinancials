@@ -32,7 +32,7 @@ from .analyst.constants import SCREENER_EARNINGS_WINDOW_DAYS  # noqa: E402
 from .analyst import build_report, overview_rows  # noqa: E402
 from .analyst.report import (  # noqa: E402
     etf_overview_rows,
-    peek_overview_rows_cache,
+    overview_rows_fast,
     schedule_overview_rows_refresh,
 )
 from .analyst import earnings as _earnings  # noqa: E402
@@ -143,11 +143,8 @@ def analyst_overview(
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     tf = timeframe  # type: ignore[assignment]
     if not fresh:
-        cached = peek_overview_rows_cache(tf)
-        if cached:
-            schedule_overview_rows_refresh(tf)
-            return cached
-    return overview_rows(tf, fresh=fresh)  # type: ignore[arg-type]
+        return overview_rows_fast(tf)  # type: ignore[arg-type]
+    return overview_rows(tf, fresh=True)  # type: ignore[arg-type]
 
 
 @app.get("/api/etf/signals", response_model=list[OverviewRow], tags=["etf"])
@@ -167,12 +164,12 @@ def analyst_report(
     symbol: str,
     timeframe: str = "daily",
     fresh_quotes: int = Query(
-        1,
+        0,
         ge=0,
         le=1,
         description=(
-            "1 = pull live Yahoo spot + option chain mids for this request (bypass in-app quote cache); "
-            "0 = reuse short TTL cache where available (lighter on Yahoo)."
+            "0 (default) = reuse short TTL quote cache for faster load; "
+            "1 = pull live Yahoo spot + option chain mids for this request (bypass in-app quote cache)."
         ),
     ),
 ) -> ReportOut:
@@ -748,7 +745,7 @@ def copy_trade_signals(
 
 
 # ---------------------------------------------------------------------------
-# LLM enrichment (Claude Sonnet 4.5) — fail-open; no-ops when ANTHROPIC_API_KEY
+# LLM enrichment (provider-based) - fail-open; no-ops when no provider key
 # is missing. The deterministic /report and /overview endpoints above remain
 # the source of truth; these endpoints produce optional polished prose only.
 # ---------------------------------------------------------------------------
@@ -869,7 +866,7 @@ def _deterministic_explain(report: dict, question: str, llm_err: str | None = No
 )
 def analyst_polish(symbol: str, timeframe: str = "daily") -> LLMTextOut:
     if not _llm.config().enabled:
-        raise HTTPException(503, "LLM layer disabled — set ANTHROPIC_API_KEY")
+        raise HTTPException(503, "LLM layer disabled - set GEMINI_API_KEY/GOOGLE_API_KEY or ANTHROPIC_API_KEY")
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     try:
@@ -894,7 +891,7 @@ def analyst_polish(symbol: str, timeframe: str = "daily") -> LLMTextOut:
 @app.get("/api/analyst/brief", response_model=LLMTextOut, tags=["analyst"])
 def analyst_brief(timeframe: str = "daily") -> LLMTextOut:
     if not _llm.config().enabled:
-        raise HTTPException(503, "LLM layer disabled — set ANTHROPIC_API_KEY")
+        raise HTTPException(503, "LLM layer disabled - set GEMINI_API_KEY/GOOGLE_API_KEY or ANTHROPIC_API_KEY")
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     rows = overview_rows(timeframe)  # type: ignore[arg-type]
@@ -924,7 +921,7 @@ def analyst_brief(timeframe: str = "daily") -> LLMTextOut:
 )
 def analyst_explain(symbol: str, body: ExplainIn) -> LLMTextOut:
     if not _llm.config().enabled:
-        raise HTTPException(503, "LLM layer disabled — set ANTHROPIC_API_KEY")
+        raise HTTPException(503, "LLM layer disabled - set GEMINI_API_KEY/GOOGLE_API_KEY or ANTHROPIC_API_KEY")
     if body.timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
     if not body.question or not body.question.strip():
