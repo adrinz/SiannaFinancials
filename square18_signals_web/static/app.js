@@ -163,6 +163,130 @@ const state = {
 // Last-known dashboard payload (sessionStorage) — shown instantly after idle refresh.
 const DASHBOARD_SNAP_KEY = 'sianna-dashboard-v1';
 const DASHBOARD_SNAP_MAX_AGE_MS = 30 * 60 * 1000;
+const PMA_THRESH_KEY = 'sianna-potential-move-thresholds-v1';
+const PMA_HISTORY_KEY = 'sianna-potential-move-history-v1';
+const PMA_WATCHLIST_KEY = 'sianna-potential-move-watchlist-v1';
+const PMA_SCOPE_KEY = 'sianna-potential-move-scope-v1';
+const PMA_DEFAULT_UP_PCT = 3.0;
+const PMA_DEFAULT_DOWN_PCT = 7.0;
+const PMA_MAX_HISTORY = 120;
+const PMA_NEWS_POLL_MS = 2 * 60 * 1000;
+const PMA_NEWS_MIN_IMPACT = 5.5; // tighter: only stronger headline catalysts
+const PMA_NEWS_MIN_PROB = 68; // tighter: require higher directional confidence
+const PMA_NEWS_MIN_FORECAST_MULT = 0.95; // tighter: forecast closer to full threshold
+const PMA_MIN_BEAR_PREMOVE_PCT = 4.6; // avoid zero PUT setups when 7% bar is too strict for 1-3D forecasts
+const potentialMove = {
+  initialized: false,
+  thresholds: {},
+  history: [],
+  seen: new Set(),
+  rowsBySymbol: {},
+  newsBySymbol: {},
+  active: [],
+  watchlist: [],
+  scope: 'watchlist_priority',
+};
+
+function _loadPotentialMoveStorage() {
+  try {
+    potentialMove.thresholds = JSON.parse(localStorage.getItem(PMA_THRESH_KEY) || '{}') || {};
+  } catch {
+    potentialMove.thresholds = {};
+  }
+  try {
+    potentialMove.history = JSON.parse(localStorage.getItem(PMA_HISTORY_KEY) || '[]') || [];
+  } catch {
+    potentialMove.history = [];
+  }
+  try {
+    potentialMove.watchlist = JSON.parse(localStorage.getItem(PMA_WATCHLIST_KEY) || '[]') || [];
+  } catch {
+    potentialMove.watchlist = [];
+  }
+  try {
+    potentialMove.scope = String(localStorage.getItem(PMA_SCOPE_KEY) || 'watchlist_priority');
+  } catch {
+    potentialMove.scope = 'watchlist_priority';
+  }
+  for (const h of potentialMove.history) {
+    if (h && h.key) potentialMove.seen.add(h.key);
+  }
+}
+
+function _savePotentialMoveThresholds() {
+  try {
+    localStorage.setItem(PMA_THRESH_KEY, JSON.stringify(potentialMove.thresholds));
+  } catch {
+    /* ignore */
+  }
+}
+
+function _savePotentialMoveHistory() {
+  try {
+    localStorage.setItem(PMA_HISTORY_KEY, JSON.stringify(potentialMove.history.slice(0, PMA_MAX_HISTORY)));
+  } catch {
+    /* ignore */
+  }
+}
+
+function _savePotentialMoveWatchlist() {
+  try {
+    localStorage.setItem(PMA_WATCHLIST_KEY, JSON.stringify(potentialMove.watchlist));
+  } catch {
+    /* ignore */
+  }
+}
+
+function _savePotentialMoveScope() {
+  try {
+    localStorage.setItem(PMA_SCOPE_KEY, potentialMove.scope);
+  } catch {
+    /* ignore */
+  }
+}
+
+function getSymbolMoveThresholds(symbol) {
+  const s = String(symbol || '').toUpperCase();
+  const t = potentialMove.thresholds[s] || {};
+  const up = Number(t.up_pct);
+  const down = Number(t.down_pct);
+  return {
+    upPct: Number.isFinite(up) && up > 0 ? up : PMA_DEFAULT_UP_PCT,
+    downPct: Number.isFinite(down) && down > 0 ? down : PMA_DEFAULT_DOWN_PCT,
+  };
+}
+
+function _fmtThresholdPct(v) {
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+function _parseWatchlistInput(s) {
+  if (!s) return [];
+  const out = [];
+  for (const raw of String(s).split(',')) {
+    const sym = raw.trim().toUpperCase();
+    if (!sym) continue;
+    if (!/^[A-Z0-9.\-]{1,10}$/.test(sym)) continue;
+    if (!out.includes(sym)) out.push(sym);
+  }
+  return out;
+}
+
+function _buildPotentialMoveNewsSymbols() {
+  const out = [];
+  for (const s of potentialMove.watchlist || []) {
+    const sym = String(s || '').toUpperCase().trim();
+    if (!sym) continue;
+    if (!out.includes(sym)) out.push(sym);
+  }
+  for (const s of state.universe || []) {
+    const sym = String(s || '').toUpperCase().trim();
+    if (!sym) continue;
+    if (!out.includes(sym)) out.push(sym);
+    if (out.length >= 28) break;
+  }
+  return out;
+}
 
 function readDashboardSnapshot() {
   try {
@@ -230,6 +354,7 @@ function restoreDashboardSnapshot() {
     if (breadthEl && p.breadth_pct_up != null) {
       breadthEl.textContent = `${p.breadth_pct_up.toFixed(0)}%`;
     }
+    ingestPotentialMoveRows([...(p.top_gainers || []), ...(p.top_losers || [])], { source: 'pulse' });
     restored = true;
   }
   if (snap.options) {
@@ -294,10 +419,432 @@ function restoreDashboardSnapshot() {
     if (want === state.filter) {
       state.universe = snap.screen.map((r) => r.symbol);
       renderScreen(snap.screen);
+      ingestPotentialMoveRows(snap.screen, { source: 'screen' });
       restored = true;
     }
   }
   return restored;
+}
+
+function _pmaHistoryKey(item) {
+  const d = new Date(item.ts || Date.now());
+  const day = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+  return [
+    day,
+    item.symbol,
+    item.direction,
+    Math.round(item.change_pct * 10),
+    Math.round(item.threshold_pct * 10),
+  ].join('|');
+}
+
+function _computePreMoveForecast(row) {
+  const score = Number(row.composite_score);
+  const conf = Number(row.confidence);
+  const rsi = Number(row.rsi);
+  const ivRank = Number(row.iv_rank);
+  if (!Number.isFinite(score) || !Number.isFinite(conf)) return null;
+  const absScore = Math.min(1, Math.abs(score));
+  const c = Math.min(1, Math.max(0, conf));
+  const ivN = Number.isFinite(ivRank) ? Math.max(0, Math.min(1, ivRank / 100)) : 0.5;
+  const baseMove = 1.0 + absScore * 3.0 + c * 2.2 + ivN * 2.0; // 1-8.2%
+  const signalDir = String(row.direction || '').toLowerCase();
+  const alreadyMoved = Math.abs(Number(row.change_pct || 0));
+  const movePenalty = alreadyMoved >= 2.5 ? 0.72 : 1.0;
+  const pullbackRisk = Number.isFinite(rsi) ? Math.max(0, (rsi - 62) / 18) : 0;
+  const squeezeRisk = alreadyMoved >= 2.0 ? Math.min(1, (alreadyMoved - 2.0) / 3.0) : 0;
+
+  let upProb = 34 + Math.max(0, score) * 44 + c * 16 + ivN * 9;
+  let downProb = 34 + Math.max(0, -score) * 44 + c * 16 + ivN * 9;
+  downProb += pullbackRisk * 14;
+  if (score > 0.35) downProb += pullbackRisk * 6;
+  downProb += squeezeRisk * 9;
+  if (Number.isFinite(rsi)) {
+    if (rsi < 45) upProb += 4;
+    if (rsi > 55) downProb += 4;
+    if (rsi > 72) upProb -= 8;
+    if (rsi < 28) downProb -= 8;
+  }
+  if (signalDir === 'bull') upProb += 3;
+  if (signalDir === 'bear') downProb += 3;
+  upProb = Math.max(20, Math.min(95, upProb));
+  downProb = Math.max(20, Math.min(95, downProb));
+
+  const factors = [];
+  if (signalDir === 'bull') factors.push('bullish directional signal');
+  else if (signalDir === 'bear') factors.push('bearish directional signal');
+  if (absScore >= 0.65) factors.push(`strong composite score ${score >= 0 ? '+' : ''}${score.toFixed(2)}`);
+  else if (absScore >= 0.35) factors.push(`moderate composite score ${score >= 0 ? '+' : ''}${score.toFixed(2)}`);
+  else factors.push(`early score inflection ${score >= 0 ? '+' : ''}${score.toFixed(2)}`);
+  factors.push(`confidence ${Math.round(c * 100)}%`);
+  if (Number.isFinite(rsi)) {
+    if (rsi >= 65) factors.push(`RSI ${Math.round(rsi)} momentum regime`);
+    else if (rsi <= 35) factors.push(`RSI ${Math.round(rsi)} mean-reversion risk`);
+    else factors.push(`RSI ${Math.round(rsi)} neutral balance`);
+  }
+  if (ivN >= 0.7) factors.push(`high IV rank ${Math.round(ivN * 100)}`);
+  else if (ivN <= 0.3) factors.push(`low IV rank ${Math.round(ivN * 100)}`);
+  if (alreadyMoved >= 2.0) factors.push(`already moved ${alreadyMoved.toFixed(1)}% (late-entry caution)`);
+  if (pullbackRisk >= 0.25) factors.push(`overbought pullback risk (RSI ${Math.round(rsi)})`);
+  if (squeezeRisk >= 0.15) factors.push(`extended move risk ${alreadyMoved.toFixed(1)}%`);
+
+  const out = {
+    upProb,
+    downProb,
+    expectedUpPct: Math.max(0.8, Math.min(12, baseMove * movePenalty)),
+    expectedDownPct: Math.max(0.8, Math.min(12, baseMove * movePenalty * (signalDir === 'bear' ? 1.08 : 1.0))),
+    factors,
+  };
+  const ni = row.news_impact || null;
+  if (ni && Number.isFinite(Number(ni.impact_score))) {
+    const impact = Math.max(0, Math.min(10, Number(ni.impact_score)));
+    if (String(ni.direction) === 'up') {
+      out.upProb = Math.max(20, Math.min(95, out.upProb + impact * 2.2));
+      out.expectedUpPct = Math.max(0.8, Math.min(14, out.expectedUpPct + impact * 0.25));
+      out.factors.unshift(`news catalyst (${impact.toFixed(1)}/10): ${ni.reason || 'headline impact'}`);
+    } else if (String(ni.direction) === 'down') {
+      out.downProb = Math.max(20, Math.min(95, out.downProb + impact * 2.2));
+      out.expectedDownPct = Math.max(0.8, Math.min(14, out.expectedDownPct + impact * 0.25));
+      out.factors.unshift(`news catalyst (${impact.toFixed(1)}/10): ${ni.reason || 'headline impact'}`);
+    } else {
+      out.factors.unshift(`headline risk (${impact.toFixed(1)}/10): ${ni.reason || 'news relevance'}`);
+    }
+  }
+  return out;
+}
+
+function _watchlistOrderScore(symbol) {
+  const idx = potentialMove.watchlist.indexOf(String(symbol || '').toUpperCase());
+  return idx >= 0 ? idx : 10_000;
+}
+
+function _normalizePmaMessageAndReason(message, reason) {
+  const msgRaw = String(message || '').trim();
+  const reasonRaw = String(reason || '').trim();
+  const whyMatch = msgRaw.match(/\bwhy:\s*(.+)$/i);
+  if (!whyMatch) {
+    return { message: msgRaw, reason: reasonRaw };
+  }
+  const cutIdx = whyMatch.index || 0;
+  let cleanMsg = msgRaw.slice(0, cutIdx).trim();
+  if (cleanMsg && !/[.!?]$/.test(cleanMsg)) cleanMsg += '.';
+  return {
+    message: cleanMsg,
+    reason: reasonRaw || String(whyMatch[1] || '').trim(),
+  };
+}
+
+function _renderPmaReason(reason) {
+  if (!reason) return null;
+  const text = `Why: ${String(reason).trim()}`;
+  const root = document.createElement('span');
+  root.className = 'pma-reason muted';
+  const rx = /(confidence\s*\d+%)/ig;
+  let i = 0;
+  let m = rx.exec(text);
+  while (m) {
+    if (m.index > i) {
+      root.append(document.createTextNode(text.slice(i, m.index)));
+    }
+    const hi = document.createElement('span');
+    hi.className = 'pma-confidence';
+    hi.textContent = m[1];
+    root.append(hi);
+    i = m.index + m[1].length;
+    m = rx.exec(text);
+  }
+  if (i < text.length) root.append(document.createTextNode(text.slice(i)));
+  return root;
+}
+
+function renderPotentialMovePanel() {
+  const activeEl = $('#pma-active-list');
+  const histEl = $('#pma-history-list');
+  const trail = $('#pma-trail');
+
+  if (trail) {
+    trail.textContent = `${potentialMove.active.length} predictive · push-style history`;
+  }
+
+  if (activeEl) {
+    activeEl.innerHTML = '';
+    if (!potentialMove.active.length) {
+      activeEl.innerHTML = '<li class="loading">No predictive pre-move setups right now.</li>';
+    } else {
+      for (const a of potentialMove.active.slice(0, 20)) {
+        const norm = _normalizePmaMessageAndReason(a.message, a.reason);
+        activeEl.append(
+          h(
+            'li',
+            { class: `pma-item ${a.direction}` },
+            h('span', { class: 'pma-sym' }, a.symbol),
+            h(
+              'span',
+              { class: 'pma-msg-wrap' },
+              h('span', { class: 'pma-msg' }, norm.message),
+              norm.reason ? _renderPmaReason(norm.reason) : null
+            ),
+            h('span', { class: 'pma-meta mono' }, `${a.direction === 'up' ? 'UP' : 'DOWN'} ${Math.round(a.probability)}%`)
+          )
+        );
+      }
+    }
+  }
+
+  if (histEl) {
+    histEl.innerHTML = '';
+    if (!potentialMove.history.length) {
+      histEl.innerHTML = '<li class="loading">No alerts yet.</li>';
+    } else {
+      for (const e of potentialMove.history.slice(0, 24)) {
+        const norm = _normalizePmaMessageAndReason(e.message, e.reason);
+        histEl.append(
+          h(
+            'li',
+            { class: `pma-item ${e.direction}` },
+            h('span', { class: 'pma-sym' }, e.symbol),
+            h(
+              'span',
+              { class: 'pma-msg-wrap' },
+              h('span', { class: 'pma-msg' }, norm.message),
+              norm.reason ? _renderPmaReason(norm.reason) : null
+            ),
+            h('span', { class: 'pma-meta mono' }, fmtESTCompact(e.ts))
+          )
+        );
+      }
+    }
+  }
+}
+
+function _requestPotentialMoveNotification(entry) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const title = entry.direction === 'down'
+    ? `Pre-move put setup: ${entry.symbol}`
+    : `Pre-move call setup: ${entry.symbol}`;
+  const body = `${entry.symbol}: ${entry.direction === 'up' ? 'up' : 'down'} probability ${Math.round(entry.probability)}% in 1-3D (forecast ${entry.forecast_pct.toFixed(1)}%).`;
+  try {
+    new Notification(title, { body });
+  } catch {
+    /* best-effort only */
+  }
+}
+
+function ingestPotentialMoveRows(rows, { source = 'screen' } = {}) {
+  if (!rows || !rows.length) {
+    renderPotentialMovePanel();
+    return;
+  }
+
+  for (const r of rows) {
+    if (!r || !r.symbol || !Number.isFinite(Number(r.change_pct))) continue;
+    const sym = String(r.symbol).toUpperCase();
+    const prev = potentialMove.rowsBySymbol[sym] || {};
+    potentialMove.rowsBySymbol[sym] = {
+      ...prev,
+      symbol: sym,
+      name: String(r.name != null ? r.name : (prev.name || '')),
+      change_pct: Number(r.change_pct),
+      signal: r.signal != null ? r.signal : (prev.signal || null),
+      direction: r.direction != null ? r.direction : (prev.direction || null),
+      composite_score: Number.isFinite(Number(r.composite_score)) ? Number(r.composite_score) : prev.composite_score,
+      confidence: Number.isFinite(Number(r.confidence)) ? Number(r.confidence) : prev.confidence,
+      rsi: Number.isFinite(Number(r.rsi)) ? Number(r.rsi) : prev.rsi,
+      iv_rank: Number.isFinite(Number(r.iv_rank)) ? Number(r.iv_rank) : prev.iv_rank,
+      news_impact: potentialMove.newsBySymbol[sym] || prev.news_impact || null,
+      source,
+      ts: Date.now(),
+    };
+  }
+
+  const nextActive = [];
+  for (const row of Object.values(potentialMove.rowsBySymbol)) {
+    if (
+      potentialMove.scope === 'watchlist_only'
+      && !potentialMove.watchlist.includes(row.symbol)
+    ) continue;
+    const th = getSymbolMoveThresholds(row.symbol);
+    const bearMoveTarget = Math.min(th.downPct, PMA_MIN_BEAR_PREMOVE_PCT);
+    const cp = Number(row.change_pct);
+    const fc = _computePreMoveForecast(row);
+    if (!fc) continue;
+    const alreadyMoved = Math.abs(cp);
+    if (!Number.isFinite(cp)) continue;
+    const ni = row.news_impact || null;
+    const upPreMove =
+      fc.expectedUpPct >= th.upPct &&
+      fc.upProb >= 60 &&
+      cp > -1.5 &&
+      alreadyMoved < (th.upPct * 0.8);
+    const downPreMove =
+      fc.expectedDownPct >= bearMoveTarget &&
+      fc.downProb >= 60 &&
+      cp < 1.5 &&
+      alreadyMoved < (bearMoveTarget * 0.85);
+    const newsUpPreMove =
+      ni && ni.direction === 'up' &&
+      Number(ni.impact_score) >= PMA_NEWS_MIN_IMPACT &&
+      fc.upProb >= PMA_NEWS_MIN_PROB &&
+      fc.expectedUpPct >= (th.upPct * PMA_NEWS_MIN_FORECAST_MULT) &&
+      alreadyMoved < (th.upPct * 0.7);
+    const newsDownPreMove =
+      ni && ni.direction === 'down' &&
+      Number(ni.impact_score) >= PMA_NEWS_MIN_IMPACT &&
+      fc.downProb >= PMA_NEWS_MIN_PROB &&
+      fc.expectedDownPct >= (th.downPct * PMA_NEWS_MIN_FORECAST_MULT) &&
+      alreadyMoved < (th.downPct * 0.7);
+    if (upPreMove || newsUpPreMove) {
+      const reason = (fc.factors || []).slice(0, 3).join(' · ');
+      nextActive.push({
+        symbol: row.symbol,
+        direction: 'up',
+        change_pct: cp,
+        threshold_pct: th.upPct,
+        forecast_pct: fc.expectedUpPct,
+        probability: fc.upProb,
+        source: row.source,
+        signal: row.signal,
+        reason,
+        message: `${row.symbol} pre-move CALL setup: forecast +${fc.expectedUpPct.toFixed(1)}% (1-3D), prob ${Math.round(fc.upProb)}%.${newsUpPreMove ? ' News catalyst detected.' : ''}`,
+        ts: row.ts,
+      });
+    }
+    if (downPreMove || newsDownPreMove) {
+      const reason = (fc.factors || []).slice(0, 3).join(' · ');
+      nextActive.push({
+        symbol: row.symbol,
+        direction: 'down',
+        change_pct: cp,
+        threshold_pct: bearMoveTarget,
+        forecast_pct: fc.expectedDownPct,
+        probability: fc.downProb,
+        source: row.source,
+        signal: row.signal,
+        reason,
+        message: `${row.symbol} pre-move PUT setup: forecast -${fc.expectedDownPct.toFixed(1)}% (1-3D), prob ${Math.round(fc.downProb)}%.${newsDownPreMove ? ' News catalyst detected.' : ''}`,
+        ts: row.ts,
+      });
+    }
+  }
+  nextActive.sort((a, b) => {
+    if (potentialMove.scope === 'watchlist_priority') {
+      const wa = _watchlistOrderScore(a.symbol);
+      const wb = _watchlistOrderScore(b.symbol);
+      if (wa !== wb) return wa - wb;
+    }
+    return (b.probability - a.probability) || (Math.abs(b.forecast_pct) - Math.abs(a.forecast_pct));
+  });
+  potentialMove.active = nextActive;
+
+  for (const a of nextActive) {
+    const hist = { ...a };
+    hist.key = _pmaHistoryKey(hist);
+    if (potentialMove.seen.has(hist.key)) continue;
+    potentialMove.seen.add(hist.key);
+    potentialMove.history.unshift(hist);
+    if (potentialMove.history.length > PMA_MAX_HISTORY) {
+      potentialMove.history = potentialMove.history.slice(0, PMA_MAX_HISTORY);
+    }
+    _requestPotentialMoveNotification(hist);
+  }
+  _savePotentialMoveHistory();
+  renderPotentialMovePanel();
+}
+
+function ingestPotentialMoveNewsImpact(items) {
+  if (!Array.isArray(items)) return;
+  for (const n of items) {
+    const sym = String(n?.symbol || '').toUpperCase();
+    if (!sym) continue;
+    potentialMove.newsBySymbol[sym] = {
+      direction: String(n.direction || 'neutral'),
+      impact_score: Number(n.impact_score || 0),
+      reason: String(n.reason || ''),
+      title: String(n.title || ''),
+      publisher: String(n.publisher || ''),
+      published_at: String(n.published_at || ''),
+    };
+    if (!potentialMove.rowsBySymbol[sym]) {
+      potentialMove.rowsBySymbol[sym] = {
+        symbol: sym,
+        name: sym,
+        change_pct: 0,
+        signal: null,
+        direction: n.direction === 'down' ? 'bear' : n.direction === 'up' ? 'bull' : 'neutral',
+        composite_score: n.direction === 'down' ? -0.22 : n.direction === 'up' ? 0.22 : 0.0,
+        confidence: Math.min(0.85, Math.max(0.35, Number(n.impact_score || 0) / 10)),
+        rsi: 50,
+        iv_rank: 60,
+        source: 'news-impact',
+        ts: Date.now(),
+        news_impact: potentialMove.newsBySymbol[sym],
+      };
+    } else {
+      potentialMove.rowsBySymbol[sym].news_impact = potentialMove.newsBySymbol[sym];
+    }
+  }
+  ingestPotentialMoveRows(Object.values(potentialMove.rowsBySymbol), { source: 'news-impact' });
+}
+
+async function loadPotentialMoveNewsImpact() {
+  const syms = _buildPotentialMoveNewsSymbols();
+  const query = syms.length ? `?symbols=${encodeURIComponent(syms.join(','))}&limit=40` : '?limit=40';
+  try {
+    const feed = await api(`/api/news/impact${query}`);
+    ingestPotentialMoveNewsImpact(feed.items || []);
+  } catch {
+    // best effort
+  }
+}
+
+function _renderPotentialMoveSymbolOptions() {
+  const sel = $('#pma-symbol-select');
+  if (!sel) return;
+  const prev = sel.value || '';
+  const symbols = new Set([
+    ...(state.universe || []),
+    ...Object.keys(potentialMove.rowsBySymbol || {}),
+    ...Object.keys(potentialMove.thresholds || {}),
+  ]);
+  const sorted = [...symbols].filter(Boolean).sort();
+  sel.innerHTML = '';
+  for (const s of sorted) {
+    sel.append(h('option', { value: s }, s));
+  }
+  if (sorted.length) {
+    sel.value = sorted.includes(prev) ? prev : sorted[0];
+  }
+}
+
+function _loadPotentialMoveThresholdInputs() {
+  const sel = $('#pma-symbol-select');
+  const up = $('#pma-up-input');
+  const down = $('#pma-down-input');
+  if (!sel || !up || !down) return;
+  const th = getSymbolMoveThresholds(sel.value);
+  up.value = String(th.upPct);
+  down.value = String(th.downPct);
+}
+
+function _setPotentialMoveFeedback(msg) {
+  const el = $('#pma-feedback');
+  if (!el) return;
+  el.textContent = msg;
+}
+
+function initPotentialMovePanel() {
+  if (potentialMove.initialized) return;
+  potentialMove.initialized = true;
+  _loadPotentialMoveStorage();
+  renderPotentialMovePanel();
+  potentialMove.scope = 'all';
+  void loadPotentialMoveNewsImpact();
+  setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (state.view !== 'dashboard' && state.view !== 'pmalerts') return;
+    void loadPotentialMoveNewsImpact();
+  }, PMA_NEWS_POLL_MS);
+  _setPotentialMoveFeedback('Ready.');
 }
 
 const SESSION_1D_MIN_ZOOM = 0.0015; // ≈1 min in a 12h range — zoom in to “minute” scale
@@ -488,6 +1035,12 @@ function initTabs() {
       } else if (target === 'etf') {
         switchView('etf');
         initEtfOnce();
+      } else if (target === 'pmalerts') {
+        switchView('pmalerts');
+        initPotentialMovePanel();
+        _renderPotentialMoveSymbolOptions();
+        _loadPotentialMoveThresholdInputs();
+        renderPotentialMovePanel();
       } else {
         switchView(target);
       }
@@ -526,6 +1079,7 @@ async function loadDashboard() {
     loadCrypto(),
     loadNews(),
     loadScreen(state.filter),
+    loadPotentialMoveNewsImpact(),
   ];
   await Promise.allSettled(tasks);
   setDashboardUpdating(false);
@@ -580,11 +1134,13 @@ async function loadMarketPulse() {
     const p = await api('/api/market/pulse');
     renderMovers(gainers, p.top_gainers, 'pos');
     renderMovers(losers, p.top_losers, 'neg');
+    ingestPotentialMoveRows([...(p.top_gainers || []), ...(p.top_losers || [])], { source: 'pulse' });
     renderSectorHeat(heat, p.sector_heatmap);
     if (trail) trail.textContent =
       `${p.tickers_covered} tickers · ${p.breadth_pct_up.toFixed(0)}% up`;
     if (breadthEl) breadthEl.textContent = `${p.breadth_pct_up.toFixed(0)}%`;
     saveDashboardSnapshot({ pulse: p });
+    _renderPotentialMoveSymbolOptions();
   } catch (e) {
     gainers && (gainers.innerHTML = `<li class="loading">Failed: ${escapeHtml(String(e))}</li>`);
     losers && (losers.innerHTML = '');
@@ -600,6 +1156,7 @@ function renderMovers(ul, rows, side) {
     return;
   }
   for (const m of rows) {
+    const th = getSymbolMoveThresholds(m.symbol);
     const li = h(
       'li',
       {
@@ -608,6 +1165,11 @@ function renderMovers(ul, rows, side) {
       },
       h('span', { class: 'mover-sym' }, m.symbol),
       h('span', { class: 'mover-name muted' }, m.name),
+      m.change_pct >= th.upPct
+        ? h('span', { class: 'pill-badge success mono', title: `Large move alert (>= +${_fmtThresholdPct(th.upPct)}%)` }, `${_fmtThresholdPct(th.upPct)}%+`)
+        : m.change_pct <= -th.downPct
+          ? h('span', { class: 'pill-badge danger mono', title: `Downside shock alert (<= -${_fmtThresholdPct(th.downPct)}%)` }, `${_fmtThresholdPct(th.downPct)}%+↓`)
+          : null,
       h(
         'span',
         { class: `mover-pct mono ${side}` },
@@ -915,6 +1477,8 @@ async function loadScreen(filter) {
     const rows = await api(`/api/screen?filter=${encodeURIComponent(filter)}`);
     state.universe = rows.map((r) => r.symbol);
     renderScreen(rows);
+    ingestPotentialMoveRows(rows, { source: 'screen' });
+    _renderPotentialMoveSymbolOptions();
     saveDashboardSnapshot({ screen: rows, filter });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="10" class="loading">Failed: ${e}</td></tr>`;
@@ -6610,6 +7174,7 @@ function boot() {
   try {
     initTabs();
     initFilters();
+    initPotentialMovePanel();
     startESTClock();
     initChartEnlargeModal();
     initDetailChartToolbar();

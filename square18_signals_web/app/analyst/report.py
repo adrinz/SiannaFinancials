@@ -605,6 +605,25 @@ def build_report(
         except Exception:
             pass
 
+    # 10a. Large-bar move alert (session move monitor)
+    try:
+        _bar_move = float(price_action.change_pct)
+        if abs(_bar_move) >= 3.0:
+            _dir = "up" if _bar_move > 0 else "down"
+            signal_warnings.append(
+                f"Large session move detected: {_bar_move:+.1f}% {_dir} on the latest bar. "
+                "This is event-like volatility. Require stronger confirmation before assuming follow-through."
+            )
+        # Explicit downside-shock caveat for users expecting immediate PUT flips.
+        if _bar_move <= -7.0 and verdict != "BEARISH":
+            signal_warnings.append(
+                f"Downside shock {_bar_move:+.1f}% but verdict remains {verdict}. "
+                "The pipeline still sees stronger medium-term trend/structure than near-term panic. "
+                "Treat this as high-risk transition and wait for a confirmed bearish follow-through before forcing PUT exposure."
+            )
+    except Exception:
+        pass
+
     # 11. Sector ETF headwind/tailwind
     _SECTOR_ETF: dict[str, str] = {
         "Semiconductors / AI": "SMH", "Semiconductors": "SMH",
@@ -863,6 +882,11 @@ def build_report(
     try:
         _ivr = flow_out.iv_baseline_ratio if flow_out else None
         _iv30 = flow_out.implied_move_30d_pct if flow_out else None
+        if _iv30 is not None and _iv30 >= 7.0:
+            signal_warnings.append(
+                f"Forecasted move context: options imply roughly ±{_iv30:.1f}% over the next 30D. "
+                "This is a high-volatility regime where both upside and downside tails are wider than normal."
+            )
         if _ivr is not None and _ivr >= 1.45:
             signal_warnings.append(
                 f"Elevated IV regime: ATM IV is ~{_ivr:.2f}× the symbol's baseline. "

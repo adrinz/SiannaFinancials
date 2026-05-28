@@ -17,7 +17,7 @@ Design
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import json
 import re
@@ -406,6 +406,18 @@ class NewsFeed:
     source: str
 
 
+@dataclass
+class NewsImpactSignal:
+    symbol: str
+    title: str
+    publisher: str
+    url: str
+    published_at: str
+    direction: str  # up | down | neutral
+    impact_score: float
+    reason: str
+
+
 def _strip_html(text: str) -> str:
     """Very small HTML-to-text cleaner for RSS summaries."""
     if not text:
@@ -652,3 +664,125 @@ def news_feed(limit: int = 12) -> NewsFeed:
     if internal_items:
         return NewsFeed(items=internal_items, source="internal-snapshot")
     return NewsFeed(items=[], source="unavailable")
+
+
+def _parse_iso_dt(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        t = str(ts).strip()
+        if t.endswith("Z"):
+            t = t[:-1] + "+00:00"
+        dt = datetime.fromisoformat(t)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _score_news_impact(item: NewsItem, symbol: str) -> tuple[str, float, str]:
+    txt = f"{item.title} {item.summary}".lower()
+    up_terms = {
+        "beats", "beat", "raises guidance", "guidance raised", "upgrade", "buyback",
+        "partnership", "contract win", "record revenue", "strong demand",
+        "expands", "approval", "acquisition", "acquire", "surge",
+    }
+    down_terms = {
+        "misses", "miss", "cuts guidance", "guidance cut", "downgrade",
+        "lawsuit", "investigation", "probe", "sec", "recall", "delay",
+        "resigns", "offering", "dilution", "weak demand", "antitrust",
+    }
+    high_impact_terms = {
+        "earnings", "guidance", "fda", "sec", "merger", "acquisition",
+        "investigation", "bankruptcy", "lawsuit", "downgrade", "upgrade",
+    }
+
+    up_hits = sum(1 for t in up_terms if t in txt)
+    down_hits = sum(1 for t in down_terms if t in txt)
+    hi_hits = sum(1 for t in high_impact_terms if t in txt)
+    sym_hits = len(re.findall(rf"\b{re.escape(symbol.lower())}\b", txt))
+
+    now = datetime.now(timezone.utc)
+    pub_dt = _parse_iso_dt(item.published_at)
+    recency = 0.0
+    if pub_dt is not None:
+        age = now - pub_dt
+        if age <= timedelta(hours=1):
+            recency = 1.2
+        elif age <= timedelta(hours=6):
+            recency = 0.8
+        elif age <= timedelta(hours=24):
+            recency = 0.4
+
+    if up_hits == down_hits == 0:
+        direction = "neutral"
+        bias = 0.0
+    elif up_hits >= down_hits:
+        direction = "up"
+        bias = float(up_hits - down_hits + 1)
+    else:
+        direction = "down"
+        bias = float(down_hits - up_hits + 1)
+
+    impact = (bias * 1.5) + (hi_hits * 1.25) + (sym_hits * 0.35) + recency
+    impact = max(0.0, min(10.0, impact))
+
+    reasons: list[str] = []
+    if hi_hits:
+        reasons.append("high-impact catalyst language")
+    if recency >= 0.8:
+        reasons.append("fresh headline")
+    if direction == "up" and up_hits:
+        reasons.append("bullish wording")
+    if direction == "down" and down_hits:
+        reasons.append("bearish wording")
+    if not reasons:
+        reasons.append("headline relevance")
+    return direction, impact, "; ".join(reasons)
+
+
+def news_impact_signals(
+    symbols: list[str],
+    *,
+    per_symbol: int = 4,
+    limit_total: int = 40,
+) -> list[NewsImpactSignal]:
+    """Ticker-specific, high-impact news alerts for pre-move workflows."""
+    min_impact_score = 3.4  # tighter filter: keep only stronger catalysts
+    out: list[NewsImpactSignal] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in symbols:
+        sym = str(raw or "").upper().strip()
+        if not sym:
+            continue
+        try:
+            items = news_for_ticker(sym, limit=per_symbol)
+        except Exception:
+            items = []
+        for it in items:
+            key = (sym, it.title)
+            if key in seen:
+                continue
+            seen.add(key)
+            direction, impact_score, reason = _score_news_impact(it, sym)
+            if impact_score < min_impact_score:
+                continue
+            out.append(
+                NewsImpactSignal(
+                    symbol=sym,
+                    title=it.title,
+                    publisher=it.publisher,
+                    url=it.url,
+                    published_at=it.published_at,
+                    direction=direction,
+                    impact_score=round(impact_score, 2),
+                    reason=reason,
+                )
+            )
+            if len(out) >= limit_total:
+                break
+        if len(out) >= limit_total:
+            break
+    out.sort(key=lambda x: (x.impact_score, x.published_at), reverse=True)
+    return out[:limit_total]

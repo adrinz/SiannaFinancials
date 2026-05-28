@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=sianna-dashboard-idle-27" />
+    <link rel="stylesheet" href="/static/styles.css?v=sianna-move-alerts-simple-30" />
   </head>
   <body>
     <div
@@ -50,6 +50,9 @@
         </button>
         <button class="tab" data-view="analyst" role="tab" aria-selected="false">
           Analyst
+        </button>
+        <button class="tab" data-view="pmalerts" role="tab" aria-selected="false">
+          Move Alerts
         </button>
       </nav>
 
@@ -393,6 +396,60 @@
               <tr><td colspan="10" class="loading">Loading signals…</td></tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- Potential Move Alerts view -->
+      <section class="view view-pmalerts hidden" data-view="pmalerts">
+        <div class="card card-potential-alerts">
+          <div class="card-header">
+            <span class="card-title">
+              <span class="pma-title-highlight">Potential move alerts</span>
+              <span class="pill-badge warning mono" style="margin-left:8px;">live</span>
+            </span>
+            <span class="card-trail mono" id="pma-trail">predictive (1-3d)</span>
+          </div>
+          <div class="pma-legend" id="pma-legend">
+            <div class="pma-legend-title">Legend</div>
+            <div class="pma-legend-row">
+              <span class="pma-legend-key mono">forecast +X% (1-3D)</span>
+              <span class="pma-legend-val">Estimated move size window over the next 1-3 trading days.</span>
+            </div>
+            <div class="pma-legend-row">
+              <span class="pma-legend-key mono">prob Y%</span>
+              <span class="pma-legend-val">Confidence score for that direction (higher means stronger setup).</span>
+            </div>
+            <div class="pma-legend-row">
+              <span class="pma-legend-key mono">CALL / PUT setup</span>
+              <span class="pma-legend-val">Directional options bias: CALL = bullish pre-move, PUT = bearish pre-move.</span>
+            </div>
+            <div class="pma-legend-row">
+              <span class="pma-legend-key mono">Active vs History</span>
+              <span class="pma-legend-val">Active = current opportunities, History = prior triggered push-style alerts.</span>
+            </div>
+            <div class="pma-legend-row">
+              <span class="pma-legend-key mono">Why: ...</span>
+              <span class="pma-legend-val">Top model factors behind the setup (score strength, confidence, RSI/IV regime, and directional bias).</span>
+            </div>
+            <div class="pma-legend-row">
+              <span class="pma-legend-key mono">News catalyst</span>
+              <span class="pma-legend-val">Fresh high-impact ticker headlines (earnings/guidance/legal/M&A) can boost alert probability and move size.</span>
+            </div>
+          </div>
+          <div class="pma-grid">
+            <div class="pma-col">
+              <div class="pma-subtitle">Pre-move opportunities (1-3D)</div>
+              <ul id="pma-active-list" class="pma-list">
+                <li class="loading">Waiting for live moves…</li>
+              </ul>
+            </div>
+            <div class="pma-col">
+              <div class="pma-subtitle">Push-style history</div>
+              <ul id="pma-history-list" class="pma-list">
+                <li class="loading">No alerts yet.</li>
+              </ul>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -931,6 +988,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=sianna-dashboard-idle-27" defer></script>
+    <script src="/static/app.js?v=sianna-news-impact-alerts-31" defer></script>
   </body>
 </html>

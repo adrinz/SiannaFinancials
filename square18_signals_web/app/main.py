@@ -401,6 +401,23 @@ class NewsFeedOut(BaseModel):
     source: str
 
 
+class NewsImpactOut(BaseModel):
+    symbol: str
+    title: str
+    publisher: str
+    url: str
+    published_at: str
+    direction: str
+    impact_score: float
+    reason: str
+
+
+class NewsImpactFeedOut(BaseModel):
+    items: list[NewsImpactOut]
+    scanned_symbols: int
+    source: str
+
+
 @app.get("/api/market/pulse", response_model=MarketPulseOut, tags=["dashboard"])
 def get_market_pulse(timeframe: str = "daily") -> MarketPulseOut:
     if timeframe not in _ALLOWED_TIMEFRAMES:
@@ -447,6 +464,35 @@ def get_news(limit: int = 12) -> NewsFeedOut:
     return NewsFeedOut(
         items=[NewsItemOut(**n.__dict__) for n in feed.items],
         source=feed.source,
+    )
+
+
+@app.get("/api/news/impact", response_model=NewsImpactFeedOut, tags=["dashboard"])
+def get_news_impact(
+    symbols: str = Query(
+        "",
+        description="Comma-separated ticker symbols to scan (e.g. NVDA,TSM,MU).",
+    ),
+    limit: int = Query(30, ge=1, le=80),
+) -> NewsImpactFeedOut:
+    syms: list[str] = []
+    if symbols and symbols.strip():
+        for s in symbols.split(","):
+            ss = s.strip().upper()
+            if not ss:
+                continue
+            if not ss.replace("-", "").replace(".", "").isalnum():
+                continue
+            if ss not in syms:
+                syms.append(ss)
+    if not syms:
+        syms = [t["symbol"] for t in ANALYST_TICKERS[:24]]
+
+    rows = _market.news_impact_signals(syms, per_symbol=4, limit_total=limit)
+    return NewsImpactFeedOut(
+        items=[NewsImpactOut(**r.__dict__) for r in rows],
+        scanned_symbols=len(syms),
+        source="ticker-news-impact",
     )
 
 
