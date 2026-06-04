@@ -940,7 +940,8 @@ def analyst_brief(timeframe: str = "daily") -> LLMTextOut:
         raise HTTPException(503, "LLM layer disabled - set GEMINI_API_KEY/GOOGLE_API_KEY or ANTHROPIC_API_KEY")
     if timeframe not in _ALLOWED_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {sorted(_ALLOWED_TIMEFRAMES)}")
-    rows = overview_rows(timeframe)  # type: ignore[arg-type]
+    # Keep Analyst tab responsive: brief should not block on a full rebuild.
+    rows = overview_rows_fast(timeframe)  # type: ignore[arg-type]
     if not rows:
         text = (
             "Market brief is temporarily unavailable because live upstream data is blocked.\n\n"

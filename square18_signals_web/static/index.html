@@ -847,8 +847,15 @@
           <span class="section-sub">
             Clean directional calls &amp; puts only · click any row for the full report
           </span>
+          <div class="filter-pills" role="tablist" aria-label="Short-hold quality filter">
+            <button class="pill pill-success is-active" id="analyst-quality-buy-only" type="button">Buy-ready only</button>
+            <button class="pill" id="analyst-quality-all" type="button">Show all (dim weak)</button>
+          </div>
         </div>
         <div class="table-wrap">
+          <div class="analyst-top-picks mono muted" id="analyst-top-picks">
+            Loading top short-hold picks…
+          </div>
           <table class="data-table" id="all-recs-table">
             <thead>
               <tr>
@@ -861,10 +868,14 @@
                 <th class="num">Break-even</th>
                 <th class="num">Target</th>
                 <th class="num">Risk / reward</th>
+                <th class="num">Short-hold quality</th>
+                <th>Action</th>
+                <th>Entry trigger (1-3D)</th>
+                <th>Sell plan</th>
               </tr>
             </thead>
             <tbody id="all-recs-tbody">
-              <tr><td colspan="9" class="loading">Computing all recommendations…</td></tr>
+              <tr><td colspan="13" class="loading">Computing all recommendations…</td></tr>
             </tbody>
           </table>
         </div>
@@ -988,6 +999,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=sianna-news-impact-alerts-31" defer></script>
+    <script src="/static/app.js?v=sianna-top-picks-34" defer></script>
   </body>
 </html>

@@ -284,6 +284,10 @@ class OverviewRow(BaseModel):
     rec_target: Optional[float]
     rec_stop: Optional[float]
     rec_risk_reward: Optional[float]
+    short_hold_quality: int = 0  # 0..100 suitability for 1-3 day options hold
+    short_hold_action: Literal["BUY", "WAIT", "AVOID"] = "WAIT"
+    short_hold_entry: str = ""
+    short_hold_sell_plan: str = ""
 
 
 class TickerMeta(BaseModel):

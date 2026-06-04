@@ -41,6 +41,20 @@ _DEFAULTS: dict = {
         "vix_extreme_suppress_all": 35.0,
         "breadth_low_suppress_bull": 35.0,
     },
+    "daily_downside_override": {
+        "enabled": True,
+        "shock_threshold_pct": -2.5,
+        "rsi_support_floor": 62.0,
+        "distribution_volume_ratio": 1.20,
+        "downgrade_margin_below_bull": 0.02,
+    },
+    "daily_quality_gate": {
+        "enabled": True,
+        "min_symbol_hit_rate_for_bull": 50.0,
+        "require_symbol_scope_for_prob_gate": True,
+        "max_rsi_for_falling_macd_bull": 55.0,
+        "downgrade_margin_below_bull": 0.01,
+    },
 }
 
 _cache: dict = {}

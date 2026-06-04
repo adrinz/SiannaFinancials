@@ -487,6 +487,10 @@ def ticker_detail(
         rec_target=tp.target_price,
         rec_stop=tp.stop_loss,
         rec_risk_reward=tp.risk_reward,
+        short_hold_quality=0,
+        short_hold_action="WAIT",
+        short_hold_entry="Enter only when Daily+4H align and momentum confirms.",
+        short_hold_sell_plan="Stop: -25% premium; trim +25%; take core +40%.",
     )
     row = _row_from_overview(synthetic_row, closes)
 

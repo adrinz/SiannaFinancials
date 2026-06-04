@@ -162,7 +162,11 @@ const state = {
 
 // Last-known dashboard payload (sessionStorage) — shown instantly after idle refresh.
 const DASHBOARD_SNAP_KEY = 'sianna-dashboard-v1';
-const DASHBOARD_SNAP_MAX_AGE_MS = 30 * 60 * 1000;
+// Keep a longer snapshot window so idle returns can paint instantly,
+// then refresh in the background (stale-while-revalidate UX).
+const DASHBOARD_SNAP_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const ANALYST_OV_SNAP_KEY = 'sianna-analyst-overview-v1';
+const ANALYST_OV_SNAP_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const PMA_THRESH_KEY = 'sianna-potential-move-thresholds-v1';
 const PMA_HISTORY_KEY = 'sianna-potential-move-history-v1';
 const PMA_WATCHLIST_KEY = 'sianna-potential-move-watchlist-v1';
@@ -424,6 +428,41 @@ function restoreDashboardSnapshot() {
     }
   }
   return restored;
+}
+
+function readAnalystOverviewSnapshot() {
+  try {
+    const raw = sessionStorage.getItem(ANALYST_OV_SNAP_KEY);
+    if (!raw) return null;
+    const snap = JSON.parse(raw);
+    if (!snap || !snap.savedAt || typeof snap.byTf !== 'object') return null;
+    if (Date.now() - Number(snap.savedAt) > ANALYST_OV_SNAP_MAX_AGE_MS) return null;
+    return snap;
+  } catch {
+    return null;
+  }
+}
+
+function saveAnalystOverviewSnapshot(tf, rows) {
+  try {
+    if (!Array.isArray(rows) || !rows.length) return;
+    const prev = readAnalystOverviewSnapshot() || { byTf: {} };
+    const byTf = { ...(prev.byTf || {}) };
+    byTf[String(tf || 'daily')] = rows;
+    sessionStorage.setItem(
+      ANALYST_OV_SNAP_KEY,
+      JSON.stringify({ savedAt: Date.now(), byTf }),
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function restoreAnalystOverviewSnapshot(tf) {
+  const snap = readAnalystOverviewSnapshot();
+  if (!snap || !snap.byTf) return [];
+  const rows = snap.byTf[String(tf || 'daily')];
+  return Array.isArray(rows) ? rows : [];
 }
 
 function _pmaHistoryKey(item) {
@@ -1055,6 +1094,8 @@ function initTabs() {
 // ---------- Dashboard: regime + stats --------------------------------------
 
 async function loadDashboard() {
+  // Instant first paint after idle: restore cached dashboard before live calls.
+  restoreDashboardSnapshot();
   // Do NOT await /api/regime before the other fetches. Regime is heavy (full
   // overview + breadth); if it runs first, every card stayed on "Loading…"
   // until it finished. Parallelize so pulse, news, crypto, and the screener
@@ -3899,6 +3940,7 @@ const analyst = {
   llm: { enabled: false, model: '' },
   polishCache: {}, // key = sym|tf -> polished narrative
   briefCache: {},  // key = tf -> brief text
+  qualityFilter: 'buy_only', // buy_only | all
 };
 
 const stocks = {
@@ -3955,6 +3997,24 @@ async function initAnalystOnce() {
       if (analyst.activeSymbol) loadAnalystReport(analyst.activeSymbol);
     });
   });
+  const qBuyOnly = $('#analyst-quality-buy-only');
+  const qAll = $('#analyst-quality-all');
+  if (qBuyOnly) {
+    qBuyOnly.addEventListener('click', () => {
+      analyst.qualityFilter = 'buy_only';
+      qBuyOnly.classList.add('is-active');
+      qAll && qAll.classList.remove('is-active');
+      renderAllRecsTable();
+    });
+  }
+  if (qAll) {
+    qAll.addEventListener('click', () => {
+      analyst.qualityFilter = 'all';
+      qAll.classList.add('is-active');
+      qBuyOnly && qBuyOnly.classList.remove('is-active');
+      renderAllRecsTable();
+    });
+  }
 
   // Probe LLM availability — shows AI-assistant elements only when enabled.
   try {
@@ -3979,6 +4039,13 @@ async function initAnalystOnce() {
     return;
   }
   renderTickerStrip();
+  const restoredRows = restoreAnalystOverviewSnapshot(analyst.timeframe);
+  if (restoredRows.length) {
+    analyst.overviewByTf[analyst.timeframe] = restoredRows;
+    analyst.overview = restoredRows;
+    renderOverviewList();
+    renderAllRecsTable();
+  }
   await loadAnalystOverview({ pollBackground: true });
   if (analyst.llm.enabled) loadDailyBrief({ force: false });
 
@@ -4056,7 +4123,7 @@ function _setAnalystOverviewLoading(msg, { keepTable = false } = {}) {
     list.innerHTML = `<div class="muted" style="padding:10px 12px;">${msg}</div>`;
   }
   if (allRec && !keepTable) {
-    allRec.innerHTML = `<tr><td colspan="9" class="loading">${msg}</td></tr>`;
+    allRec.innerHTML = `<tr><td colspan="13" class="loading">${msg}</td></tr>`;
   }
 }
 
@@ -4101,6 +4168,7 @@ async function loadAnalystOverview(opts = {}) {
     analyst.overview = rows;
     if (rows.length) {
       analyst.overviewByTf[tf] = rows;
+      saveAnalystOverviewSnapshot(tf, rows);
     }
     renderOverviewList();
     renderAllRecsTable();
@@ -4125,16 +4193,19 @@ async function loadAnalystOverview(opts = {}) {
     if (reqId !== analyst._overviewReqId || tf !== analyst.timeframe) return;
     const err = escapeHtml(String(e));
     if (list) list.innerHTML = `<div class="muted" style="padding:10px 12px;">Failed: ${err}</div>`;
-    if (allRec) allRec.innerHTML = `<tr><td colspan="9" class="loading">Failed: ${err}</td></tr>`;
+    if (allRec) allRec.innerHTML = `<tr><td colspan="13" class="loading">Failed: ${err}</td></tr>`;
   }
 }
 
 function renderAllRecsTable() {
   const tbody = $('#all-recs-tbody');
+  const topStrip = $('#analyst-top-picks');
   if (!tbody) return;
   tbody.innerHTML = '';
+  if (topStrip) topStrip.textContent = 'Scanning top short-hold setups…';
   if (!analyst.overview.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="loading">No data.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="loading">No data.</td></tr>';
+    if (topStrip) topStrip.textContent = 'No candidates yet.';
     return;
   }
 
@@ -4145,16 +4216,51 @@ function renderAllRecsTable() {
     }
     return b.conviction - a.conviction;
   });
+  const rows = analyst.qualityFilter === 'buy_only'
+    ? sorted.filter((r) => String(r.short_hold_action || 'WAIT') === 'BUY')
+    : sorted;
+  const buyRanked = sorted
+    .filter((r) => String(r.short_hold_action || 'WAIT') === 'BUY')
+    .sort((a, b) => {
+      const qa = Number(a.short_hold_quality || 0);
+      const qb = Number(b.short_hold_quality || 0);
+      if (qa !== qb) return qb - qa;
+      return Number(b.rec_risk_reward || 0) - Number(a.rec_risk_reward || 0);
+    });
+  const topPicks = buyRanked.slice(0, 3);
+  const topSet = new Set(topPicks.map((r) => r.symbol));
+  if (topStrip) {
+    if (!topPicks.length) {
+      topStrip.textContent = 'No high-confidence 1–2 day BUY setups right now.';
+    } else {
+      const txt = topPicks
+        .map((r, i) =>
+          `#${i + 1} ${r.symbol} ${String(r.rec_contract_type || '').toUpperCase()} $${fmtStrike(r.rec_strike)} · Q${r.short_hold_quality} · R/R ${r.rec_risk_reward != null ? r.rec_risk_reward.toFixed(2) : '—'}x`
+        )
+        .join('  |  ');
+      topStrip.textContent = `Top short-hold picks (1-2D): ${txt}`;
+    }
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="13" class="loading">No buy-ready setups for 1-3 day holds right now.</td></tr>';
+    return;
+  }
 
-  for (const r of sorted) {
+  for (const r of rows) {
     const recCls = r.rec_contract_type === 'call' ? 'rec-call' : 'rec-put';
     const recLabel = r.rec_contract_type === 'call' ? 'CALL' : 'PUT';
     const vcls = r.verdict === 'BULLISH' ? 'success'
               : r.verdict === 'BEARISH' ? 'danger' : 'neutral';
+    const q = Number.isFinite(Number(r.short_hold_quality)) ? Number(r.short_hold_quality) : 0;
+    const action = String(r.short_hold_action || 'WAIT');
+    const qClass = q >= 70 ? 'success' : q >= 50 ? 'warning' : 'danger';
+    const isTopPick = topSet.has(r.symbol);
+    const rowClass = `${analyst.qualityFilter === 'all' && action !== 'BUY' ? 'analyst-rec-dim ' : ''}${isTopPick ? 'analyst-top-pick ' : ''}clickable`;
+    const actionClass = action === 'BUY' ? 'success' : action === 'AVOID' ? 'danger' : 'warning';
     tbody.append(
       h('tr',
         {
-          class: 'clickable',
+          class: rowClass,
           onClick: () => {
             loadAnalystReport(r.symbol);
             // Scroll the main report into view.
@@ -4162,7 +4268,10 @@ function renderAllRecsTable() {
             if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
           },
         },
-        h('td', { class: 'sym mono' }, r.symbol),
+        h('td', { class: 'sym mono' },
+          isTopPick ? h('span', { class: 'top-pick-badge' }, 'TOP') : null,
+          r.symbol
+        ),
         h('td', {}, h('span', { class: `pill-badge ${vcls}` }, r.verdict)),
         h('td', {}, h('span', { class: `rec-pill ${recCls} mono` }, recLabel)),
         h('td', { class: 'num mono' }, `$${fmtStrike(r.rec_strike)}`),
@@ -4171,6 +4280,10 @@ function renderAllRecsTable() {
         h('td', { class: 'num mono' }, r.rec_break_even != null ? `$${r.rec_break_even.toFixed(2)}` : '—'),
         h('td', { class: 'num mono' }, r.rec_target != null ? `$${r.rec_target.toFixed(2)}` : '—'),
         h('td', { class: 'num mono' }, r.rec_risk_reward != null ? `${r.rec_risk_reward.toFixed(2)}×` : '—'),
+        h('td', { class: 'num mono' }, h('span', { class: `pill-badge ${qClass}` }, `${q}`)),
+        h('td', {}, h('span', { class: `pill-badge ${actionClass}` }, action)),
+        h('td', { class: 'muted' }, r.short_hold_entry || '—'),
+        h('td', { class: 'muted' }, r.short_hold_sell_plan || '—'),
       )
     );
   }

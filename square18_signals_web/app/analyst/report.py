@@ -95,6 +95,8 @@ _overview_rows_cache: dict[str, tuple[float, list[OverviewRow]]] = {}
 _overview_refresh_pending: set[str] = set()
 _overview_building: set[str] = set()
 OVERVIEW_ROWS_CACHE_TTL_SEC = 300.0
+# Serve stale overview snapshots much longer to avoid empty Analyst tab after idle.
+OVERVIEW_ROWS_STALE_SERVE_SEC = 3600.0
 # Too many parallel Tradier option/quote calls can throttle; 6 is a better balance.
 OVERVIEW_MAX_WORKERS = 6
 # Cold cache + concurrent Tradier pulls can exceed 45s; too low caches empty/partial
@@ -126,8 +128,86 @@ def _safe_build_report(symbol: str, timeframe: Timeframe) -> ReportOut | None:
         return None
 
 
+def _short_hold_fields_from_report(
+    rpt: ReportOut,
+) -> tuple[int, Literal["BUY", "WAIT", "AVOID"], str, str]:
+    """Return (quality, action, entry_text, sell_plan_text) for 1-3D option holds."""
+    tp = rpt.options.trade_plan
+    warn = [w.lower() for w in (rpt.signal_warnings or [])]
+    macd_dir = str(rpt.macd.histogram_direction or "")
+    contract = tp.contract_type
+    rr = float(tp.risk_reward) if tp.risk_reward is not None else None
+    prob = float(rpt.signal_probability) if rpt.signal_probability is not None else None
+
+    score = 50.0
+    if rpt.verdict in ("BULLISH", "BEARISH"):
+        score += 8.0
+    else:
+        score -= 6.0
+
+    if prob is not None:
+        if prob >= 58.0:
+            score += 14.0
+        elif prob >= 55.0:
+            score += 7.0
+        elif prob < 50.0:
+            score -= 12.0
+
+    if rr is not None:
+        if rr >= 1.8:
+            score += 12.0
+        elif rr >= 1.4:
+            score += 5.0
+        elif rr < 1.2:
+            score -= 10.0
+    else:
+        score -= 4.0
+
+    if rpt.mtf_confluence and "confirms" in rpt.mtf_confluence.lower():
+        score += 6.0
+
+    # Penalties: setups that frequently decay for short-hold buyers.
+    if any("adx" in w and ("weak" in w or "absent" in w) for w in warn):
+        score -= 14.0
+    if contract == "call" and macd_dir in ("falling", "decelerating_bull"):
+        score -= 12.0
+    if contract == "put" and macd_dir in ("rising", "decelerating_bear"):
+        score -= 12.0
+    if any("daily downside override" in w for w in warn):
+        score -= 18.0
+    if any("daily quality gate" in w for w in warn):
+        score -= 15.0
+    if any("wide bid-ask spread" in w for w in warn):
+        score -= 10.0
+    if any("market is pricing a larger move than your target" in w for w in warn):
+        score -= 8.0
+    if any("forecasted move context" in w for w in warn):
+        score -= 4.0
+
+    quality = int(max(0, min(100, round(score))))
+    action: Literal["BUY", "WAIT", "AVOID"]
+    if quality >= 70:
+        action = "BUY"
+    elif quality >= 50:
+        action = "WAIT"
+    else:
+        action = "AVOID"
+
+    side = "CALL" if contract == "call" else "PUT"
+    entry = (
+        f"Enter {side} only if Daily+4H align and momentum confirms "
+        f"(MACD {'rising' if contract == 'call' else 'falling'} on entry bar)."
+    )
+    sell_plan = (
+        "Stop: -25% premium; trim +25%; take core at +40%; "
+        "exit same/next day if momentum invalidates."
+    )
+    return quality, action, entry, sell_plan
+
+
 def _overview_row_from_report(rpt: ReportOut) -> OverviewRow:
     tp = rpt.options.trade_plan
+    quality, action, entry, sell_plan = _short_hold_fields_from_report(rpt)
     return OverviewRow(
         symbol=rpt.symbol,
         name=rpt.name,
@@ -150,6 +230,10 @@ def _overview_row_from_report(rpt: ReportOut) -> OverviewRow:
         rec_target=tp.target_price,
         rec_stop=tp.stop_loss,
         rec_risk_reward=tp.risk_reward,
+        short_hold_quality=quality,
+        short_hold_action=action,
+        short_hold_entry=entry,
+        short_hold_sell_plan=sell_plan,
     )
 
 
@@ -165,13 +249,14 @@ def peek_overview_rows_cache(
     timeframe: Timeframe = "daily",
     *,
     metas: list[dict] | None = None,
+    max_age_sec: float = OVERVIEW_ROWS_CACHE_TTL_SEC,
 ) -> list[OverviewRow] | None:
     """Return a warm cache snapshot without triggering a build."""
     key = _overview_cache_key(timeframe, metas)
     now = time.time()
     with _overview_lock:
         hit = _overview_rows_cache.get(key)
-        if hit and (now - hit[0]) < OVERVIEW_ROWS_CACHE_TTL_SEC:
+        if hit and (now - hit[0]) < max_age_sec:
             return list(hit[1])
     return None
 
@@ -217,6 +302,14 @@ def overview_rows_fast(
     if cached is not None:
         schedule_overview_rows_refresh(timeframe, metas=metas)
         return cached
+    stale = peek_overview_rows_cache(
+        timeframe,
+        metas=metas,
+        max_age_sec=OVERVIEW_ROWS_STALE_SERVE_SEC,
+    )
+    if stale is not None:
+        schedule_overview_rows_refresh(timeframe, metas=metas, min_age_sec=0.0)
+        return stale
     key = _overview_cache_key(timeframe, metas)
     with _overview_lock:
         if key in _overview_building or key in _overview_refresh_pending:
@@ -338,6 +431,16 @@ def build_report(
     if not isinstance(breadth_val, float):
         breadth_val = 50.0
     final_score, regime_note = _apply_regime_gate(earnings_score, vix_val, breadth_val, cfg)
+    downside_override_note = ""
+    final_score, downside_override_note = _apply_daily_downside_override(
+        final_score,
+        timeframe,
+        price_action,
+        volume_stats,
+        rsi_block,
+        macd_block,
+        cfg,
+    )
 
     # Step 4: apply configurable thresholds → verdict + conviction
     verdict, conviction = _score_to_verdict(final_score, cfg)
@@ -369,6 +472,17 @@ def build_report(
         # Apply flow adjustment and re-derive verdict if it tips over a threshold
         if flow.flow_score_adj != 0.0:
             adj_composite = max(-1.0, min(1.0, composite + flow.flow_score_adj))
+            adj_composite, flow_override_note = _apply_daily_downside_override(
+                adj_composite,
+                timeframe,
+                price_action,
+                volume_stats,
+                rsi_block,
+                macd_block,
+                cfg,
+            )
+            if flow_override_note:
+                downside_override_note = flow_override_note
             new_verdict, new_conviction = _score_to_verdict(adj_composite, cfg)
             composite = round(adj_composite, 3)
             verdict = new_verdict
@@ -416,6 +530,48 @@ def build_report(
         signal_probability = probability_for_verdict(verdict)
         if signal_probability is not None:
             signal_probability_scope = "config"
+
+    quality_gate_note = ""
+    quality_gate_score, quality_gate_note = _apply_daily_quality_gate(
+        composite,
+        timeframe,
+        verdict,
+        signal_probability,
+        signal_probability_scope,
+        rsi_block,
+        macd_block,
+        adx_block,
+        cfg,
+    )
+    if quality_gate_note:
+        verdict, conviction = _score_to_verdict(quality_gate_score, cfg)
+        composite = round(quality_gate_score, 3)
+        headline = _headline(sym, timeframe, verdict, price_action, sma_block,
+                             macd_block, rsi_block, adx_block)
+        # Re-resolve probability so it matches the final verdict after gating.
+        signal_probability = None
+        signal_probability_scope = None
+        if _bt is not None:
+            for _row in _bt.get("per_symbol", []):
+                if _row.get("symbol") == sym:
+                    _bkt = _row.get("buckets", {}).get(verdict, {})
+                    if int(_bkt.get("n", 0)) >= 20:
+                        signal_probability = float(_bkt["hit_rate"])
+                        signal_probability_scope = "symbol"
+                    break
+            if signal_probability is None:
+                _agg = _bt.get("aggregate", {}).get(verdict, {})
+                if _agg.get("n"):
+                    signal_probability = float(_agg["hit_rate"])
+                    signal_probability_scope = "aggregate"
+        if signal_probability is None:
+            signal_probability = probability_for_signal(verdict, composite)
+            if signal_probability is not None:
+                signal_probability_scope = "config"
+        if signal_probability is None:
+            signal_probability = probability_for_verdict(verdict)
+            if signal_probability is not None:
+                signal_probability_scope = "config"
 
     narrative = _compose_narrative(
         meta=meta,
@@ -491,6 +647,10 @@ def build_report(
     # 3. RSI + Bollinger mean-reversion stretch (from gate above)
     if mr_note:
         signal_warnings.append(mr_note)
+    if downside_override_note:
+        signal_warnings.append(downside_override_note)
+    if quality_gate_note:
+        signal_warnings.append(quality_gate_note)
 
     # 4. ADX weak / absent — ranging market
     if adx_block.trend_strength in ("absent", "weak") and abs(composite) < 0.70:
@@ -1957,6 +2117,122 @@ def _apply_regime_gate(score: float, vix: float, breadth: float, cfg: dict) -> t
             note_parts.append(f"Breadth {breadth:.0f}% weak (strong bull retained)")
 
     return max(-1.0, min(1.0, score)), " · ".join(note_parts)
+
+
+def _apply_daily_downside_override(
+    score: float,
+    timeframe: Timeframe,
+    pa: PriceAction,
+    vs: VolumeStats,
+    rsi_b: IndicatorRSI,
+    macd_b: IndicatorMACD,
+    cfg: dict,
+) -> tuple[float, str]:
+    """Downgrade fragile daily bulls after a downside shock.
+
+    The daily model is trend-heavy by design and can remain bullish during
+    one-bar selloffs. When that selloff is large *and* momentum is weakening,
+    this guard forces a temporary NEUTRAL posture so the UI does not present a
+    strong directional green signal into a potential breakdown.
+    """
+    dcfg = cfg.get("daily_downside_override", {})
+    if not dcfg.get("enabled", True):
+        return score, ""
+    if timeframe != "daily":
+        return score, ""
+    bull_tau = float(cfg["thresholds"]["BULLISH"]["min_score"])
+    if score < bull_tau:
+        return score, ""
+
+    shock_threshold = float(dcfg.get("shock_threshold_pct", -2.5))
+    if shock_threshold > 0:
+        shock_threshold = -abs(shock_threshold)
+    rsi_floor = float(dcfg.get("rsi_support_floor", 62.0))
+    dist_ratio = float(dcfg.get("distribution_volume_ratio", 1.20))
+    margin_below_bull = float(dcfg.get("downgrade_margin_below_bull", 0.02))
+
+    downside_shock = pa.change_pct <= shock_threshold
+    momentum_weak = (
+        macd_b.bearish_cross_recent
+        or macd_b.histogram_direction in ("falling", "decelerating_bull")
+    )
+    distribution = (
+        (vs.trending_up and pa.change_pct < 0)
+        or (vs.unusual and vs.ratio >= dist_ratio and pa.change_pct < 0)
+    )
+    rsi_not_supportive = rsi_b.value is None or rsi_b.value < rsi_floor
+
+    if not downside_shock or not momentum_weak or not (distribution or rsi_not_supportive):
+        return score, ""
+
+    adjusted = min(score, bull_tau - margin_below_bull)
+    note = (
+        f"Daily downside override: {pa.change_pct:+.1f}% shock with weakening momentum "
+        f"(MACD {macd_b.histogram_direction.replace('_', ' ')}). "
+        "Bull verdict is temporarily downgraded to NEUTRAL until follow-through confirms."
+    )
+    return max(-1.0, min(1.0, adjusted)), note
+
+
+def _apply_daily_quality_gate(
+    score: float,
+    timeframe: Timeframe,
+    verdict: str,
+    signal_probability: Optional[float],
+    signal_probability_scope: Optional[str],
+    rsi_b: IndicatorRSI,
+    macd_b: IndicatorMACD,
+    adx_b: IndicatorADX,
+    cfg: dict,
+) -> tuple[float, str]:
+    """Downgrade fragile daily bullish setups for short-hold option users."""
+    qcfg = cfg.get("daily_quality_gate", {})
+    if not qcfg.get("enabled", True):
+        return score, ""
+    if timeframe != "daily" or verdict != "BULLISH":
+        return score, ""
+
+    bull_tau = float(cfg["thresholds"]["BULLISH"]["min_score"])
+    min_hit = float(qcfg.get("min_symbol_hit_rate_for_bull", 50.0))
+    rsi_floor = float(qcfg.get("max_rsi_for_falling_macd_bull", 55.0))
+    margin = float(qcfg.get("downgrade_margin_below_bull", 0.01))
+    require_symbol_scope = bool(qcfg.get("require_symbol_scope_for_prob_gate", True))
+
+    prob_gate = (
+        signal_probability is not None
+        and signal_probability < min_hit
+        and (
+            (signal_probability_scope == "symbol")
+            if require_symbol_scope
+            else (signal_probability_scope in {"symbol", "aggregate", "config"})
+        )
+    )
+    weak_momentum = (
+        macd_b.bearish_cross_recent
+        or macd_b.histogram_direction in ("falling", "decelerating_bull")
+    )
+    weak_trend = adx_b.trend_strength in ("absent", "weak")
+    weak_rsi_support = rsi_b.value is None or rsi_b.value < rsi_floor
+    structure_gate = weak_momentum and weak_trend and weak_rsi_support
+
+    if not prob_gate and not structure_gate:
+        return score, ""
+
+    reasons: list[str] = []
+    if prob_gate:
+        reasons.append(
+            f"symbol hit-rate {signal_probability:.1f}% below {min_hit:.1f}%"
+        )
+    if structure_gate:
+        reasons.append(
+            f"weak momentum/trend (MACD {macd_b.histogram_direction.replace('_', ' ')}, ADX {adx_b.trend_strength})"
+        )
+    adjusted = min(score, bull_tau - margin)
+    note = (
+        "Daily quality gate: bullish setup downgraded to NEUTRAL for short-hold risk control "
+        f"because {' and '.join(reasons)}."
+    )
+    return max(-1.0, min(1.0, adjusted)), note
 
 
 def _score_to_verdict(score: float, cfg: dict) -> tuple[str, float]:

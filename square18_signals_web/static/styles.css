@@ -662,7 +662,30 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: 
 }
 .pill-badge.success { color: var(--success); background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 50%, transparent); }
 .pill-badge.danger  { color: var(--danger);  background: var(--danger-soft);  border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+.pill-badge.warning { color: var(--warning); background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 50%, transparent); }
 .pill-badge.neutral { color: var(--text-muted); background: var(--bg-raised); }
+.analyst-rec-dim { opacity: 0.58; }
+.analyst-top-picks {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--stroke-soft);
+  background: color-mix(in srgb, var(--bg-elev) 86%, #112238);
+  font-size: 11px;
+}
+.analyst-top-pick {
+  background: color-mix(in srgb, var(--success-soft) 70%, transparent);
+}
+.top-pick-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  margin-right: 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--success) 55%, transparent);
+  background: color-mix(in srgb, var(--success) 26%, transparent);
+  color: color-mix(in srgb, var(--success) 88%, var(--text));
+  font-size: 10px;
+  font-weight: 700;
+}
 
 /* --- Tables --------------------------------------------------------------- */
 
