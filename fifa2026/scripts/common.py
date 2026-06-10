@@ -16,6 +16,9 @@ CONFIG_EXAMPLE = PROJECT_ROOT / "config" / "settings.example.yaml"
 OUTPUT_AUDIO = PROJECT_ROOT / "output" / "audio"
 OUTPUT_VIDEO = PROJECT_ROOT / "output" / "video"
 OUTPUT_REVIEW = PROJECT_ROOT / "output" / "review"
+OUTPUT_APPROVED = OUTPUT_REVIEW / "approved"
+POST_LOG = PROJECT_ROOT / "post_log.csv"
+SECRETS_DIR = PROJECT_ROOT / "secrets"
 ASSETS_BACKGROUNDS = PROJECT_ROOT / "assets" / "backgrounds"
 ASSETS_MUSIC = PROJECT_ROOT / "assets" / "music"
 ASSETS_FONTS = PROJECT_ROOT / "assets" / "fonts"
@@ -56,6 +59,24 @@ def review_video_path(day: int) -> Path:
 
 def review_cover_path(day: int) -> Path:
     return OUTPUT_REVIEW / f"day_{day:02d}_cover.jpg"
+
+
+def approved_video_path(day: int) -> Path:
+    return OUTPUT_APPROVED / f"day_{day:02d}.mp4"
+
+
+def approved_cover_path(day: int) -> Path:
+    return OUTPUT_APPROVED / f"day_{day:02d}_cover.jpg"
+
+
+def day_from_filename(name: str) -> int | None:
+    match = re.match(r"day_(\d+)\.mp4$", name, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def parse_hashtag_tags(raw: str, limit: int = 15) -> list[str]:
+    tags = [t.lstrip("#").strip() for t in re.split(r"[\s,]+", raw.strip()) if t.strip()]
+    return [t[:30] for t in tags if t][:limit]
 
 
 def resolve_font(config: dict) -> Path | None:

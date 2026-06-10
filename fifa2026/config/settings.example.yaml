@@ -21,13 +21,15 @@ captions:
   position: bottom
 
 upload:
-  default_privacy: private  # scheduled publish flips to public
-  category_id: "17"       # Sports
+  default_privacy: private  # scheduled → public at publishAt
+  category_id: "17"         # Sports
   made_for_kids: false
+  default_region: americas  # americas | europe | asia
+  paid_promotion: false     # set true for sponsored Shorts
   affiliate_footer: |
     Affiliate links (disclosure): [add your links here]
 
 posting_times:
-  asia: "12:30"      # IST reference in CSV
+  asia: "12:30"      # IST
   europe: "20:00"    # CET
-  americas: "12:00"  # ET
+  americas: "12:00"  # ET (default upload schedule)

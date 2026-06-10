@@ -1,5 +1,7 @@
 .env
 config/settings.yaml
+secrets/*
+!secrets/.gitkeep
 output/audio/*
 !output/audio/.gitkeep
 output/video/*
