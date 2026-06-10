@@ -19,19 +19,32 @@ fifa2026/
 └── requirements.txt
 ```
 
-## Quick start (after scripts are built)
+## Quick start
+
+Requires **Python 3.10+** and **ffmpeg** (`brew install ffmpeg` on macOS).
 
 ```bash
 cd fifa2026
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # add API keys
-cp config/settings.example.yaml config/settings.yaml
+cp config/settings.example.yaml config/settings.yaml   # if missing
 
+# Build one Short (voice → video → cover)
+python scripts/run_batch.py --days 1
+
+# Build a week
 python scripts/run_batch.py --days 1-7
-# Review output/review/*.mp4 → move approved to output/review/approved/
-python scripts/upload_youtube.py
+
+# Review output/review/day_01.mp4 → move approved to output/review/approved/
+```
+
+Individual steps:
+
+```bash
+python scripts/generate_voiceover.py --days 1
+python scripts/build_video.py --day 1
+python scripts/make_thumbnail.py --day 1
 ```
 
 ## Docs
