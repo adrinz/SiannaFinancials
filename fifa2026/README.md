@@ -39,6 +39,13 @@ python scripts/run_batch.py --days 1-7
 # Preview (generated locally — NOT in git)
 open output/review/day_01.mp4
 
+Videos use **player spotlight cards + country flags** (no burned-in captions).
+Edit players in `data/top_players.json`; flags auto-cache to `assets/flags/`.
+
+**Stock assets:** drop vertical video loops into `assets/backgrounds/` and music into `assets/music/`.
+The renderer uses those first; the pitch graphic is only a fallback when no videos are found.
+Each day picks a stable background + track from your library (day 1 → first file, day 2 → second, etc.).
+
 # Approve → move to upload queue
 cp output/review/day_01.mp4 output/review/approved/
 cp output/review/day_01_cover.jpg output/review/approved/   # optional

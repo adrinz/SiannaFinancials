@@ -11,6 +11,10 @@ video:
   fps: 30
   hook_duration_sec: 2
   music_volume: 0.12
+  prefer_stock_assets: true     # use assets/backgrounds/*.mp4 and assets/music/*.mp3 first
+  show_captions: false          # burned-in narration captions (off by default)
+  player_spotlight: true        # rotate top-player cards with flags
+  players_per_short: 5          # how many players to cycle per video
 
 captions:
   font: assets/fonts/Inter-Bold.ttf
