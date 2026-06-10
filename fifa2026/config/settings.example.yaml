@@ -1,0 +1,33 @@
+# Copy to config/settings.yaml
+
+voice:
+  provider: edge-tts  # edge-tts | elevenlabs
+  edge_voice: en-GB-RyanNeural
+  elevenlabs_voice_id: ""
+
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  hook_duration_sec: 2
+  music_volume: 0.12
+
+captions:
+  font: assets/fonts/Inter-Bold.ttf
+  font_size: 72
+  color: "#FFFFFF"
+  stroke_color: "#000000"
+  stroke_width: 3
+  position: bottom
+
+upload:
+  default_privacy: private  # scheduled publish flips to public
+  category_id: "17"       # Sports
+  made_for_kids: false
+  affiliate_footer: |
+    Affiliate links (disclosure): [add your links here]
+
+posting_times:
+  asia: "12:30"      # IST reference in CSV
+  europe: "20:00"    # CET
+  americas: "12:00"  # ET

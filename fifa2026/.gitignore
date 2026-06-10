@@ -1,0 +1,15 @@
+.env
+config/settings.yaml
+output/audio/*
+!output/audio/.gitkeep
+output/video/*
+!output/video/.gitkeep
+output/review/*
+!output/review/.gitkeep
+!output/review/approved/
+output/review/approved/*
+!output/review/approved/.gitkeep
+post_log.csv
+*.mp3
+*.mp4
+.venv/
