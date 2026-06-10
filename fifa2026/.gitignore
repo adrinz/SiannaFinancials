@@ -15,3 +15,5 @@ post_log.csv
 *.mp3
 *.mp4
 .venv/
+assets/flags/*
+!assets/flags/.gitkeep

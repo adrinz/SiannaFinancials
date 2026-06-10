@@ -1,0 +1,14 @@
+[
+  {"name": "Lionel Messi", "country": "Argentina", "code": "ar", "tag": "GOAT"},
+  {"name": "Kylian Mbappé", "country": "France", "code": "fr", "tag": "PACE"},
+  {"name": "Harry Kane", "country": "England", "code": "gb-eng", "tag": "LEADER"},
+  {"name": "Vinícius Jr", "country": "Brazil", "code": "br", "tag": "FLAIR"},
+  {"name": "Jude Bellingham", "country": "England", "code": "gb-eng", "tag": "ENGINE"},
+  {"name": "Lamine Yamal", "country": "Spain", "code": "es", "tag": "WONDERKID"},
+  {"name": "Erling Haaland", "country": "Norway", "code": "no", "tag": "GOALS"},
+  {"name": "Mohamed Salah", "country": "Egypt", "code": "eg", "tag": "CLUTCH"},
+  {"name": "Son Heung-min", "country": "South Korea", "code": "kr", "tag": "CAPTAIN"},
+  {"name": "Kaoru Mitoma", "country": "Japan", "code": "jp", "tag": "SILENT"},
+  {"name": "Christian Pulisic", "country": "USA", "code": "us", "tag": "CAPTAIN"},
+  {"name": "Alexis Mac Allister", "country": "Argentina", "code": "ar", "tag": "MIDFIELD"}
+]

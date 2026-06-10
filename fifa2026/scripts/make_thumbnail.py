@@ -9,15 +9,14 @@ import sys
 
 from PIL import Image
 
-from build_video import render_text_image
-from common import load_shorts_df, resolve_font, load_config, review_cover_path, review_video_path
+from build_video import render_hook_image
+from common import load_config, load_shorts_df, resolve_font, review_cover_path, review_video_path
 
 
 def strongest_title_words(title: str, count: int = 3) -> str:
     words = [w for w in re.split(r"\s+", title.strip()) if w]
     if len(words) <= count:
         return title.upper()
-    # Prefer longer impactful words, keep original order
     ranked = sorted(words, key=len, reverse=True)[:count]
     ordered = [w for w in words if w in ranked]
     return " ".join(ordered[:count]).upper()
@@ -49,15 +48,11 @@ def make_thumbnail(day: int, force: bool = False) -> None:
     width, height = frame.shape[1], frame.shape[0]
     font_path = resolve_font(config)
     caption_cfg = config.get("captions", {})
-    overlay = render_text_image(
+    overlay = render_hook_image(
         title,
         (width, height),
         font_path,
-        int(caption_cfg.get("font_size", 72) * 1.3),
-        fill="#FFE566",
-        stroke_fill="#000000",
-        stroke_width=4,
-        y_anchor="top",
+        int(caption_cfg.get("font_size", 72) * 1.2),
     )
 
     base = Image.fromarray(frame.astype("uint8"))
