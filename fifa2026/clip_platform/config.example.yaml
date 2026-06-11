@@ -1,0 +1,50 @@
+source:
+  channel_id: UCpcTrCXblq78GZrTUTLWeBw
+  channel_handle: "@fifa"
+  channel_url: https://www.youtube.com/@fifa
+  poll_interval_sec: 300
+  seed_on_first_run: false   # auto agent uses baseline_seen instead
+
+auto_promo:
+  enabled: true
+  variants: 1                # one promo Short per new @fifa video (avoids duplicate titles)
+  auto_publish: true         # publish public to @ScrollandSoull
+  poll_interval_sec: 300     # 5 minutes
+  max_videos_per_cycle: 1    # process newest upload only per poll (avoid bursts)
+
+clips:
+  min_duration_sec: 15
+  max_duration_sec: 45
+  max_clips_per_video: 5
+  min_gap_sec: 30          # don't pick overlapping moments
+  audio_peak_threshold: 0.65
+
+render:
+  width: 1080
+  height: 1920
+  fps: 30
+
+publish:
+  youtube: true
+  tiktok: false
+  instagram: false
+  privacy: public          # public | private | unlisted (promo Shorts)
+  safe_promo_mode: true    # NEVER re-upload FIFA footage — use build_promo.py instead
+  require_review: true     # raw clips stay in review/ until approved
+  title_suffix: " #Shorts"
+  description_template: |
+    {title}
+
+    Source: {channel_handle} — {source_url}
+    Shared for fan discussion. All rights belong to FIFA.
+    #WorldCup2026 #FIFA #football #Shorts
+
+platforms:
+  youtube:
+    category_id: "17"
+  tiktok:
+    client_key: ""
+    client_secret: ""
+  instagram:
+    page_id: ""
+    ig_user_id: ""

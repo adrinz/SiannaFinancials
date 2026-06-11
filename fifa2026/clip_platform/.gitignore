@@ -1,0 +1,5 @@
+config.yaml
+data/
+*.mp4
+*.wav
+*.db
