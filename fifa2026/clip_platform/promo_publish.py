@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from db import is_promo_published, log_promo_post, source_promo_fully_published
+from post_extras import run_post_publish_extras
 from promo_builder import HOOKS, PROMO_DIR, build_promo, fetch_metadata, promo_clip_id, promo_description
 from publishers.youtube_publisher import publish_short
 
@@ -42,6 +43,7 @@ def publish_promo_variant(
     if not log_promo_post(clip_id, "youtube", yt_id):
         print(f"  warning: {clip_id} logged by another process — uploaded {yt_id}")
     print(f"    → https://studio.youtube.com/video/{yt_id}/edit")
+    run_post_publish_extras(video_id, yt_id, meta, config)
     return yt_id
 
 

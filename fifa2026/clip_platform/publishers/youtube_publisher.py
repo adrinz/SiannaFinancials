@@ -51,3 +51,23 @@ def delete_video(video_id: str) -> None:
     """Delete a video from the authenticated YouTube channel."""
     youtube = get_youtube_service()
     youtube.videos().delete(id=video_id).execute()
+
+
+def post_video_comment(youtube_video_id: str, text: str) -> str:
+    """
+    Post a top-level comment on one of your channel's videos.
+    Returns comment thread id. (YouTube API cannot pin — pin manually in Studio.)
+    """
+    youtube = get_youtube_service()
+    body = {
+        "snippet": {
+            "videoId": youtube_video_id,
+            "topLevelComment": {
+                "snippet": {
+                    "textOriginal": text[:10000],
+                }
+            },
+        }
+    }
+    resp = youtube.commentThreads().insert(part="snippet", body=body).execute()
+    return resp["id"]

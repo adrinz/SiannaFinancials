@@ -31,6 +31,12 @@ publish:
   privacy: public          # public | private | unlisted (promo Shorts)
   safe_promo_mode: true    # NEVER re-upload FIFA footage — use build_promo.py instead
   require_review: true     # raw clips stay in review/ until approved
+  fifa_link_comment: true  # auto-post FIFA source link as first comment (pin in Studio)
+  community_post_queue: true  # save Community tab draft to data/community_queue/
+  comment_template: |      # optional override; {source_url} {title} {channel_url}
+    ▶️ FULL OFFICIAL FIFA VIDEO: {source_url}
+
+    Watch the original on @fifa — pin this comment so viewers jump to the source.
   title_suffix: " #Shorts"
   description_template: |
     {title}

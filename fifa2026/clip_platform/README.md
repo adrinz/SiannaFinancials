@@ -62,9 +62,27 @@ python clip_platform/auto_promo_agent.py --once
 ### Manual promo workflow
 
 ```bash
-python clip_platform/build_promo.py --video-id VIDEO_ID --variants 3
+python clip_platform/build_promo.py --video-id VIDEO_ID --variants 1
 python clip_platform/publish_promo.py --video-id VIDEO_ID
 ```
+
+### Promo enhancements (auto after publish)
+
+| Feature | What it does |
+|---------|----------------|
+| **Team flag cards** | Parses FIFA title → country flags + VS card on the Short |
+| **FIFA link comment** | Posts source URL as first comment on your Short (pin in Studio) |
+| **Community draft** | Saves paste-ready post to `data/community_queue/VIDEO_ID.txt` |
+
+```bash
+# List / regenerate community drafts
+python clip_platform/community_post_cli.py --list
+python clip_platform/community_post_cli.py --video-id VIDEO_ID --promo-id YOUR_SHORT_ID
+```
+
+Team names → flag codes: `data/team_codes.json` (extend for more nations).
+
+**Note:** YouTube Data API cannot pin comments or publish Community posts — pin the auto-comment in Studio; paste the community draft manually.
 
 ### Run in background (Mac)
 

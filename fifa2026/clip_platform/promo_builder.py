@@ -22,8 +22,10 @@ PLATFORM_DIR = Path(__file__).resolve().parent
 ROOT = PLATFORM_DIR.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from build_video import build_background_clip, pick_background, render_hook_image  # noqa: E402
+from build_video import build_background_clip, pick_background  # noqa: E402
 from common import resolve_font, load_config as load_root_config  # noqa: E402
+from promo_visuals import render_match_card, render_promo_hook  # noqa: E402
+from team_codes import resolve_match_teams, teams_from_title  # noqa: E402
 from tools_cmd import ytdlp_cmd  # noqa: E402
 
 PROMO_DIR = PLATFORM_DIR / "data" / "clips" / "promo"
@@ -98,15 +100,12 @@ def fetch_metadata(video_id: str) -> dict:
     }
 
 
-def teams_from_title(title: str) -> tuple[str, str]:
-    m = re.search(r"([^|]+?)\s+vs\s+([^|]+)", title, re.I)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    return "Team A", "Team B"
-
-
 def promo_script(meta: dict, variant: int) -> str:
     team_a, team_b = teams_from_title(meta["title"])
+    if not team_a:
+        team_a, team_b = "the home side", "the away side"
+    elif not team_b:
+        team_b = "their opponents"
     hooks = [
         f"{team_a} versus {team_b}. FIFA just posted the official World Cup preview, and this is your quick breakdown before kickoff. "
         f"Who has the edge, what to watch, and why this match matters. "
@@ -150,7 +149,7 @@ def render_credit_overlay(size: tuple[int, int], font_path, source_url: str) -> 
     return np.array(img)
 
 
-def build_promo(video_id: str, variant: int = 0) -> Path:
+def build_promo(video_id: str, variant: int = 0) -> tuple[Path, dict, str]:
     meta = fetch_metadata(video_id)
     script = promo_script(meta, variant)
     hook = HOOKS[variant % len(HOOKS)]
@@ -173,13 +172,21 @@ def build_promo(video_id: str, variant: int = 0) -> Path:
     bg_path = bg_result[0] if isinstance(bg_result, tuple) else bg_result
     base = build_background_clip(bg_path, width, height, duration)
 
-    hook_img = render_hook_image(hook, (width, height), font_path, 52)
-    hook_clip = ImageClip(hook_img).set_duration(min(3.0, duration)).set_start(0)
+    layers = [base]
 
     credit = render_credit_overlay((width, height), font_path, meta["source_url"])
-    credit_clip = ImageClip(credit).set_duration(duration).set_start(0)
+    layers.append(ImageClip(credit).set_duration(duration).set_start(0))
 
-    video = CompositeVideoClip([base, credit_clip, hook_clip], size=(width, height))
+    match_teams = resolve_match_teams(meta["title"])
+    if match_teams:
+        card = render_match_card(match_teams, (width, height), font_path)
+        card_dur = min(5.5, max(duration * 0.5, 3.0))
+        layers.append(ImageClip(card).set_duration(card_dur).set_start(0.35))
+
+    hook_img = render_promo_hook(hook, (width, height), font_path)
+    layers.append(ImageClip(hook_img).set_duration(min(3.5, duration)).set_start(0))
+
+    video = CompositeVideoClip(layers, size=(width, height))
     video = video.set_duration(duration).set_audio(voice)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +198,12 @@ def build_promo(video_id: str, variant: int = 0) -> Path:
 
 
 def promo_description(meta: dict, hook: str) -> str:
+    tags = ["#WorldCup2026", "#FIFA", "#football", "#Shorts"]
+    for name, code in resolve_match_teams(meta["title"]):
+        tag = re.sub(r"[^A-Za-z0-9]", "", name.replace(" ", ""))
+        if tag:
+            tags.append(f"#{tag}")
+    tag_line = " ".join(dict.fromkeys(tags))
     return f"""{meta['title']}
 
 {hook}
@@ -201,5 +214,13 @@ def promo_description(meta: dict, hook: str) -> str:
 This Short uses original commentary and royalty-free visuals.
 It does NOT re-upload FIFA footage. All match media rights belong to FIFA.
 
-#WorldCup2026 #FIFA #football #Shorts #KoreaRepublic #Czechia
+{tag_line}
 """
+
+
+def fifa_link_comment_text(meta: dict) -> str:
+    return (
+        f"▶️ FULL OFFICIAL FIFA VIDEO: {meta['source_url']}\n\n"
+        "Watch the original on @fifa — we never re-upload their footage. "
+        "Pin this comment so viewers can jump straight to the source."
+    )

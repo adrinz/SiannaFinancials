@@ -55,6 +55,18 @@ def init_db() -> None:
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_clip_platform
                 ON posts(clip_id, platform);
+
+            CREATE TABLE IF NOT EXISTS post_actions (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_video_id TEXT,
+                youtube_video_id TEXT,
+                action_type TEXT,
+                detail TEXT,
+                created_at TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_post_actions_unique
+                ON post_actions(source_video_id, action_type);
             """
         )
         conn.commit()
@@ -166,6 +178,35 @@ def log_promo_post(clip_id: str, platform: str, platform_video_id: str) -> bool:
             VALUES (?, ?, ?, 'posted', ?)
             """,
             (clip_id, platform, platform_video_id, utcnow()),
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def post_action_done(source_video_id: str, action_type: str) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM post_actions WHERE source_video_id = ? AND action_type = ?",
+            (source_video_id, action_type),
+        ).fetchone()
+    return row is not None
+
+
+def log_post_action(
+    source_video_id: str,
+    action_type: str,
+    *,
+    youtube_video_id: str = "",
+    detail: str = "",
+) -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO post_actions
+            (source_video_id, youtube_video_id, action_type, detail, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (source_video_id, youtube_video_id, action_type, detail, utcnow()),
         )
         conn.commit()
     return cur.rowcount > 0
