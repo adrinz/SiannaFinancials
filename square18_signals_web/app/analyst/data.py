@@ -108,6 +108,10 @@ class OHLCV:
 # Public API
 # ---------------------------------------------------------------------------
 
+_MIN_BARS_FOR_ANALYST = 60
+_MIN_BARS_FOR_LIVE_PRIORITY = 8
+_LIVE_PRIORITY_SYMBOLS = {"SPCX"}
+
 
 def get_ohlcv(symbol: str, timeframe: Timeframe) -> OHLCV:
     """Return OHLCV for ``symbol`` at ``timeframe``.
@@ -116,14 +120,35 @@ def get_ohlcv(symbol: str, timeframe: Timeframe) -> OHLCV:
     synthesizes. Cache entries older than ``_CACHE_TTL_SECONDS`` are
     considered stale for intraday timeframes.
     """
+    sym = symbol.upper()
+    prefer_live_short_history = sym in _LIVE_PRIORITY_SYMBOLS
     cached = _read_cache(symbol, timeframe)
+    # Some newly listed symbols can return too-short provider history; treat
+    # that as non-actionable and continue to fallback paths.
     if cached is not None:
-        return cached
+        if prefer_live_short_history and cached.source == "synthetic":
+            cached = None
+        else:
+            if len(cached.close) >= _MIN_BARS_FOR_ANALYST:
+                return cached
+            if (
+                prefer_live_short_history
+                and cached.source in {"tradier", "yfinance"}
+                and len(cached.close) >= _MIN_BARS_FOR_LIVE_PRIORITY
+            ):
+                return cached
 
     series = _fetch_tradier(symbol, timeframe)
     if series is None:
         series = _fetch_yfinance(symbol, timeframe)
+    # For newly listed symbols (e.g., recent IPOs), keep genuine live bars
+    # instead of replacing short history with synthetic data.
     if series is None:
+        series = _synthesize(symbol, timeframe)
+    elif (
+        len(series.close) < _MIN_BARS_FOR_ANALYST
+        and not prefer_live_short_history
+    ):
         series = _synthesize(symbol, timeframe)
 
     _write_cache(series)
@@ -199,16 +224,42 @@ def _fetch_tradier(symbol: str, timeframe: Timeframe) -> Optional[OHLCV]:
                 start_dt.strftime("%Y-%m-%d"), 
                 end_dt.strftime("%Y-%m-%d")
             )
-            if not data:
-                return None
-            
-            df = pd.DataFrame(data)
-            if df.empty or "close" not in df.columns:
-                return None
-                
-            # Tradier history returns 'date'
-            df["timestamp"] = pd.to_datetime(df["date"]).dt.tz_localize("America/New_York").dt.tz_convert("UTC")
-            df = df.set_index("timestamp").sort_index()
+            if data:
+                df = pd.DataFrame(data)
+                if df.empty or "close" not in df.columns:
+                    return None
+                # Tradier history returns 'date'
+                df["timestamp"] = pd.to_datetime(df["date"]).dt.tz_localize("America/New_York").dt.tz_convert("UTC")
+                df = df.set_index("timestamp").sort_index()
+            else:
+                # New listings can be missing in the daily history endpoint while
+                # intraday prints are already available. Build daily/weekly bars
+                # from 15m timesales before falling back to synthetic.
+                ts_start = end_dt - timedelta(days=45 if timeframe == "daily" else 190)
+                ts_data = get_timesales(
+                    symbol,
+                    "15min",
+                    ts_start.strftime("%Y-%m-%d %H:%M"),
+                    end_dt.strftime("%Y-%m-%d %H:%M"),
+                )
+                if not ts_data:
+                    return None
+                df = pd.DataFrame(ts_data)
+                if df.empty or "close" not in df.columns:
+                    return None
+                df["timestamp"] = pd.to_datetime(df["time"]).dt.tz_localize("America/New_York").dt.tz_convert("UTC")
+                df = df.set_index("timestamp").sort_index()
+                agg = {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+                rule = "1d" if timeframe == "daily" else "1wk"
+                df = df.resample(rule).agg(agg).dropna(subset=["open", "close"])
+                if df.empty:
+                    return None
             
         elif timeframe in ("1h", "4h"):
             # Fetch 40 days of 15min data (gives ~2000 bars, enough for 200 SMA on 1h/4h)

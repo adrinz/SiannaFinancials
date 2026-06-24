@@ -103,6 +103,12 @@ OVERVIEW_MAX_WORKERS = 6
 # overview tables and the Analyst tab shows "No data" for ~90s.
 OVERVIEW_TOTAL_TIMEOUT_SEC = 120.0
 OVERVIEW_MIN_CACHE_ROWS_RATIO = 0.5
+_MIN_BARS_DEFAULT = 60
+_MIN_BARS_LIVE = 20
+_MIN_BARS_NEW_ISSUE_LIVE: dict[str, int] = {
+    # Fresh IPO support: run with shorter live history instead of forcing synthetic.
+    "SPCX": 2,
+}
 
 
 def _lock_for_overview_key(key: str) -> threading.Lock:
@@ -195,8 +201,8 @@ def _short_hold_fields_from_report(
 
     side = "CALL" if contract == "call" else "PUT"
     entry = (
-        f"Enter {side} only if Daily+4H align and momentum confirms "
-        f"(MACD {'rising' if contract == 'call' else 'falling'} on entry bar)."
+        f"{side} trigger: Daily+4H aligned and 1H MACD "
+        f"{'rising' if contract == 'call' else 'falling'}."
     )
     sell_plan = (
         "Stop: -25% premium; trim +25%; take core at +40%; "
@@ -355,8 +361,21 @@ def build_report(
         raise ValueError(f"unknown symbol: {symbol}")
 
     data = get_ohlcv(sym, timeframe)
-    if len(data) < 60:
-        raise ValueError(f"insufficient history for {sym} at {timeframe}")
+    required_bars = _MIN_BARS_DEFAULT
+    if data.source in {"tradier", "yfinance"}:
+        required_bars = _MIN_BARS_LIVE
+        required_bars = min(required_bars, _MIN_BARS_NEW_ISSUE_LIVE.get(sym, required_bars))
+    if len(data) < required_bars:
+        raise ValueError(
+            f"insufficient history for {sym} at {timeframe} "
+            f"(have {len(data)}, need {required_bars}, source={data.source})"
+        )
+    short_history_note = ""
+    if data.source in {"tradier", "yfinance"} and len(data) < _MIN_BARS_DEFAULT:
+        short_history_note = (
+            f"Limited live history: only {len(data)} bars available at {timeframe}. "
+            "Signals can be noisier for newly listed symbols until a fuller sample builds."
+        )
 
     closes = data.close
     y_spot = yf_last_price(sym, bypass_cache=fresh_quotes)
@@ -634,6 +653,8 @@ def build_report(
             "⚠ SYNTHETIC DATA — live market connection failed; this signal uses "
             "simulated (GBM) price history. DO NOT trade on this."
         )
+    elif short_history_note:
+        signal_warnings.append(short_history_note)
     if regime_data_fallback:
         signal_warnings.append(
             "Regime data unavailable (VIX/breadth). Using neutral fallback assumptions "

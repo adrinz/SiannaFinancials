@@ -1080,6 +1080,9 @@ function initTabs() {
         _renderPotentialMoveSymbolOptions();
         _loadPotentialMoveThresholdInputs();
         renderPotentialMovePanel();
+      } else if (target === 'protrader') {
+        switchView('protrader');
+        initProTraderOnce();
       } else {
         switchView(target);
       }
@@ -3960,6 +3963,12 @@ const etf = {
   overview: [],
 };
 
+const protrader = {
+  initialized: false,
+  data: null,
+  _reqId: 0,
+};
+
 async function initAnalystOnce() {
   if (analyst.initialized) return;
   analyst.initialized = true;
@@ -4332,6 +4341,143 @@ function renderOverviewList() {
         )
       )
     );
+  }
+}
+
+async function initProTraderOnce() {
+  if (protrader.initialized) return;
+  protrader.initialized = true;
+  const btn = $('#protrader-refresh');
+  if (btn) {
+    btn.addEventListener('click', () => loadProTraderConclusion({ forceRefresh: true }));
+  }
+  await loadProTraderConclusion({ forceRefresh: false });
+}
+
+function _renderProTraderRows(rows, tbody, { isOptions = false } = {}) {
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!rows || !rows.length) {
+    tbody.innerHTML = isOptions
+      ? '<tr><td colspan="10" class="loading">No high-conviction options actions right now.</td></tr>'
+      : '<tr><td colspan="9" class="loading">No high-conviction stock actions right now.</td></tr>';
+    return;
+  }
+  for (const r of rows) {
+    const conf = Number.isFinite(Number(r.confidence_score)) ? Number(r.confidence_score) : 0;
+    const q = Number.isFinite(Number(r.short_hold_quality)) ? Number(r.short_hold_quality) : null;
+    const confCls = conf >= 72 ? 'success' : conf >= 55 ? 'warning' : 'neutral';
+    const actionCls = String(r.action || '').toUpperCase() === 'BUY' ? 'success' : 'danger';
+    const sideTxt = String(r.side || '—').toUpperCase();
+    const sideCls = sideTxt === 'CALL' || sideTxt === 'LONG'
+      ? 'success'
+      : sideTxt === 'PUT' || sideTxt === 'REDUCE'
+        ? 'danger'
+        : 'neutral';
+    const autoTxt = String(r.auto_action || 'HOLD').toUpperCase();
+    const autoCls = autoTxt === 'BUY_NOW'
+      ? 'success'
+      : autoTxt === 'REDUCE_NOW'
+        ? 'danger'
+        : autoTxt === 'WATCH'
+          ? 'warning'
+          : 'neutral';
+    const dataTxt = String(r.data_integrity || 'DEGRADED').toUpperCase();
+    const dataCls = dataTxt === 'LIVE' ? 'success' : dataTxt === 'SYNTHETIC' ? 'danger' : 'warning';
+    const dataBadgeTitle = r.data_note || '';
+    const cat = r.catalyst ? h('div', { class: 'mono muted protrader-catalyst' }, r.catalyst) : null;
+    const reason = h('div', { class: 'muted protrader-reason' }, r.reason || '—');
+    if (isOptions) {
+      const contract = `${sideTxt} $${fmtStrike(r.strike)} · ${r.expiry_date || '—'}`;
+      tbody.append(
+        h('tr', {},
+          h('td', { class: 'sym mono' }, r.symbol),
+          h('td', {}, h('span', { class: `pill-badge ${actionCls}` }, r.action || '—')),
+          h('td', {}, h('span', { class: `pill-badge ${autoCls}` }, autoTxt.replace('_', ' '))),
+          h('td', {}, h('span', { class: `pill-badge ${dataCls}`, title: dataBadgeTitle }, dataTxt)),
+          h('td', {}, h('span', { class: `pill-badge ${sideCls}` }, contract)),
+          h('td', { class: 'num mono' }, h('span', { class: `pill-badge ${confCls}` }, `${conf}`)),
+          h('td', { class: 'num mono' }, q != null ? h('span', { class: `pill-badge ${q >= 70 ? 'success' : q >= 50 ? 'warning' : 'danger'}` }, `${q}`) : '—'),
+          h('td', { class: 'num mono' }, r.risk_reward != null ? `${Number(r.risk_reward).toFixed(2)}×` : '—'),
+          h('td', { class: 'muted' }, r.entry_plan || '—'),
+          h('td', { class: 'muted' }, h('div', {}, r.exit_plan || '—'), cat, reason),
+        )
+      );
+    } else {
+      tbody.append(
+        h('tr', {},
+          h('td', { class: 'sym mono' }, r.symbol),
+          h('td', {}, h('span', { class: `pill-badge ${actionCls}` }, r.action || '—')),
+          h('td', {}, h('span', { class: `pill-badge ${autoCls}` }, autoTxt.replace('_', ' '))),
+          h('td', {}, h('span', { class: `pill-badge ${dataCls}`, title: dataBadgeTitle }, dataTxt)),
+          h('td', {}, h('span', { class: `pill-badge ${sideCls}` }, sideTxt)),
+          h('td', { class: 'num mono' }, h('span', { class: `pill-badge ${confCls}` }, `${conf}`)),
+          h('td', { class: 'num mono' }, q != null ? h('span', { class: `pill-badge ${q >= 70 ? 'success' : q >= 50 ? 'warning' : 'danger'}` }, `${q}`) : '—'),
+          h('td', { class: 'muted' }, r.entry_plan || '—'),
+          h('td', { class: 'muted' }, h('div', {}, r.exit_plan || '—'), cat, reason),
+        )
+      );
+    }
+  }
+}
+
+function renderProTrader() {
+  const data = protrader.data;
+  if (!data) return;
+  const generated = $('#protrader-generated-at');
+  const source = $('#protrader-source');
+  const posture = $('#protrader-posture');
+  const regime = $('#protrader-regime');
+  const counts = $('#protrader-daily-counts');
+  const text = $('#protrader-conclusion-text');
+  if (generated) generated.textContent = data.generated_at || '—';
+  if (source) source.textContent = data.source || '—';
+  if (posture) {
+    const p = String(data.market_posture || 'mixed').toUpperCase();
+    const cls = p === 'RISK-ON' ? 'success' : p === 'RISK-OFF' ? 'danger' : 'warning';
+    posture.className = `pill-badge ${cls}`;
+    posture.textContent = `Posture: ${p}`;
+  }
+  if (regime) {
+    regime.className = 'pill-badge neutral';
+    regime.textContent = `Regime: ${data.regime_label || '—'}`;
+  }
+  if (counts) {
+    counts.className = 'pill-badge neutral mono';
+    counts.textContent = `Daily ${data.daily_bullish}/${data.daily_bearish}/${data.daily_neutral} (B/Bear/N)`;
+  }
+  if (text) text.textContent = data.conclusion || 'No conclusion available.';
+  const optHead = $('#protrader-options-head');
+  const stkHead = $('#protrader-stocks-head');
+  if (optHead) optHead.textContent = `Options actions (${(data.options_recommendations || []).length})`;
+  if (stkHead) stkHead.textContent = `Stock actions (${(data.stocks_recommendations || []).length})`;
+  _renderProTraderRows(data.options_recommendations || [], $('#protrader-options-body'), { isOptions: true });
+  _renderProTraderRows(data.stocks_recommendations || [], $('#protrader-stocks-body'), { isOptions: false });
+}
+
+async function loadProTraderConclusion({ forceRefresh = false } = {}) {
+  const reqId = ++protrader._reqId;
+  const refreshBtn = $('#protrader-refresh');
+  const oBody = $('#protrader-options-body');
+  const sBody = $('#protrader-stocks-body');
+  const txt = $('#protrader-conclusion-text');
+  if (refreshBtn) refreshBtn.classList.add('refreshing');
+  if (txt && !protrader.data) txt.textContent = 'Computing Adrian_ProTrader conclusion…';
+  if (oBody && !protrader.data) oBody.innerHTML = '<tr><td colspan="10" class="loading">Computing options recommendations…</td></tr>';
+  if (sBody && !protrader.data) sBody.innerHTML = '<tr><td colspan="9" class="loading">Computing stock recommendations…</td></tr>';
+  try {
+    const payload = await api(`/api/protrader/conclusion?limit=8${forceRefresh ? '&refresh=1' : ''}`);
+    if (reqId !== protrader._reqId) return;
+    protrader.data = payload;
+    renderProTrader();
+  } catch (e) {
+    if (reqId !== protrader._reqId) return;
+    const msg = escapeHtml(String(e));
+    if (txt) txt.innerHTML = `Failed: ${msg}`;
+    if (oBody) oBody.innerHTML = `<tr><td colspan="10" class="loading">Failed: ${msg}</td></tr>`;
+    if (sBody) sBody.innerHTML = `<tr><td colspan="9" class="loading">Failed: ${msg}</td></tr>`;
+  } finally {
+    if (refreshBtn) refreshBtn.classList.remove('refreshing');
   }
 }
 
@@ -4719,6 +4865,40 @@ function renderVerdictFactors(factors) {
   );
 }
 
+function analystDataIntegrity(report) {
+  const src = String(report?.source || '').toLowerCase();
+  const warns = Array.isArray(report?.signal_warnings) ? report.signal_warnings : [];
+  const shortHistory = warns.some((w) =>
+    String(w || '').toLowerCase().includes('limited live history')
+  );
+  if (src === 'synthetic') {
+    return {
+      label: 'SYNTHETIC',
+      tone: 'danger',
+      title: 'Synthetic history in use. Treat this signal as research-only.',
+    };
+  }
+  if (src === 'tradier' || src === 'yfinance') {
+    if (shortHistory) {
+      return {
+        label: 'LIVE · SHORT',
+        tone: 'warning',
+        title: 'Live feed is active, but history is still short for this symbol/timeframe.',
+      };
+    }
+    return {
+      label: 'LIVE',
+      tone: 'success',
+      title: 'Live provider data with normal history depth.',
+    };
+  }
+  return {
+    label: 'DEGRADED',
+    tone: 'warning',
+    title: 'Data source quality is degraded or unknown.',
+  };
+}
+
 function renderAnalystSurface(r, tickerD, surface = 'analyst') {
   const root = surface === 'stocks' ? $('#stocks-report') : $('#analyst-report');
   root.innerHTML = '';
@@ -4726,6 +4906,7 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
   const viewKey = surface === 'stocks' ? 'data-stocks-view' : 'data-analyst-view';
   const chState = surface === 'stocks' ? state.stocksChart : state.analystChart;
   const chartTarget = surface === 'stocks' ? 'stocks' : 'analyst';
+  const dataIntegrity = analystDataIntegrity(r);
 
   // Hero
   root.append(
@@ -4834,6 +5015,17 @@ function renderAnalystSurface(r, tickerD, surface = 'analyst') {
         ),
         heroMetaCard(r.timeframe.toUpperCase(), 'Timeframe'),
         heroMetaCard(r.source, 'Source'),
+        heroMetaCard(
+          h(
+            'span',
+            {
+              class: `pill-badge ${dataIntegrity.tone}`,
+              title: dataIntegrity.title,
+            },
+            dataIntegrity.label,
+          ),
+          'Data quality',
+        ),
       )
     )
   );
@@ -6355,6 +6547,9 @@ async function refreshAll({ reason = 'manual' } = {}) {
       }
       loadStocksOverview();
       if (stocks.activeSymbol) loadStocksReport(stocks.activeSymbol);
+    }
+    if (state.view === 'protrader' || protrader.initialized) {
+      await loadProTraderConclusion({ forceRefresh: reason === 'manual' });
     }
     // Re-check LLM health on every refresh so the badge recovers from
     // transient errors (e.g. right after the user adds credits).

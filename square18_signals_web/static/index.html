@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Sianna Financials — Stocks &amp; Options Analyzer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=sianna-move-alerts-simple-30" />
+    <link rel="stylesheet" href="/static/styles.css?v=sianna-adrian-protrader-35" />
   </head>
   <body>
     <div
@@ -53,6 +53,9 @@
         </button>
         <button class="tab" data-view="pmalerts" role="tab" aria-selected="false">
           Move Alerts
+        </button>
+        <button class="tab" data-view="protrader" role="tab" aria-selected="false">
+          Adrian_ProTrader
         </button>
       </nav>
 
@@ -900,6 +903,91 @@
           </div>
         </div>
       </section>
+
+      <!-- Adrian_ProTrader view -->
+      <section class="view view-protrader hidden" data-view="protrader">
+        <div class="analyst-header">
+          <div>
+            <h1 class="analyst-title">Adrian_ProTrader</h1>
+            <div class="analyst-sub">
+              Expert daily synthesis across Dashboard, Stocks, Move Alerts, and Analyst
+              (1H/4H/Daily/Weekly) to produce actionable buy/sell recommendations.
+              Source: <span id="protrader-source" class="mono">—</span>.
+            </div>
+          </div>
+          <div class="analyst-header-right">
+            <button class="btn-ghost" id="protrader-refresh" type="button">Refresh conclusion</button>
+          </div>
+        </div>
+
+        <div class="card protrader-conclusion-card">
+          <div class="card-header">
+            <span class="card-title">Today&apos;s conclusion</span>
+            <span class="card-trail mono" id="protrader-generated-at">—</span>
+          </div>
+          <div class="card-body">
+            <div class="protrader-meta">
+              <span class="pill-badge neutral" id="protrader-posture">—</span>
+              <span class="pill-badge neutral" id="protrader-regime">—</span>
+              <span class="pill-badge neutral" id="protrader-daily-counts">—</span>
+            </div>
+            <div class="protrader-conclusion-text" id="protrader-conclusion-text">
+              Loading Adrian_ProTrader conclusion…
+            </div>
+          </div>
+        </div>
+
+        <div class="protrader-grid">
+          <div class="table-wrap">
+            <div class="analyst-top-picks mono muted" id="protrader-options-head">
+              Options actions for today
+            </div>
+            <table class="data-table" id="protrader-options-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Action</th>
+                  <th>Auto</th>
+                  <th>Data</th>
+                  <th>Contract</th>
+                  <th class="num">Confidence</th>
+                  <th class="num">Quality</th>
+                  <th class="num">R/R</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                </tr>
+              </thead>
+              <tbody id="protrader-options-body">
+                <tr><td colspan="10" class="loading">Computing options recommendations…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-wrap">
+            <div class="analyst-top-picks mono muted" id="protrader-stocks-head">
+              Stock actions for today
+            </div>
+            <table class="data-table" id="protrader-stocks-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Action</th>
+                  <th>Auto</th>
+                  <th>Data</th>
+                  <th>Side</th>
+                  <th class="num">Confidence</th>
+                  <th class="num">Quality</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                </tr>
+              </thead>
+              <tbody id="protrader-stocks-body">
+                <tr><td colspan="9" class="loading">Computing stock recommendations…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </main>
 
     <footer class="footer">
@@ -999,6 +1087,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=sianna-top-picks-34" defer></script>
+    <script src="/static/app.js?v=sianna-adrian-protrader-35" defer></script>
   </body>
 </html>

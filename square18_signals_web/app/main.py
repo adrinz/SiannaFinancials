@@ -6,6 +6,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, Response
@@ -418,6 +419,299 @@ class NewsImpactFeedOut(BaseModel):
     source: str
 
 
+class ProTraderRecommendationOut(BaseModel):
+    symbol: str
+    name: str
+    sector: str
+    instrument: str  # OPTION | STOCK
+    action: str  # BUY | SELL
+    side: str  # CALL | PUT | LONG | REDUCE
+    auto_action: str  # BUY_NOW | WATCH | REDUCE_NOW | HOLD
+    data_integrity: str  # LIVE | DEGRADED | SYNTHETIC
+    timeframe_alignment: str
+    confidence_score: int  # 0..100
+    short_hold_quality: int | None = None
+    risk_reward: float | None = None
+    strike: float | None = None
+    expiry_date: str | None = None
+    entry_plan: str
+    exit_plan: str
+    reason: str
+    catalyst: str = ""
+    data_note: str = ""
+
+
+class ProTraderConclusionOut(BaseModel):
+    agent: str
+    generated_at: str
+    regime_label: str
+    market_posture: str
+    conclusion: str
+    daily_bullish: int
+    daily_bearish: int
+    daily_neutral: int
+    options_recommendations: list[ProTraderRecommendationOut]
+    stocks_recommendations: list[ProTraderRecommendationOut]
+    watchlist: list[str]
+    source: str
+
+
+def _verdict_dir(v: str) -> int:
+    vv = str(v or "").upper()
+    if vv == "BULLISH":
+        return 1
+    if vv == "BEARISH":
+        return -1
+    return 0
+
+
+def _tf_alignment_text(raw: float) -> str:
+    if raw >= 0.55:
+        return "1H/4H/Daily/Weekly strongly aligned bullish"
+    if raw >= 0.30:
+        return "multi-timeframe bullish alignment"
+    if raw <= -0.55:
+        return "1H/4H/Daily/Weekly strongly aligned bearish"
+    if raw <= -0.30:
+        return "multi-timeframe bearish alignment"
+    return "mixed cross-timeframe setup"
+
+
+def _data_integrity_from_source(source: str) -> tuple[str, str]:
+    src = str(source or "").lower()
+    if "synthetic" in src:
+        return (
+            "SYNTHETIC",
+            "Synthetic history in use. Treat signals as research-only, not execution-grade.",
+        )
+    if src in {"tradier", "yfinance"}:
+        return ("LIVE", "")
+    return (
+        "DEGRADED",
+        "Data source is degraded/unknown. Confirm with broker chart before executing.",
+    )
+
+
+def _protrader_auto_action(
+    action: str, confidence: int, align_raw: float, data_integrity: str
+) -> str:
+    act = str(action or "").upper()
+    di = str(data_integrity or "").upper()
+    if act == "BUY" and di in {"DEGRADED", "SYNTHETIC"}:
+        # Hard safety: never emit BUY_NOW when data quality is not live.
+        return "WATCH"
+    if act == "BUY" and confidence >= 75 and abs(align_raw) >= 0.55:
+        return "BUY_NOW"
+    if act == "BUY" and confidence >= 60:
+        return "WATCH"
+    if act == "SELL" and confidence >= 70:
+        return "REDUCE_NOW"
+    return "HOLD"
+
+
+def _protrader_build(refresh: bool = False, limit: int = 8) -> ProTraderConclusionOut:
+    # Analyst is the primary engine; this layer synthesizes all tab signals into
+    # day-trade actions with explicit entry/exit text.
+    tf_rows: dict[str, list[OverviewRow]] = {}
+    for tf in ("1h", "4h", "daily", "weekly"):
+        if refresh:
+            tf_rows[tf] = overview_rows(tf, fresh=True)  # type: ignore[arg-type]
+        else:
+            tf_rows[tf] = overview_rows_fast(tf)  # type: ignore[arg-type]
+
+    daily_rows = tf_rows.get("daily", [])
+    by_tf_symbol: dict[str, dict[str, OverviewRow]] = {
+        tf: {r.symbol: r for r in rows} for tf, rows in tf_rows.items()
+    }
+
+    regime = regime_envelope(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
+    regime_label = regime.regime.label
+    if "risk-on" in regime_label.lower():
+        posture = "risk-on"
+    elif "risk-off" in regime_label.lower():
+        posture = "risk-off"
+    else:
+        posture = "mixed"
+
+    pulse = _market.market_pulse("daily")
+    mover_shocks: dict[str, float] = {}
+    for m in list(pulse.top_gainers) + list(pulse.top_losers):
+        if abs(float(m.change_pct)) >= 3.0:
+            mover_shocks[m.symbol] = float(m.change_pct)
+
+    scan_symbols = [r.symbol for r in daily_rows[:30]]
+    news_rows = _market.news_impact_signals(scan_symbols, per_symbol=3, limit_total=80)
+    news_by_symbol: dict[str, Any] = {}
+    for n in news_rows:
+        prev = news_by_symbol.get(n.symbol)
+        if prev is None or n.impact_score > prev.impact_score:
+            news_by_symbol[n.symbol] = n
+
+    opt_recs: list[ProTraderRecommendationOut] = []
+    stk_recs: list[ProTraderRecommendationOut] = []
+
+    weights = {"1h": 0.15, "4h": 0.30, "daily": 0.40, "weekly": 0.15}
+    sorted_daily = sorted(
+        daily_rows,
+        key=lambda r: (int(r.short_hold_quality or 0), float(r.conviction or 0.0)),
+        reverse=True,
+    )
+    for d in sorted_daily:
+        t1 = by_tf_symbol.get("1h", {}).get(d.symbol)
+        t4 = by_tf_symbol.get("4h", {}).get(d.symbol)
+        tw = by_tf_symbol.get("weekly", {}).get(d.symbol)
+        rows_for_align = {"1h": t1, "4h": t4, "daily": d, "weekly": tw}
+        align_raw = 0.0
+        for tf, row in rows_for_align.items():
+            if row is None:
+                continue
+            direction = _verdict_dir(row.verdict)
+            conf = max(0.2, min(1.0, float(row.conviction)))
+            align_raw += weights[tf] * direction * (0.45 + conf * 0.55)
+        align_txt = _tf_alignment_text(align_raw)
+        align_score = int(max(0, min(100, round((align_raw + 1.0) * 50.0))))
+        quality = int(d.short_hold_quality or 0)
+        rr = float(d.rec_risk_reward) if d.rec_risk_reward is not None else None
+        action = str(d.short_hold_action or "WAIT").upper()
+        side = str(d.rec_contract_type or "call").upper()
+
+        catalyst = ""
+        news = news_by_symbol.get(d.symbol)
+        if news is not None:
+            catalyst = f"News catalyst {news.direction} ({news.impact_score:.1f}/10): {news.reason}"
+        elif d.symbol in mover_shocks:
+            catalyst = f"Move alert context: latest bar {mover_shocks[d.symbol]:+.1f}%"
+
+        bullish_align = align_raw >= 0.30
+        bearish_align = align_raw <= -0.30
+        side_align = (side == "CALL" and bullish_align) or (side == "PUT" and bearish_align)
+        confidence = int(max(0, min(100, round(quality * 0.55 + align_score * 0.45))))
+        data_integrity, data_note = _data_integrity_from_source(d.source)
+
+        if action == "BUY" and quality >= 68 and side_align:
+            auto_action = _protrader_auto_action("BUY", confidence, align_raw, data_integrity)
+            opt_recs.append(
+                ProTraderRecommendationOut(
+                    symbol=d.symbol,
+                    name=d.name,
+                    sector=d.sector,
+                    instrument="OPTION",
+                    action="BUY",
+                    side=side,
+                    auto_action=auto_action,
+                    data_integrity=data_integrity,
+                    timeframe_alignment=align_txt,
+                    confidence_score=confidence,
+                    short_hold_quality=quality,
+                    risk_reward=rr,
+                    strike=d.rec_strike,
+                    expiry_date=d.rec_expiry_date,
+                    entry_plan=d.short_hold_entry,
+                    exit_plan=d.short_hold_sell_plan,
+                    reason=(
+                        f"Analyst short-hold score {quality}/100 with {align_txt}; "
+                        f"Daily verdict {d.verdict}, conviction {d.conviction:.2f}."
+                    ),
+                    catalyst=catalyst,
+                    data_note=data_note,
+                )
+            )
+
+        if bullish_align and d.verdict == "BULLISH" and d.conviction >= 0.45 and quality >= 58:
+            stk_conf = int(max(0, min(100, round(align_score * 0.6 + d.conviction * 40.0))))
+            auto_action = _protrader_auto_action("BUY", stk_conf, align_raw, data_integrity)
+            stk_recs.append(
+                ProTraderRecommendationOut(
+                    symbol=d.symbol,
+                    name=d.name,
+                    sector=d.sector,
+                    instrument="STOCK",
+                    action="BUY",
+                    side="LONG",
+                    auto_action=auto_action,
+                    data_integrity=data_integrity,
+                    timeframe_alignment=align_txt,
+                    confidence_score=stk_conf,
+                    short_hold_quality=quality,
+                    risk_reward=rr,
+                    entry_plan=(
+                        "Scale in only if Daily+4H stay bullish and 1H confirms."
+                    ),
+                    exit_plan=(
+                        "Trim into strength at +2% to +4%; cut if momentum invalidates "
+                        "or the setup downgrades to AVOID."
+                    ),
+                    reason=(
+                        f"Directional stock continuation candidate with {align_txt}; "
+                        f"Daily composite {d.composite_score:+.2f}."
+                    ),
+                    catalyst=catalyst,
+                    data_note=data_note,
+                )
+            )
+        elif bearish_align and (d.verdict == "BEARISH" or quality < 45):
+            stk_conf = int(max(0, min(100, round(align_score * 0.6 + (100 - quality) * 0.4))))
+            auto_action = _protrader_auto_action("SELL", stk_conf, align_raw, data_integrity)
+            stk_recs.append(
+                ProTraderRecommendationOut(
+                    symbol=d.symbol,
+                    name=d.name,
+                    sector=d.sector,
+                    instrument="STOCK",
+                    action="SELL",
+                    side="REDUCE",
+                    auto_action=auto_action,
+                    data_integrity=data_integrity,
+                    timeframe_alignment=align_txt,
+                    confidence_score=stk_conf,
+                    short_hold_quality=quality,
+                    risk_reward=rr,
+                    entry_plan=(
+                        "Use bounces to reduce long exposure while 4H and Daily stay weak."
+                    ),
+                    exit_plan=(
+                        "Avoid averaging down until signal quality recovers to WAIT/BUY "
+                        "with momentum confirmation."
+                    ),
+                    reason=(
+                        f"Defensive stock action: {align_txt}; Daily verdict {d.verdict} "
+                        f"with short-hold quality {quality}/100."
+                    ),
+                    catalyst=catalyst,
+                    data_note=data_note,
+                )
+            )
+
+    opt_recs = sorted(opt_recs, key=lambda x: x.confidence_score, reverse=True)[:max(1, limit)]
+    stk_recs = sorted(stk_recs, key=lambda x: x.confidence_score, reverse=True)[:max(1, limit)]
+
+    watchlist = [r.symbol for r in sorted_daily[:12]]
+    daily_bull = sum(1 for r in daily_rows if r.verdict == "BULLISH")
+    daily_bear = sum(1 for r in daily_rows if r.verdict == "BEARISH")
+    daily_neu = sum(1 for r in daily_rows if r.verdict == "NEUTRAL")
+    conclusion = (
+        f"Adrian_ProTrader posture is {posture.upper()} ({regime_label}). "
+        f"Daily tape: {daily_bull} bullish / {daily_bear} bearish / {daily_neu} neutral. "
+        f"Actionable ideas today: {len(opt_recs)} option setups and {len(stk_recs)} stock actions. "
+        "Prioritize entries only when Daily+4H align and avoid forced trades in mixed momentum."
+    )
+
+    return ProTraderConclusionOut(
+        agent="Adrian_ProTrader",
+        generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        regime_label=regime_label,
+        market_posture=posture,
+        conclusion=conclusion,
+        daily_bullish=daily_bull,
+        daily_bearish=daily_bear,
+        daily_neutral=daily_neu,
+        options_recommendations=opt_recs,
+        stocks_recommendations=stk_recs,
+        watchlist=watchlist,
+        source="dashboard+stocks+move-alerts+analyst-mtf",
+    )
+
+
 @app.get("/api/market/pulse", response_model=MarketPulseOut, tags=["dashboard"])
 def get_market_pulse(timeframe: str = "daily") -> MarketPulseOut:
     if timeframe not in _ALLOWED_TIMEFRAMES:
@@ -494,6 +788,23 @@ def get_news_impact(
         scanned_symbols=len(syms),
         source="ticker-news-impact",
     )
+
+
+@app.get("/api/protrader/conclusion", response_model=ProTraderConclusionOut, tags=["analyst"])
+def get_protrader_conclusion(
+    refresh: bool = Query(
+        False,
+        description=(
+            "When true, force blocking multi-timeframe rebuild before generating "
+            "Adrian_ProTrader conclusions."
+        ),
+    ),
+    limit: int = Query(8, ge=3, le=20),
+) -> ProTraderConclusionOut:
+    try:
+        return _protrader_build(refresh=refresh, limit=limit)
+    except Exception as e:
+        raise HTTPException(500, f"protrader build failed: {e}")
 
 
 # ---------------------------------------------------------------------------

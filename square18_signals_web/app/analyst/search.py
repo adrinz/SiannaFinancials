@@ -83,6 +83,7 @@ _NAME_ALIASES: dict[str, str] = {
     "coinbase": "COIN",
     "exxon": "XOM", "exxon mobil": "XOM",
     "palo alto": "PANW", "palo alto networks": "PANW",
+    "spcx": "SPCX", "spacex": "SPCX", "space x": "SPCX", "space exploration technologies": "SPCX",
     "oracle": "ORCL",
     "ibm": "IBM", "international business machines": "IBM",
     "berkshire": "BRK-B", "berkshire hathaway": "BRK-B",
